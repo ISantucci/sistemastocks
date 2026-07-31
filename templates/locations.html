@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block title %}Ubicaciones · TNGStocks{% endblock %}
+{% block page_title %}Ubicaciones{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div><h2>Ubicaciones</h2><p>Depósitos, camionetas, equipos y externas.</p></div>
+  {% if me and me.role == "ADMIN" %}
+    <button type="button" class="btn btn-primary" onclick="openModal('modal-loc-new')">+ Nueva ubicación</button>
+  {% endif %}
+</div>
+
+<div class="table-card">
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th class="num"><a href="{{ url_for('locations', sort_by='id', sort_dir='desc' if selected_sort_by == 'id' and selected_sort_dir == 'asc' else 'asc') }}">ID{% if selected_sort_by == 'id' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th><a href="{{ url_for('locations', sort_by='name', sort_dir='desc' if selected_sort_by == 'name' and selected_sort_dir == 'asc' else 'asc') }}">Nombre{% if selected_sort_by == 'name' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th><a href="{{ url_for('locations', sort_by='description', sort_dir='desc' if selected_sort_by == 'description' and selected_sort_dir == 'asc' else 'asc') }}">Descripción{% if selected_sort_by == 'description' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th><a href="{{ url_for('locations', sort_by='is_truck', sort_dir='desc' if selected_sort_by == 'is_truck' and selected_sort_dir == 'asc' else 'asc') }}">Especificación{% if selected_sort_by == 'is_truck' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th>Responsable</th>
+          {% if me and me.role == "ADMIN" %}<th>Acciones</th>{% endif %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for loc in locations %}
+        <tr>
+          <td class="num">{{ loc.id }}</td>
+          <td>{{ loc.name }}</td>
+          <td>{{ loc.description or "" }}</td>
+          <td>
+            {% if loc.is_external %}<span class="badge badge-neutral">Externa</span>
+            {% elif loc.is_truck %}<span class="badge badge-accent">Camioneta</span>
+            {% else %}<span class="badge badge-ok">Interna</span>{% endif %}
+          </td>
+          <td>
+            {% if loc.responsibles %}
+              {% for lr in loc.responsibles %}{{ lr.user.full_name or lr.user.username }}{% if not loop.last %}, {% endif %}{% endfor %}
+            {% else %}-{% endif %}
+          </td>
+          {% if me and me.role == "ADMIN" %}
+          <td class="actions-cell"><button type="button" class="btn btn-secondary btn-sm" onclick="openModal('modal-loc-{{ loc.id }}')">Editar</button></td>
+          {% endif %}
+        </tr>
+        {% else %}
+        <tr><td colspan="{% if me and me.role == 'ADMIN' %}6{% else %}5{% endif %}" class="muted">Sin ubicaciones.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% if me and me.role == "ADMIN" %}
+<!-- Modal: nueva ubicacion -->
+<div class="modal-overlay" id="modal-loc-new">
+  <div class="modal">
+    <div class="modal-header"><span class="modal-title">Nueva ubicación</span><button type="button" class="modal-close" onclick="closeModal('modal-loc-new')">&times;</button></div>
+    <form method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <div class="modal-body">
+        <div class="field"><label>Nombre</label><input name="name" required></div>
+        {% if me and me.role == "ADMIN" %}
+        <div class="field"><label class="check-inline"><input type="checkbox" name="is_external"> Ubicación externa (Proveedor / Baja)</label></div>
+        {% endif %}
+        <div class="field"><label>Descripción</label><input name="description"></div>
+        <div class="field"><label>Responsables (Ctrl+clic para varios)</label>
+          <select name="responsible_user_ids" multiple size="5">
+            {% for u in users %}<option value="{{ u.id }}">{{ u.full_name or u.username }}</option>{% endfor %}
+          </select>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-loc-new')">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modales: editar ubicacion -->
+{% for loc in locations %}
+{% set resp_ids = loc.responsibles|map(attribute='user.id')|list %}
+<div class="modal-overlay" id="modal-loc-{{ loc.id }}">
+  <div class="modal">
+    <div class="modal-header"><span class="modal-title">Editar ubicación</span><button type="button" class="modal-close" onclick="closeModal('modal-loc-{{ loc.id }}')">&times;</button></div>
+    <form method="post" action="{{ url_for('location_edit', loc_id=loc.id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <div class="modal-body">
+        <div class="field"><label>Nombre</label><input name="name" value="{{ loc.name }}" required></div>
+        <div class="field"><label>Descripción</label><input name="description" value="{{ loc.description or '' }}"></div>
+        <div class="field"><label class="check-inline"><input type="checkbox" name="is_external" {% if loc.is_external %}checked{% endif %}> Ubicación externa</label></div>
+        <div class="field"><label class="check-inline"><input type="checkbox" name="is_truck" value="1" {% if loc.is_truck %}checked{% endif %}> Es camioneta (Truck)</label></div>
+        <div class="field"><label>Responsables (Ctrl+clic para varios)</label>
+          <select name="responsible_user_ids" multiple size="6">
+            {% for u in users %}<option value="{{ u.id }}" {% if u.id in resp_ids %}selected{% endif %}>{{ u.full_name or u.username }}</option>{% endfor %}
+          </select>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-loc-{{ loc.id }}')">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar cambios</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endfor %}
+{% endif %}
+{% endblock %}

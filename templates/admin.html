@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Admin · TNGStocks{% endblock %}
+{% block page_title %}Admin{% endblock %}
+{% block content %}
+<style>
+  .danger-card{border:1px solid #e5b3b3;background:#fff8f8;border-radius:12px;padding:16px;margin-bottom:14px;max-width:560px;}
+  .danger-card h3{margin:0 0 6px;color:#a40000;}
+  .danger-card .confirm-key{font-family:monospace;background:#fdeaea;padding:2px 6px;border-radius:4px;}
+</style>
+
+<div class="page-header"><div><h2>Admin</h2><p class="muted">Acciones sensibles — solo ADMIN. Cada operación hace backup automático antes de tocar nada.</p></div></div>
+
+<div class="card">
+  <div class="card-header"><span class="card-title">Herramientas</span></div>
+  <div style="display:flex; flex-wrap:wrap; gap:12px;">
+    <a href="{{ url_for('admin_adjust_stock') }}" class="btn btn-secondary">Ajustar stock (+ / -)</a>
+    <a href="{{ url_for('import_items') }}" class="btn btn-secondary">Importar ítems (CSV)</a>
+    <form method="post" action="{{ url_for('admin_backup_db') }}" onsubmit="return confirm('Se generará un backup de la base actual. ¿Continuar?');" style="margin:0;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button type="submit" class="btn btn-secondary">Backup base</button>
+    </form>
+  </div>
+</div>
+
+<div class="page-header" style="margin-top:8px;"><div><h2 style="font-size:16px; color:#a40000;">Zona peligrosa</h2><p class="muted">Para confirmar hay que tipear exactamente la palabra clave. Queda registro en <code>logs/destructive_ops.log</code>.</p></div></div>
+
+<div class="danger-card">
+  <h3>Limpiar stock</h3>
+  <p class="muted">Conserva items, categorías, usuarios y ubicaciones. Elimina stock, movimientos, remitos y pendientes.</p>
+  <form method="post" action="{{ url_for('admin_clear_stock') }}" onsubmit="return confirm('Esto eliminará stock, movimientos, remitos y pendientes. ¿Continuar?');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="field" style="max-width:320px;">
+      <label>Para confirmar, escribí <span class="confirm-key">BORRAR-STOCK</span>:</label>
+      <input type="text" name="confirm_text" required autocomplete="off" />
+    </div>
+    <div style="margin-top:10px;"><button type="submit" class="btn btn-danger">Limpiar stock</button></div>
+  </form>
+</div>
+
+<div class="danger-card">
+  <h3>Limpiar items</h3>
+  <p class="muted">Además del stock, borra el catálogo de items.</p>
+  <form method="post" action="{{ url_for('admin_clear_items') }}" onsubmit="return confirm('Esto eliminará items, stock, movimientos, remitos y pendientes. ¿Continuar?');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="field" style="max-width:320px;">
+      <label>Para confirmar, escribí <span class="confirm-key">BORRAR-ITEMS</span>:</label>
+      <input type="text" name="confirm_text" required autocomplete="off" />
+    </div>
+    <div style="margin-top:10px;"><button type="submit" class="btn btn-danger">Limpiar items</button></div>
+  </form>
+</div>
+
+<div class="danger-card" style="border-color:#c77;">
+  <h3>Reiniciar base</h3>
+  <p class="muted">Destruye todo: items, stock, movimientos, usuarios, ubicaciones. Requiere <code>ENABLE_RESET_DB=true</code> en el entorno.</p>
+  <form method="post" action="{{ url_for('admin_reset_db') }}" onsubmit="return confirm('¿Seguro que querés reiniciar la base? Se perderán datos.');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="field" style="max-width:320px;">
+      <label>Para confirmar, escribí <span class="confirm-key">RESET-DB</span>:</label>
+      <input type="text" name="confirm_text" required autocomplete="off" />
+    </div>
+    <div style="margin-top:10px;"><button type="submit" class="btn btn-danger">Reiniciar base</button></div>
+  </form>
+</div>
+
+<div class="card">
+  <div class="card-header"><span class="card-title">Notas</span></div>
+  <ul class="muted" style="margin:0 0 0 18px; line-height:1.8;">
+    <li><b>Ajustar stock</b> crea un movimiento tipo <code>AJUSTE</code> (queda trazabilidad).</li>
+    <li><b>Reiniciar base</b> borra la base local y la vuelve a crear. Solo para entornos de prueba.</li>
+    <li>Los backups quedan en <code>backups/</code> y el log en <code>logs/destructive_ops.log</code>.</li>
+  </ul>
+</div>
+{% endblock %}

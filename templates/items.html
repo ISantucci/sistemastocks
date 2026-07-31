@@ -1,0 +1,206 @@
+{% extends "base.html" %}
+{% block title %}Ítems · TNGStocks{% endblock %}
+{% block page_title %}Ítems{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div><h2>Ítems</h2><p>Catálogo de ítems del sistema.</p></div>
+  {% if me and me.role == "ADMIN" %}
+    <button type="button" class="btn btn-primary" onclick="openModal('modal-item-new')">+ Nuevo ítem</button>
+  {% endif %}
+</div>
+
+<div class="card">
+  <form method="get" class="filters-grid">
+    <div class="field">
+      <label>Categoría</label>
+      <select name="category_id" class="js-buscar">
+        <option value="">Todas</option>
+        {% for c in categories %}
+          <option value="{{ c.id }}" {% if selected_category_id == c.id|string %}selected{% endif %}>{{ c.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label>Rastreable</label>
+      <select name="trackable">
+        <option value="" {% if selected_trackable == "" %}selected{% endif %}>Todos</option>
+        <option value="1" {% if selected_trackable == "1" %}selected{% endif %}>Sí</option>
+        <option value="0" {% if selected_trackable == "0" %}selected{% endif %}>No</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Buscar ítem</label>
+      <select name="item_id" class="js-buscar">
+        <option value="">Todos</option>
+        {% for it in all_items %}
+          <option value="{{ it.id }}" {% if selected_item_id and (selected_item_id|string) == (it.id|string) %}selected{% endif %}>{{ it.code }} - {{ it.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <input type="hidden" name="sort_by" value="{{ selected_sort_by or 'code' }}">
+    <input type="hidden" name="sort_dir" value="{{ selected_sort_dir or 'asc' }}">
+    <div class="field-actions">
+      <button type="submit" class="btn btn-primary">Filtrar</button>
+      <a href="{{ url_for('items') }}" class="btn btn-secondary">Limpiar</a>
+    </div>
+  </form>
+</div>
+
+<div class="table-card">
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th><a href="{{ url_for('items', category_id=selected_category_id, trackable=selected_trackable, q=selected_q, item_id=selected_item_id, sort_by='code', sort_dir='desc' if selected_sort_by == 'code' and selected_sort_dir == 'asc' else 'asc') }}">Código{% if selected_sort_by == 'code' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th><a href="{{ url_for('items', category_id=selected_category_id, trackable=selected_trackable, q=selected_q, item_id=selected_item_id, sort_by='name', sort_dir='desc' if selected_sort_by == 'name' and selected_sort_dir == 'asc' else 'asc') }}">Nombre{% if selected_sort_by == 'name' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th><a href="{{ url_for('items', category_id=selected_category_id, trackable=selected_trackable, q=selected_q, item_id=selected_item_id, sort_by='category', sort_dir='desc' if selected_sort_by == 'category' and selected_sort_dir == 'asc' else 'asc') }}">Categoría{% if selected_sort_by == 'category' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th><a href="{{ url_for('items', category_id=selected_category_id, trackable=selected_trackable, q=selected_q, item_id=selected_item_id, sort_by='trackable', sort_dir='desc' if selected_sort_by == 'trackable' and selected_sort_dir == 'asc' else 'asc') }}">Rastreable{% if selected_sort_by == 'trackable' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th class="num"><a href="{{ url_for('items', category_id=selected_category_id, trackable=selected_trackable, q=selected_q, item_id=selected_item_id, sort_by='stock_min', sort_dir='desc' if selected_sort_by == 'stock_min' and selected_sort_dir == 'asc' else 'asc') }}">Stock seg.{% if selected_sort_by == 'stock_min' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th><a href="{{ url_for('items', category_id=selected_category_id, trackable=selected_trackable, q=selected_q, item_id=selected_item_id, sort_by='description', sort_dir='desc' if selected_sort_by == 'description' and selected_sort_dir == 'asc' else 'asc') }}">Descripción{% if selected_sort_by == 'description' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th><a href="{{ url_for('items', category_id=selected_category_id, trackable=selected_trackable, q=selected_q, item_id=selected_item_id, sort_by='is_active', sort_dir='desc' if selected_sort_by == 'is_active' and selected_sort_dir == 'asc' else 'asc') }}">Activo{% if selected_sort_by == 'is_active' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th>Link de referencia</th>
+          {% if me and me.role == "ADMIN" %}<th>Acciones</th>{% endif %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for it in items %}
+        <tr {% if not it.is_active %}class="row-inactive"{% endif %}>
+          <td>{{ it.code }}</td>
+          <td>{{ it.name }}</td>
+          <td>{{ it.category.name }}</td>
+          <td>{{ "Sí" if it.trackable else "No" }}</td>
+          <td class="num">{{ "-" if it.trackable else it.stock_min }}</td>
+          <td>{{ it.description or "" }}</td>
+          <td>{% if it.is_active %}<span class="badge badge-ok">Activo</span>{% else %}<span class="badge badge-danger">Inactivo</span>{% endif %}</td>
+          <td>{% if it.reference_link %}<a href="{{ it.reference_link }}" target="_blank" rel="noopener noreferrer">Abrir</a>{% else %}—{% endif %}</td>
+          {% if me and me.role == "ADMIN" %}
+          <td class="actions-cell"><button type="button" class="btn btn-secondary btn-sm" onclick="openModal('modal-item-{{ it.id }}')">Editar</button></td>
+          {% endif %}
+        </tr>
+        {% else %}
+        <tr><td colspan="{% if me and me.role == 'ADMIN' %}9{% else %}8{% endif %}" class="muted">Sin ítems.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% if me and me.role == "ADMIN" %}
+<!-- Modal: nuevo item -->
+<div class="modal-overlay" id="modal-item-new">
+  <div class="modal">
+    <div class="modal-header"><span class="modal-title">Nuevo ítem</span><button type="button" class="modal-close" onclick="closeModal('modal-item-new')">&times;</button></div>
+    <form method="post" action="{{ url_for('item_new') }}" id="form-item-new">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <div class="modal-body">
+        <div class="flash-error" id="item-new-error" style="display:none;margin-bottom:10px;"></div>
+        <div class="field"><label>Categoría</label>
+          <select name="category_id" id="item_new_category" required onchange="updateItemCodePreview()">
+            <option value="" selected disabled>Elegí...</option>
+            {% for c in categories %}<option value="{{ c.id }}" data-next="{{ next_codes.get(c.id, '') }}">{{ c.name }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="field"><label>Código (automático)</label>
+          <input id="item_new_code_preview" value="" placeholder="Elegí una categoría" readonly disabled style="background:#eee;color:#666;">
+          <div class="muted">Se completa solo según la categoría. El definitivo se asigna al guardar.</div>
+        </div>
+        <div class="field"><label>Nombre</label><input name="name" required><div class="muted">No puede repetir el nombre de otro ítem.</div></div>
+        <div class="field"><label>Descripción (opcional)</label><input name="description"></div>
+        <div class="field"><label>Link de referencia</label><input type="url" name="reference_link" maxlength="500" placeholder="https://..."><div class="muted">Opcional. Link de referencia de compra.</div></div>
+        <div class="field"><label class="check-inline"><input type="checkbox" name="trackable"> Rastreable (únicos / seriales)</label></div>
+        <div class="field"><label>Stock de seguridad (solo NO rastreables)</label><input type="number" name="stock_min" min="0" value="0"><div class="muted">Si el ítem es rastreable, este valor se ignora.</div></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-item-new')">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modales: editar item -->
+{% for it in items %}
+<div class="modal-overlay" id="modal-item-{{ it.id }}">
+  <div class="modal">
+    <div class="modal-header"><span class="modal-title">Editar ítem</span><button type="button" class="modal-close" onclick="closeModal('modal-item-{{ it.id }}')">&times;</button></div>
+    <form method="post" action="{{ url_for('item_edit', item_id=it.id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <div class="modal-body">
+        <div class="field"><label>Código</label><input value="{{ it.code }}" readonly disabled style="background:#eee;color:#666;"><div class="muted">El código es automático y no se edita.</div></div>
+        <div class="field"><label>Nombre</label><input name="name" value="{{ it.name }}" required></div>
+        <div class="field"><label>Descripción</label><input name="description" value="{{ it.description or '' }}"></div>
+        <div class="field"><label>Link de referencia</label><input type="url" name="reference_link" maxlength="500" value="{{ it.reference_link or '' }}" placeholder="https://..."><div class="muted">Opcional. Dejar vacío para quitarlo.</div></div>
+        <div class="field"><label>Categoría</label>
+          <select disabled style="background:#eee;color:#666;">
+            {% for c in categories %}<option value="{{ c.id }}" {% if c.id == it.category_id %}selected{% endif %}>{{ c.name }}</option>{% endfor %}
+          </select>
+          <div class="muted">La categoría no se puede cambiar (el código depende de ella).</div>
+        </div>
+        <div class="field"><label class="check-inline"><input type="checkbox" name="trackable" {% if it.trackable %}checked{% endif %}> Rastreable (máx 1 por ubicación)</label></div>
+        <div class="field"><label>Stock de seguridad (solo NO rastreables)</label><input type="number" name="stock_min" min="0" value="{{ it.stock_min or 0 }}" {% if it.trackable %}disabled{% endif %}></div>
+        <div class="field"><label class="check-inline"><input type="checkbox" name="is_active" {% if it.is_active %}checked{% endif %}> Activo</label><div class="muted">Si lo desactivás, no aparece en formularios pero queda en históricos.</div></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-item-{{ it.id }}')">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar cambios</button>
+      </div>
+    </form>
+    {% if me and me.role == "ADMIN" %}
+    <form method="post" action="{{ url_for('item_delete', item_id=it.id) }}"
+          onsubmit="return confirm('¿Eliminar definitivamente el ítem {{ it.code }} - {{ it.name }}? No se puede deshacer. Solo funciona si el ítem no tiene historial (movimientos/pendientes/stock).');"
+          style="border-top:1px solid var(--border); padding:12px 16px;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button type="submit" class="btn btn-danger btn-sm">Eliminar ítem</button>
+      <span class="muted" style="margin-left:8px;">Borrado real. Si tiene historial, usá "Activo" para darlo de baja.</span>
+    </form>
+    {% endif %}
+  </div>
+</div>
+{% endfor %}
+{% endif %}
+
+<script>
+  function updateItemCodePreview() {
+    var sel = document.getElementById('item_new_category');
+    var out = document.getElementById('item_new_code_preview');
+    if (!sel || !out) return;
+    var opt = sel.options[sel.selectedIndex];
+    var next = opt ? (opt.getAttribute('data-next') || '') : '';
+    out.value = next || '(esta categoría no tiene prefijo asignado)';
+  }
+
+  // Alta de ítem por AJAX: si falla, el error se muestra dentro del modal
+  // sin recargar la página, así no se pierde lo cargado.
+  (function () {
+    var form = document.getElementById('form-item-new');
+    var errBox = document.getElementById('item-new-error');
+    if (!form) return;
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      if (errBox) { errBox.style.display = 'none'; errBox.textContent = ''; }
+      var btn = form.querySelector('button[type="submit"]');
+      if (btn) btn.disabled = true;
+      fetch(form.action, {
+        method: 'POST',
+        body: new FormData(form),
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        credentials: 'same-origin'
+      }).then(function (r) {
+        return r.json().then(function (data) { return { ok: r.ok, data: data }; });
+      }).then(function (res) {
+        if (res.ok && res.data && res.data.ok) {
+          window.location = res.data.redirect || "{{ url_for('items') }}";
+          return;
+        }
+        if (btn) btn.disabled = false;
+        var msg = (res.data && res.data.error) || 'No se pudo crear el ítem.';
+        if (errBox) { errBox.textContent = msg; errBox.style.display = ''; }
+      }).catch(function () {
+        // Si algo falla con el fetch, caemos al envío tradicional del form.
+        if (btn) btn.disabled = false;
+        form.submit();
+      });
+    });
+  })();
+</script>
+{% endblock %}

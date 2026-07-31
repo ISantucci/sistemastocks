@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block page_title %}Métricas{% endblock %}
+{% block extra_head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/metricas.css') }}">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+{% endblock %}
+{% block title %}Métricas · Camionetas{% endblock %}
+{% block content %}
+{% include "_metricas_head.html" %}
+<div class="page-header"><div><h2>Camionetas / Ubicaciones</h2><p>Vista consolidada por ubicación operativa. La etiqueta "camioneta" marca las ubicaciones con esa bandera cargada.</p></div></div>
+<div class="mx-panel">
+  <div class="mx-panel-title">Resumen por ubicación</div>
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead><tr><th>Ubicación</th><th class="num">Stock</th><th class="num">Consumo</th><th class="num">Descartes</th><th class="num">Movimientos</th></tr></thead>
+      <tbody>
+        {% for r in tabla %}
+        <tr>
+          <td>{{ r.name }}{% if r.is_truck %}<span class="badge-truck">camioneta</span>{% endif %}</td>
+          <td class="num">{{ r.stock }}</td><td class="num">{{ r.consumo }}</td>
+          <td class="num">{{ r.descartes }}</td><td class="num">{{ r.movimientos }}</td>
+        </tr>
+        {% else %}<tr><td colspan="5" class="muted">Sin ubicaciones operativas.</td></tr>{% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+<div class="mx-grid">
+  <div class="mx-panel"><div class="mx-panel-title">Stock actual por ubicación</div><div class="mx-chart tall"><canvas id="v_stock"></canvas></div></div>
+  <div class="mx-panel"><div class="mx-panel-title">Consumo por ubicación</div><div class="mx-chart tall"><canvas id="v_cons"></canvas></div></div>
+  <div class="mx-panel"><div class="mx-panel-title">Descartes por ubicación</div><div class="mx-chart"><canvas id="v_scrap"></canvas></div></div>
+  <div class="mx-panel"><div class="mx-panel-title">Pendientes por responsable</div><div class="mx-chart"><canvas id="v_pend"></canvas></div></div>
+</div>
+{% endblock %}
+{% block extra_scripts %}
+<script src="{{ url_for('static', filename='js/metricas.js') }}"></script>
+<script>
+MX.barH('v_stock', {{ stock_rows|map(attribute='label')|list|tojson }}, {{ stock_rows|map(attribute='value')|list|tojson }}, {tone:''});
+MX.barH('v_cons', {{ cons_rows|map(attribute='label')|list|tojson }}, {{ cons_rows|map(attribute='value')|list|tojson }}, {tone:''});
+MX.barH('v_scrap', {{ scrap_rows|map(attribute='label')|list|tojson }}, {{ scrap_rows|map(attribute='value')|list|tojson }}, {tone:'danger'});
+MX.barH('v_pend', {{ pend_rows|map(attribute='label')|list|tojson }}, {{ pend_rows|map(attribute='value')|list|tojson }}, {tone:'warn'});
+</script>
+{% endblock %}

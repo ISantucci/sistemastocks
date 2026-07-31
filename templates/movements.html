@@ -1,0 +1,285 @@
+{% extends "base.html" %}
+{% block title %}Movimientos · TNGStocks{% endblock %}
+{% block page_title %}Movimientos{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <h2>Movimientos</h2>
+    <p>Responsable: <b>{{ me.full_name }}</b></p>
+  </div>
+</div>
+
+{% if me.role != "LECTOR" %}
+<div class="card">
+  <div class="card-header"><span class="card-title">Registrar movimiento</span></div>
+  <form method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="form-grid">
+      <div class="field">
+        <label>Desde</label>
+        {% if is_tecnico %}
+          {% if tech_locations|length == 1 %}
+            <input type="text" value="{{ tech_locations[0].name }}" readonly disabled />
+            <input type="hidden" name="from_location_id" id="from_location_id" value="{{ tech_locations[0].id }}" />
+          {% else %}
+            <select name="from_location_id" id="from_location_id" required>
+              <option value="" selected disabled>Seleccionar ubicación...</option>
+              {% for loc in tech_locations %}
+                <option value="{{ loc.id }}">{{ loc.name }}</option>
+              {% endfor %}
+            </select>
+          {% endif %}
+        {% else %}
+          <select name="from_location_id" id="from_location_id" required>
+            <option value="" selected disabled>Seleccionar ubicación...</option>
+            {% for loc in locations %}
+              <option value="{{ loc.id }}">{{ loc.name }}</option>
+            {% endfor %}
+          </select>
+        {% endif %}
+      </div>
+
+      <div class="field">
+        <label>Hacia</label>
+        <select name="to_location_id" id="to_location_id" required>
+          <option value="" selected disabled>Seleccionar ubicación...</option>
+          {% for loc in locations %}
+            <option value="{{ loc.id }}">{{ loc.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+
+      <div class="field">
+        <label>Item <span class="muted" style="font-weight:400;">(según la ubicación de origen)</span></label>
+        <select name="item_id" id="item_id" required>
+          <option value="" selected disabled>Elegí la ubicación primero...</option>
+          {% for it in items %}
+            <option value="{{ it.id }}">{{ it.code }} - {{ it.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+
+      <div class="field">
+        <label>Cantidad</label>
+        <input type="number" name="qty" min="1" value="1" required />
+      </div>
+
+      <div class="field" id="scrap_reason_box" style="display:none;">
+        <label>Motivo de descarte</label>
+        <select name="scrap_reason">
+          <option value="">Seleccionar motivo...</option>
+          <option value="Irrecuperable">Irrecuperable</option>
+          <option value="Roto">Roto</option>
+          <option value="Vencido">Vencido</option>
+          <option value="Obsoleto">Obsoleto</option>
+          <option value="Otro">Otro</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label>Observación (opcional)</label>
+        <input name="observacion" placeholder="Ej: ingreso SD / instalación / SD dañada" />
+      </div>
+    </div>
+
+    {% if not is_tecnico %}
+    <div style="margin-top:14px;">
+      <label class="check-inline">
+        <input type="checkbox" id="generate_pending" name="generate_pending" value="1">
+        Generar pendiente de entrega
+      </label>
+    </div>
+    <div id="pending_box" style="display:none; margin-top:10px; max-width:520px;">
+      <div class="field">
+        <label for="pending_comment">Comentario</label>
+        <textarea id="pending_comment" name="pending_comment" rows="3"></textarea>
+      </div>
+      <div class="field">
+        <label for="pending_return_item_id">¿Qué deben devolver?</label>
+        <select name="pending_return_item_id" id="pending_return_item_id" class="js-buscar">
+          <option value="">El mismo ítem entregado</option>
+          {% for it in items %}
+            <option value="{{ it.id }}">{{ it.code }} - {{ it.name }}</option>
+          {% endfor %}
+        </select>
+        <span class="muted" style="font-weight:400;">Elegí otro si deben traer un ítem distinto (ej. entregás domo y traen Onvif).</span>
+      </div>
+      <div class="field">
+        <label for="pending_return_qty">Cantidad a devolver</label>
+        <input type="number" name="pending_return_qty" id="pending_return_qty" min="1" placeholder="Igual a la entregada">
+      </div>
+    </div>
+    <script>
+    document.addEventListener("DOMContentLoaded", function () {
+        const checkbox = document.getElementById("generate_pending");
+        const box = document.getElementById("pending_box");
+        function togglePending() {
+            box.style.display = checkbox.checked ? "block" : "none";
+        }
+        checkbox.addEventListener("change", togglePending);
+        togglePending();
+    });
+    </script>
+    {% endif %}
+
+    <div style="margin-top:16px;">
+      <button type="submit" class="btn btn-primary">Registrar</button>
+    </div>
+  </form>
+</div>
+{% endif %}
+
+<div class="page-header" style="margin-top:8px;">
+  <div><h2 style="font-size:16px;">Logs</h2></div>
+  {% if me.role in ["ADMIN", "SUPERVISOR"] %}
+  <a href="{{ url_for('movements_export_csv', **request.args) }}" class="btn btn-secondary">Exportar CSV</a>
+  {% endif %}
+</div>
+
+<style>
+  .filters-collapse{margin-bottom:14px;}
+  .filters-toggle{list-style:none;cursor:pointer;display:inline-flex;align-items:center;gap:8px;
+    padding:8px 14px;border:1px solid var(--border,#d0d5dd);border-radius:8px;
+    font-weight:600;font-size:14px;background:var(--surface,#fff);user-select:none;}
+  .filters-toggle::-webkit-details-marker{display:none;}
+  .filters-collapse[open] .filters-caret{transform:rotate(180deg);}
+  .filters-caret{transition:transform .15s ease;margin-left:2px;}
+  .filters-collapse .card{margin-top:10px;}
+  @media (min-width:768px){ .filters-toggle{display:none;} .filters-collapse .card{margin-top:0;} }
+</style>
+<details class="filters-collapse" id="movFilters">
+<summary class="filters-toggle">
+  <span class="nav-icon">&#9776;</span> Filtros
+  <span class="filters-caret">&#9662;</span>
+</summary>
+<div class="card">
+  <form method="get" class="filters-grid">
+    <div class="field">
+      <label>Desde</label>
+      <input type="date" name="from_date" value="{{ from_date }}">
+    </div>
+    <div class="field">
+      <label>Hasta</label>
+      <input type="date" name="to_date" value="{{ to_date }}">
+    </div>
+    <div class="field">
+      <label>Item</label>
+      <select name="item_filter" class="js-buscar">
+        <option value="">Todos</option>
+        {% for it in items %}
+          <option value="{{ it.id }}" {% if item_filter and (item_filter|int) == it.id %}selected{% endif %}>{{ it.code }} - {{ it.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label>Responsable</label>
+      <select name="user_filter" class="js-buscar">
+        <option value="">Todos</option>
+        {% for u in users %}
+          <option value="{{ u.id }}" {% if user_filter and (user_filter|int) == u.id %}selected{% endif %}>{{ u.full_name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label>Mostrar</label>
+      <select name="limit">
+        {% for n in [50, 100, 200, 500] %}
+          <option value="{{ n }}" {% if limit and (limit|int) == n %}selected{% endif %}>{{ n }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field-actions">
+      <button type="submit" class="btn btn-primary">Aplicar filtros</button>
+      <a href="{{ url_for('movements') }}" class="btn btn-secondary">Limpiar</a>
+    </div>
+  </form>
+</div>
+</details>
+
+<div class="table-card">
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>ID</th><th>Fecha</th><th>Hora</th><th>Item</th><th class="num">Qty</th><th>Desde</th><th>Hacia</th><th>Responsable</th><th>Observación</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for m in logs %}
+        <tr>
+          <td>{{ m.number or "" }}</td>
+          <td>{{ m.created_at.strftime("%Y-%m-%d") }}</td>
+          <td>{{ m.created_at.strftime("%H:%M") }}</td>
+          <td>{{ m.item.code }} - {{ m.item.name }}</td>
+          <td class="num">{{ m.qty }}</td>
+          <td>{{ m.from_location.name }}</td>
+          <td>{{ m.to_location.name }}</td>
+          <td>{{ m.user.full_name }}</td>
+          <td>{{ m.observation or "" }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="9" class="muted">Sin movimientos.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  // Filtros: en desktop siempre visibles; en mobile colapsados por defecto.
+  var movFilters = document.getElementById("movFilters");
+  if (movFilters) {
+    var syncFilters = function () {
+      if (window.matchMedia("(min-width:768px)").matches) { movFilters.open = true; }
+    };
+    syncFilters();
+    window.addEventListener("resize", syncFilters);
+  }
+  // Item dinamico segun "Desde": solo se ofrecen items con stock (>0) en esa ubicacion.
+  var stockMap = {{ stock_map|tojson }};
+  var fromSel = document.getElementById("from_location_id");
+  var itemEl = document.getElementById("item_id");
+  if (itemEl && !itemEl.tomselect) {
+    var allItems = [];
+    Array.from(itemEl.options).forEach(function (o) {
+      if (o.value) allItems.push({ value: o.value, text: o.text });
+    });
+
+    var tsItem = new TomSelect(itemEl, {
+      create: false,
+      sortField: { field: "text", direction: "asc" },
+      placeholder: "Elegí la ubicación de origen primero...",
+      closeAfterSelect: true,
+      onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
+      onChange: function () { this.blur(); }
+    });
+
+    var refreshItems = function () {
+      var locId = fromSel ? String(fromSel.value || "") : "";
+      var allowed = stockMap[locId] || [];
+      var allowedSet = {};
+      allowed.forEach(function (id) { allowedSet[String(id)] = true; });
+      tsItem.clear(true);
+      tsItem.clearOptions();
+      allItems.forEach(function (o) { if (allowedSet[o.value]) tsItem.addOption(o); });
+      tsItem.refreshOptions(false);
+      if (!locId) { tsItem.disable(); } else { tsItem.enable(); }
+    };
+
+    if (fromSel && fromSel.tagName === "SELECT") {
+      fromSel.addEventListener("change", refreshItems);
+    }
+    refreshItems();
+  }
+
+  var toSel = document.getElementById("to_location_id");
+  var scrapBox = document.getElementById("scrap_reason_box");
+  var descartes_id = "{{ descartes_id or '' }}";
+  function toggleScrap() {
+    scrapBox.style.display = (toSel.value === descartes_id) ? "block" : "none";
+  }
+  if (toSel) { toSel.addEventListener("change", toggleScrap); toggleScrap(); }
+});
+</script>
+{% endblock %}

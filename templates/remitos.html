@@ -1,0 +1,216 @@
+{% extends "base.html" %}
+{% block title %}Remitos · TNGStocks{% endblock %}
+{% block page_title %}Remitos{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <h2>Remitos</h2>
+    <p>Agrupá movimientos ya realizados en un remito imprimible.</p>
+  </div>
+  {% if me and me.role in ["ADMIN", "SUPERVISOR"] %}
+  <button type="button" class="btn btn-primary" onclick="openRemitoModal()">+ Nuevo remito</button>
+  {% endif %}
+</div>
+
+{% if me.role != "TECNICO" %}
+<div class="card">
+  <form method="get" class="filters-grid">
+    <div class="field">
+      <label>Responsable</label>
+      <select name="responsible_id" class="js-buscar">
+        <option value="">Todos</option>
+        {% for u in responsible_users %}
+          <option value="{{ u.id }}" {% if responsible_id and (responsible_id|int) == u.id %}selected{% endif %}>{{ u.full_name or u.username }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field-actions">
+      <button type="submit" class="btn btn-primary">Filtrar</button>
+      <a href="{{ url_for('remitos') }}" class="btn btn-secondary">Limpiar</a>
+    </div>
+  </form>
+</div>
+{% endif %}
+
+<div class="table-card">
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Número</th><th>Fecha</th><th>Entrega (responsable)</th><th>Recibe (responsable)</th><th class="num">Ítems</th><th>Creador</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in remitos %}
+        <tr>
+          <td><a href="{{ url_for('remito_detail', remito_id=r.id) }}" onclick="openDetail(this.href); return false;">{{ r.number }}</a></td>
+          <td>{{ r.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+          <td>{{ r.responsible_from.full_name if r.responsible_from else "—" }}</td>
+          <td>{{ r.responsible_to.full_name if r.responsible_to else "—" }}</td>
+          <td class="num">{{ r.lines|length }}</td>
+          <td>{{ r.created_by.full_name }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="muted">Sin remitos.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% if me and me.role in ["ADMIN", "SUPERVISOR"] %}
+<!-- Modal: nuevo remito (solo ADMIN/SUPERVISOR) -->
+<div class="modal-overlay" id="modal-remito-new">
+  <div class="modal" style="max-width:900px;">
+    <div class="modal-header">
+      <span class="modal-title">Nuevo remito</span>
+      <button type="button" class="modal-close" onclick="closeModal('modal-remito-new')">&times;</button>
+    </div>
+    <form method="post" action="{{ url_for('remito_new') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <div class="modal-body">
+        <p class="muted">Elegí las ubicaciones de entrega y recibe. Por defecto se listan los movimientos de <strong>hoy</strong> que todavía no están en un remito. Destildá los que no quieras incluir.</p>
+        <div class="form-grid">
+          <div class="modal-col">
+            <div class="col-title">Entrega (origen)</div>
+            <div class="field">
+              <label>Desde (ubicación)</label>
+              <select name="from_location_id" id="rm-from" onchange="onLocChange('from')" required>
+                <option value="" selected disabled>Seleccionar ubicación...</option>
+                {% for l in locations %}
+                  <option value="{{ l.id }}">{{ l.name }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="field">
+              <label>Fecha desde</label>
+              <input type="date" id="rm-date-from" value="{{ today }}" onchange="loadRemitoMovs()">
+            </div>
+            <div class="field">
+              <label>Responsable entrega</label>
+              <select name="responsible_from_id" id="rm-resp-from">
+                <option value="" selected disabled>Elegí Desde primero...</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="modal-col">
+            <div class="col-title">Recibe (destino)</div>
+            <div class="field">
+              <label>Hacia (ubicación)</label>
+              <select name="to_location_id" id="rm-to" onchange="onLocChange('to')" required>
+                <option value="" selected disabled>Seleccionar ubicación...</option>
+                {% for l in locations %}
+                  <option value="{{ l.id }}">{{ l.name }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="field">
+              <label>Fecha hasta</label>
+              <input type="date" id="rm-date-to" value="{{ today }}" onchange="loadRemitoMovs()">
+            </div>
+            <div class="field">
+              <label>Responsable recibe</label>
+              <select name="responsible_to_id" id="rm-resp-to">
+                <option value="" selected disabled>Elegí Hacia primero...</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div class="table-scroll" style="max-height:40vh; margin-top:12px;">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th style="width:34px;"><input type="checkbox" id="rm-check-all" onclick="toggleAllRemitoMovs(this)"></th>
+                <th>Fecha</th><th>Ítem</th><th class="num">Qty</th><th>Responsable mov.</th><th>Obs.</th>
+              </tr>
+            </thead>
+            <tbody id="rm-mov-body">
+              <tr><td colspan="6" class="muted">Elegí Desde y Hacia para ver los movimientos.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="field" style="margin-top:12px;">
+          <label>Aclaraciones / observaciones (opcional)</label>
+          <input name="observation" maxlength="255">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-remito-new')">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Crear remito</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_scripts %}
+{% if me and me.role in ["ADMIN", "SUPERVISOR"] %}
+<script>
+  var REMITO_MOVS_URL = "{{ url_for('remito_movimientos') }}";
+  var REMITO_RESP_URL = "{{ url_for('remito_responsables') }}";
+
+  function openRemitoModal() { openModal('modal-remito-new'); }
+
+  function onLocChange(which) {
+    loadResponsables(which);
+    loadRemitoMovs();
+  }
+
+  function loadResponsables(which) {
+    var locSel = document.getElementById(which === 'from' ? 'rm-from' : 'rm-to');
+    var respSel = document.getElementById(which === 'from' ? 'rm-resp-from' : 'rm-resp-to');
+    var loc = locSel.value;
+    respSel.disabled = false;
+    respSel.innerHTML = '<option value="">Cargando...</option>';
+    if (!loc) { respSel.innerHTML = '<option value="" disabled selected>Elegí la ubicación...</option>'; return; }
+    fetch(REMITO_RESP_URL + '?location_id=' + encodeURIComponent(loc))
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data.external) {
+          respSel.innerHTML = '<option value="">Proveedor — se completa a mano</option>';
+          respSel.disabled = true;
+          return;
+        }
+        var opts = data.responsibles || [];
+        if (opts.length === 0) {
+          respSel.innerHTML = '<option value="" disabled selected>Sin responsables cargados</option>';
+          return;
+        }
+        var html = '';
+        if (opts.length > 1) { html += '<option value="" disabled selected>Elegí responsable...</option>'; }
+        opts.forEach(function (o) { html += '<option value="' + o.id + '">' + o.name + '</option>'; });
+        respSel.innerHTML = html;
+        if (opts.length === 1) { respSel.value = String(opts[0].id); }
+      })
+      .catch(function () { respSel.innerHTML = '<option value="" disabled selected>Error al cargar</option>'; });
+  }
+
+  function loadRemitoMovs() {
+    var from = document.getElementById('rm-from').value;
+    var to = document.getElementById('rm-to').value;
+    var dFrom = document.getElementById('rm-date-from').value;
+    var dTo = document.getElementById('rm-date-to').value;
+    var body = document.getElementById('rm-mov-body');
+    var chkAll = document.getElementById('rm-check-all');
+    if (chkAll) chkAll.checked = false;
+    if (!from || !to) return;
+    body.innerHTML = '<tr><td colspan="6" class="muted">Cargando...</td></tr>';
+    fetch(REMITO_MOVS_URL + '?from_location_id=' + encodeURIComponent(from) + '&to_location_id=' + encodeURIComponent(to)
+          + '&date_from=' + encodeURIComponent(dFrom) + '&date_to=' + encodeURIComponent(dTo))
+      .then(function (r) { return r.text(); })
+      .then(function (html) { body.innerHTML = html; })
+      .catch(function () { body.innerHTML = '<tr><td colspan="6" class="muted">No se pudieron cargar los movimientos.</td></tr>'; });
+  }
+
+  function toggleAllRemitoMovs(master) {
+    document.querySelectorAll('#rm-mov-body input[name="movement_id"]').forEach(function (c) {
+      c.checked = master.checked;
+    });
+  }
+</script>
+{% endif %}
+{% endblock %}

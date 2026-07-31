@@ -1,0 +1,201 @@
+{% extends "base.html" %}
+{% block title %}Carga múltiple · TNGStocks{% endblock %}
+{% block page_title %}Carga múltiple{% endblock %}
+{% block content %}
+<style>
+  .bulk-line{display:grid;grid-template-columns:2fr 100px 180px 140px 2fr 40px;gap:10px;align-items:end;margin-bottom:10px;}
+  .bulk-line button{height:36px;}
+  .bulk-item-select{max-width:100%;}
+  .bulk-item-select .ts-wrapper,.bulk-item-select .ts-control,.bulk-item-select .ts-dropdown{width:100%;}
+  .pending-comment-wrap{display:none;}
+  .scrap-reason-wrap{display:none;}
+</style>
+
+<div class="page-header"><div><h2>Carga múltiple</h2><p>Cargá varios ítems en un mismo movimiento.</p></div></div>
+
+<div class="card">
+  <form method="post" id="bulk-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="form-grid">
+      <div class="field">
+        <label>Desde</label>
+        <select name="from_location_id" id="bulk_from_location_id" required>
+          <option value="">Seleccionar</option>
+          {% for loc in locations %}
+            <option value="{{ loc.id }}">{{ loc.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label>Hacia</label>
+        <select name="to_location_id" id="bulk_to_location_id" required>
+          <option value="">Seleccionar</option>
+          {% for loc in locations %}
+            <option value="{{ loc.id }}">{{ loc.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field" style="grid-column:1 / -1; max-width:700px;">
+        <label>Observación</label>
+        <input type="text" name="observation" style="width:100%;">
+      </div>
+    </div>
+
+    <div class="card-header" style="margin-top:8px;"><span class="card-title">Items</span></div>
+    <div id="bulk-lines"></div>
+
+    <div style="margin-top:12px; margin-bottom:20px;">
+      <button type="button" id="add-line-btn" class="btn btn-secondary">+ Agregar item</button>
+    </div>
+
+    <button type="submit" class="btn btn-primary">Guardar carga múltiple</button>
+  </form>
+</div>
+
+<template id="bulk-line-template">
+  <div class="bulk-line">
+    <div class="bulk-item-select field">
+      <label>Item</label>
+      <select name="item_id[]" class="bulk-item" required>
+        <option value="">Seleccionar item</option>
+        {% for i in items %}
+          <option value="{{ i.id }}">{{ i.code }} - {{ i.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label>Cant.</label>
+      <input type="number" name="qty[]" min="1" value="1" required>
+    </div>
+    <div class="scrap-reason-wrap field">
+      <label>Motivo descarte</label>
+      <select name="scrap_reason[]">
+        <option value="">Seleccionar...</option>
+        <option value="Irrecuperable">Irrecuperable</option>
+        <option value="Roto">Roto</option>
+        <option value="Vencido">Vencido</option>
+        <option value="Obsoleto">Obsoleto</option>
+        <option value="Otro">Otro</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Pendiente</label>
+      <select name="generate_pending[]" class="pending-flag">
+        <option value="0">No</option>
+        <option value="1">Si</option>
+      </select>
+    </div>
+    <div class="pending-comment-wrap field">
+      <label>Comentario pendiente</label>
+      <input type="text" name="pending_comment[]" placeholder="Comentario del pendiente" style="width:100%;">
+    </div>
+    <div class="field">
+      <label>&nbsp;</label>
+      <button type="button" class="remove-line-btn btn btn-danger btn-sm">X</button>
+    </div>
+  </div>
+</template>
+
+<script>
+  var descartes_id = "{{ descartes_id or '' }}";
+  var stockMap = {{ stock_map|tojson }};
+
+  // Lista completa de items (para reconstruir opciones por ubicacion)
+  var allBulkItems = [
+    {% for i in items %}{ value: "{{ i.id }}", text: "{{ (i.code ~ ' - ' ~ i.name)|e }}" },
+    {% endfor %}
+  ];
+
+  function allowedForCurrentFrom() {
+    var fromSel = document.getElementById("bulk_from_location_id");
+    var locId = fromSel ? String(fromSel.value || "") : "";
+    var allowed = stockMap[locId] || [];
+    var set = {};
+    allowed.forEach(function (id) { set[String(id)] = true; });
+    return { locId: locId, set: set };
+  }
+
+  function applyStockFilterToLine(el) {
+    if (!el || !el.tomselect) return;
+    var ts = el.tomselect;
+    var info = allowedForCurrentFrom();
+    ts.clear(true);
+    ts.clearOptions();
+    allBulkItems.forEach(function (o) { if (info.set[o.value]) ts.addOption(o); });
+    ts.refreshOptions(false);
+    if (!info.locId) { ts.disable(); } else { ts.enable(); }
+  }
+
+  function applyStockFilterAllLines() {
+    document.querySelectorAll(".bulk-item").forEach(applyStockFilterToLine);
+  }
+
+  function initTomSelectFor(el) {
+    if (!el) return;
+    if (el.tomselect) return;
+    new TomSelect(el, {
+      create: false,
+      sortField: { field: "text", direction: "asc" },
+      placeholder: "Elegí la ubicación de origen primero...",
+      closeAfterSelect: true,
+      onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
+      onChange: function () { this.blur(); }
+    });
+    applyStockFilterToLine(el);
+  }
+
+  function applyDescartes(isDescartes) {
+    document.querySelectorAll(".scrap-reason-wrap").forEach(function(el) {
+      el.style.display = isDescartes ? "block" : "none";
+    });
+  }
+
+  function wireBulkLine(line) {
+    var itemSelect = line.querySelector(".bulk-item");
+    var pendingFlag = line.querySelector(".pending-flag");
+    var commentWrap = line.querySelector(".pending-comment-wrap");
+    var removeBtn = line.querySelector(".remove-line-btn");
+
+    initTomSelectFor(itemSelect);
+
+    function togglePendingComment() {
+      if (pendingFlag.value === "1") {
+        commentWrap.style.display = "block";
+      } else {
+        commentWrap.style.display = "none";
+        var input = commentWrap.querySelector("input");
+        if (input) input.value = "";
+      }
+    }
+    pendingFlag.addEventListener("change", togglePendingComment);
+    togglePendingComment();
+
+    removeBtn.addEventListener("click", function () { line.remove(); });
+  }
+
+  function addBulkLine() {
+    var tpl = document.getElementById("bulk-line-template");
+    var container = document.getElementById("bulk-lines");
+    var fragment = tpl.content.cloneNode(true);
+    container.appendChild(fragment);
+    wireBulkLine(container.lastElementChild);
+    var toSel = document.getElementById("bulk_to_location_id");
+    applyDescartes(toSel.value === descartes_id);
+  }
+
+  document.addEventListener("DOMContentLoaded", function () {
+    document.getElementById("add-line-btn").addEventListener("click", addBulkLine);
+    addBulkLine();
+    addBulkLine();
+    addBulkLine();
+    var bulkToSel = document.getElementById("bulk_to_location_id");
+    bulkToSel.addEventListener("change", function () {
+      applyDescartes(this.value === descartes_id);
+    });
+    var bulkFromSel = document.getElementById("bulk_from_location_id");
+    if (bulkFromSel) {
+      bulkFromSel.addEventListener("change", applyStockFilterAllLines);
+    }
+  });
+</script>
+{% endblock %}

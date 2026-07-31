@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block page_title %}Métricas{% endblock %}
+{% block extra_head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/metricas.css') }}">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+{% endblock %}
+{% block title %}Métricas · Descartes{% endblock %}
+{% block content %}
+{% include "_metricas_head.html" %}
+<div class="page-header"><div><h2>Descartes</h2><p>Bajas registradas por camioneta, motivo, ítem y responsable.</p></div></div>
+<div class="summary-grid">
+  {% for c in cards %}
+  {% if c.href %}
+  <a href="{{ c.href }}" class="summary-card {{ c.tone }} is-link">
+    <span class="label">{{ c.label }}</span><span class="value">{{ c.value }}</span><span class="hint">{{ c.hint }}</span>
+  </a>
+  {% else %}
+  <div class="summary-card {{ c.tone }}">
+    <span class="label">{{ c.label }}</span><span class="value">{{ c.value }}</span><span class="hint">{{ c.hint }}</span>
+  </div>
+  {% endif %}
+  {% endfor %}
+</div>
+<div class="mx-grid">
+  <div class="mx-panel"><div class="mx-panel-title">Descartes por camioneta / ubicación</div><div class="mx-chart tall"><canvas id="d_loc"></canvas></div></div>
+  <div class="mx-panel"><div class="mx-panel-title">Descartes por motivo</div><div class="mx-chart tall"><canvas id="d_reason"></canvas></div></div>
+  <div class="mx-panel"><div class="mx-panel-title">Top ítems descartados</div><div class="mx-chart tall"><canvas id="d_items"></canvas></div></div>
+  <div class="mx-panel"><div class="mx-panel-title">Descartes por categoría</div><div class="mx-chart tall"><canvas id="d_cats"></canvas></div></div>
+</div>
+<div class="mx-grid">
+  <div class="mx-panel"><div class="mx-panel-title">Descartes por responsable</div><div class="mx-chart"><canvas id="d_user"></canvas></div></div>
+  <div class="mx-panel"><div class="mx-panel-title">Descartes por mes</div><div class="mx-chart"><canvas id="d_trend"></canvas></div></div>
+</div>
+{% endblock %}
+{% block extra_scripts %}
+<script src="{{ url_for('static', filename='js/metricas.js') }}"></script>
+<script>
+MX.barH('d_loc', {{ by_loc|map(attribute='label')|list|tojson }}, {{ by_loc|map(attribute='value')|list|tojson }}, {tone:'danger'});
+MX.doughnut('d_reason', {{ by_reason|map(attribute='label')|list|tojson }}, {{ by_reason|map(attribute='value')|list|tojson }});
+MX.barH('d_items', {{ top_items|map(attribute='label')|list|tojson }}, {{ top_items|map(attribute='value')|list|tojson }}, {tone:'danger'});
+MX.barH('d_cats', {{ by_cat|map(attribute='label')|list|tojson }}, {{ by_cat|map(attribute='value')|list|tojson }}, {tone:'danger'});
+MX.barH('d_user', {{ by_user|map(attribute='label')|list|tojson }}, {{ by_user|map(attribute='value')|list|tojson }}, {tone:'danger'});
+MX.barV('d_trend', {{ trend_rows|map(attribute='label')|list|tojson }}, {{ trend_rows|map(attribute='value')|list|tojson }}, {tone:'danger'});
+</script>
+{% endblock %}

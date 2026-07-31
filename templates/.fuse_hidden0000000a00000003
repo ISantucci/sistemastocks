@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block page_title %}Métricas{% endblock %}
+{% block extra_head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/metricas.css') }}">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+{% endblock %}
+{% block title %}Métricas · Consumo{% endblock %}
+{% block content %}
+{% include "_metricas_head.html" %}
+<div class="page-header"><div><h2>Consumo / Uso</h2><p>Unidades enviadas a "Utilizado" en el período.</p></div></div>
+{% if not util_ok %}<div class="flash-error">No existe la ubicación "Utilizado"; el consumo no puede calcularse.</div>{% endif %}
+<div class="summary-grid">
+  {% for c in cards %}
+  {% if c.href %}
+  <a href="{{ c.href }}" class="summary-card {{ c.tone }} is-link">
+    <span class="label">{{ c.label }}</span><span class="value">{{ c.value }}</span><span class="hint">{{ c.hint }}</span>
+  </a>
+  {% else %}
+  <div class="summary-card {{ c.tone }}">
+    <span class="label">{{ c.label }}</span><span class="value">{{ c.value }}</span><span class="hint">{{ c.hint }}</span>
+  </div>
+  {% endif %}
+  {% endfor %}
+</div>
+<div class="mx-grid cols-1">
+  <div class="mx-panel"><div class="mx-panel-title">Consumo mensual</div><div class="mx-chart"><canvas id="u_trend"></canvas></div></div>
+</div>
+<div class="mx-grid">
+  <div class="mx-panel"><div class="mx-panel-title">Top ítems consumidos</div><div class="mx-chart tall"><canvas id="u_items"></canvas></div></div>
+  <div class="mx-panel"><div class="mx-panel-title">Consumo por categoría</div><div class="mx-chart tall"><canvas id="u_cats"></canvas></div></div>
+  <div class="mx-panel"><div class="mx-panel-title">Consumo por camioneta / origen</div><div class="mx-chart"><canvas id="u_loc"></canvas></div></div>
+  <div class="mx-panel"><div class="mx-panel-title">Consumo por responsable</div><div class="mx-chart"><canvas id="u_user"></canvas></div></div>
+</div>
+{% block extra_scripts %}
+<script src="{{ url_for('static', filename='js/metricas.js') }}"></script>
+<script>
+MX.line('u_trend', {{ trend_rows|map(attribute='label')|list|tojson }}, {{ trend_rows|map(attribute='value')|list|tojson }}, {label:'Consumo'});
+MX.barH('u_items', {{ top_items|map(attribute='label')|list|tojson }}, {{ top_items|map(attribute='value')|list|tojson }});
+MX.doughnut('u_cats', {{ by_cat|map(attribute='label')|list|tojson }}, {{ by_cat|map(attribute='value')|list|tojson }});
+MX.barH('u_loc', {{ by_loc|map(attribute='label')|list|tojson }}, {{ by_loc|map(attribute='value')|list|tojson }});
+MX.barH('u_user', {{ by_user|map(attribute='label')|list|tojson }}, {{ by_user|map(attribute='value')|list|tojson }});
+</script>
+{% endblock %}

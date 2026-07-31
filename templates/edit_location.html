@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block content %}
+  <h2>Editar ubicación</h2>
+
+  <form method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div>
+      <label>Nombre</label><br />
+      <input name="name" value="{{ loc.name }}" required />
+    </div>
+
+    <div>
+      <label>Descripción</label><br />
+      <input name="description" value="{{ loc.description or '' }}" />
+    </div>
+
+    <div>
+      <label>
+        <input type="checkbox" name="is_external" {% if loc.is_external %}checked{% endif %}>
+        Ubicación externa
+      </label>
+    </div>
+
+    <div>
+      <label>
+        <input type="checkbox" name="is_truck" value="1" {% if loc.is_truck %}checked{% endif %}>
+        Es camioneta (Truck)
+      </label>
+    </div>
+
+    <div>
+      <label>Responsables (Ctrl+clic para seleccionar varios)</label><br />
+      <select name="responsible_user_ids" multiple size="6" style="min-width:220px; height:auto;">
+        {% for u in users %}
+          <option value="{{ u.id }}" {% if u.id in current_responsibles %}selected{% endif %}>
+            {{ u.full_name or u.username }}
+          </option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <button type="submit">Guardar cambios</button>
+  </form>
+{% endblock %}

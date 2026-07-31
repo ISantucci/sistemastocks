@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Ingresar · TNGStocks{% endblock %}
+{% block content %}
+<div class="auth-card">
+  <div class="auth-brand"><span class="brand-mark">S</span> <span>TNGStocks</span></div>
+  <h2 style="margin:0 0 4px;">Ingresar</h2>
+  <p class="muted" style="margin:0 0 16px;">Accedé con tu usuario y contraseña.</p>
+  <form method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="field"><label>Usuario</label><input name="username" required autofocus></div>
+    <div class="field"><label>Contraseña</label><input name="password" type="password" required></div>
+    <div style="margin-top:16px;"><button type="submit" class="btn btn-primary" style="width:100%;">Entrar</button></div>
+  </form>
+</div>
+<style>
+  .auth-content{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:20px;}
+  .auth-card .field input{width:100%;}
+  .auth-card{width:100%;max-width:360px;background:#fff;border:1px solid var(--border,#e5e7eb);border-radius:16px;padding:28px;box-shadow:0 10px 30px rgba(0,0,0,.08);}
+  .auth-brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:18px;margin-bottom:18px;}
+  .auth-brand .brand-mark{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:8px;background:#2563eb;color:#fff;}
+</style>
+{% endblock %}

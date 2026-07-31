@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}TNGStocks{% endblock %}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tom-select@2.3.1/dist/css/tom-select.bootstrap5.min.css">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/legacy.css') }}">
+{% block extra_head %}{% endblock %}
+</head>
+<body>
+{% if current_user.is_authenticated and not embed %}
+<div class="app-shell" id="appShell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-brand">
+      <span class="brand-mark"><img src="{{ url_for('static', filename='img/logo_tng.png') }}" alt="TNG"></span>
+      <span class="brand-text">TNGStocks</span>
+      <button type="button" class="sidebar-collapse-btn" id="sidebarCollapseBtn" aria-label="Colapsar menu">&laquo;</button>
+    </div>
+    <nav class="sidebar-nav">
+      <div class="nav-group">
+        <div class="nav-group-title">Principal</div>
+        <a href="{{ url_for('home') }}" class="nav-link {% if request.endpoint == 'home' %}active{% endif %}">
+          <span class="nav-icon">&#9703;</span><span class="nav-label">Inicio</span>
+        </a>
+        <a href="{{ url_for('stock') }}" class="nav-link {% if request.endpoint == 'stock' %}active{% endif %}">
+          <span class="nav-icon">&#9636;</span><span class="nav-label">Stock</span>
+        </a>
+      </div>
+      {% if me and me.role in ["ADMIN", "SUPERVISOR", "TECNICO", "LECTOR"] %}
+      <div class="nav-group">
+        <div class="nav-group-title">Movimientos</div>
+        {% if me.role in ["ADMIN", "SUPERVISOR", "TECNICO", "LECTOR"] %}
+        <a href="{{ url_for('movements') }}" class="nav-link {% if request.endpoint == 'movements' %}active{% endif %}">
+          <span class="nav-icon">&#8644;</span><span class="nav-label">Movimientos</span>
+        </a>
+        {% endif %}
+        {% if me.role in ["ADMIN", "SUPERVISOR"] %}
+        <a href="{{ url_for('movements_bulk') }}" class="nav-link {% if request.endpoint == 'movements_bulk' %}active{% endif %}">
+          <span class="nav-icon">&#8648;</span><span class="nav-label">Carga multiple</span>
+        </a>
+        {% endif %}
+        {% if me.role in ["ADMIN", "SUPERVISOR", "TECNICO"] %}
+        <a href="{{ url_for('item_usage') }}" class="nav-link {% if request.endpoint == 'item_usage' %}active{% endif %}">
+          <span class="nav-icon">&#10003;</span><span class="nav-label">Utilizados</span>
+        </a>
+        {% endif %}
+        {% if me.role in ["ADMIN", "SUPERVISOR"] %}
+        <a href="{{ url_for('scrap_report') }}" class="nav-link {% if request.endpoint == 'scrap_report' %}active{% endif %}">
+          <span class="nav-icon">&#10005;</span><span class="nav-label">Descartes</span>
+        </a>
+        {% endif %}
+      </div>
+      {% endif %}
+      {% if me %}
+      <div class="nav-group">
+        <div class="nav-group-title">Seguimiento</div>
+        {% if me.role in ["ADMIN", "SUPERVISOR"] %}
+        <a href="{{ url_for('pending_deliveries') }}" class="nav-link {% if request.endpoint == 'pending_deliveries' %}active{% endif %}">
+          <span class="nav-icon">&#9719;</span><span class="nav-label">Pendientes</span>
+          {% if pending_badge_count and pending_badge_count > 0 %}<span class="nav-badge" title="{{ pending_badge_count }} pendiente(s) sin devolución">{{ pending_badge_count }}</span>{% endif %}
+        </a>
+        <a href="{{ url_for('reparaciones') }}" class="nav-link {% if request.endpoint == 'reparaciones' %}active{% endif %}">
+          <span class="nav-icon">&#9850;</span><span class="nav-label">Reparaciones</span>
+        </a>
+        <a href="{{ url_for('stock_alerts') }}" class="nav-link {% if request.endpoint == 'stock_alerts' %}active{% endif %}">
+          <span class="nav-icon">!</span><span class="nav-label">Alertas de Stock</span>
+          {% if alert_badge_count and alert_badge_count > 0 %}<span class="nav-badge" title="{{ alert_badge_count }} ítem(s) nuevo(s) en alerta">{{ alert_badge_count }}</span>{% endif %}
+        </a>
+        {% endif %}
+        {% if me.role == "LECTOR" %}
+        <a href="{{ url_for('reparaciones') }}" class="nav-link {% if request.endpoint == 'reparaciones' %}active{% endif %}">
+          <span class="nav-icon">&#9850;</span><span class="nav-label">Reparaciones</span>
+        </a>
+        {% endif %}
+        {% if me.role == "TECNICO" %}
+        <a href="{{ url_for('pending_deliveries') }}" class="nav-link {% if request.endpoint == 'pending_deliveries' %}active{% endif %}">
+          <span class="nav-icon">&#9719;</span><span class="nav-label">Pendientes</span>
+          {% if pending_badge_count and pending_badge_count > 0 %}<span class="nav-badge" title="{{ pending_badge_count }} pendiente(s) que debés devolver">{{ pending_badge_count }}</span>{% endif %}
+        </a>
+        {% endif %}
+        {% if me.role in ["ADMIN", "SUPERVISOR", "LECTOR"] %}
+        <a href="{{ url_for('purchase_requests') }}" class="nav-link {% if request.endpoint in ['purchase_requests', 'purchase_request_new', 'purchase_request_detail'] %}active{% endif %}">
+          <span class="nav-icon">&#9662;</span><span class="nav-label">Solicitudes de Compra</span>
+        </a>
+        {% endif %}
+        <a href="{{ url_for('remitos') }}" class="nav-link {% if request.endpoint in ['remitos', 'remito_new', 'remito_detail'] %}active{% endif %}">
+          <span class="nav-icon">&#9639;</span><span class="nav-label">Remitos</span>
+        </a>
+      </div>
+      {% endif %}
+      {% if me and me.role != "TECNICO" %}
+      <div class="nav-group">
+        <div class="nav-group-title">Catálogo</div>
+        <a href="{{ url_for('items') }}" class="nav-link {% if request.endpoint in ['items', 'item_new', 'item_edit'] %}active{% endif %}">
+          <span class="nav-icon">&#9638;</span><span class="nav-label">Items</span>
+        </a>
+        {% if me.role in ["ADMIN", "SUPERVISOR"] %}
+        <a href="{{ url_for('categories') }}" class="nav-link {% if request.endpoint == 'categories' %}active{% endif %}">
+          <span class="nav-icon">&#9643;</span><span class="nav-label">Categorias</span>
+        </a>
+        <a href="{{ url_for('locations') }}" class="nav-link {% if request.endpoint == 'locations' %}active{% endif %}">
+          <span class="nav-icon">&#9672;</span><span class="nav-label">Ubicaciones</span>
+        </a>
+        {% endif %}
+        {% if me.role == "ADMIN" %}
+        <a href="{{ url_for('users') }}" class="nav-link {% if request.endpoint == 'users' %}active{% endif %}">
+          <span class="nav-icon">&#9684;</span><span class="nav-label">Usuarios</span>
+        </a>
+        {% endif %}
+      </div>
+      {% endif %}
+      {% if me and me.role in ["ADMIN", "SUPERVISOR", "LECTOR"] %}
+      <div class="nav-group">
+        <div class="nav-group-title">Métricas</div>
+        <a href="{{ url_for('metricas') }}" class="nav-link {% if request.endpoint in ['metricas', 'metricas_compras', 'metricas_consumo', 'metricas_descartes', 'metricas_camionetas', 'metricas_inventario', 'metricas_movimientos', 'metricas_reparaciones'] %}active{% endif %}">
+          <span class="nav-icon">&#9186;</span><span class="nav-label">Métricas</span>
+        </a>
+      </div>
+      {% endif %}
+      {% if me and me.role in ["ADMIN", "SUPERVISOR"] %}
+      <div class="nav-group">
+        <div class="nav-group-title">Administracion</div>
+        <a href="{{ url_for('conteo') }}" class="nav-link {% if request.endpoint == 'conteo' %}active{% endif %}">
+          <span class="nav-icon">&#9707;</span><span class="nav-label">Conteo de stock</span>
+        </a>
+        {% if me.role == "ADMIN" %}
+        <a href="{{ url_for('admin_panel') }}" class="nav-link {% if request.endpoint == 'admin_panel' %}active{% endif %}">
+          <span class="nav-icon">&#9881;</span><span class="nav-label">Admin</span>
+        </a>
+        {% endif %}
+      </div>
+      {% endif %}
+    </nav>
+    <div class="sidebar-footer"><strong>TNGVial</strong></div>
+  </aside>
+  <div class="sidebar-overlay" id="sidebarOverlay"></div>
+  <div class="app-main">
+    <header class="topbar">
+      <button type="button" class="topbar-menu-btn" id="topbarMenuBtn" aria-label="Abrir menu">&#9776;</button>
+      <h1 class="topbar-title">{% block page_title %}{% endblock %}</h1>
+      <div class="topbar-actions">
+        <div class="user-menu" id="userMenu">
+          <button type="button" class="user-menu-btn" id="userMenuBtn">
+            <span class="user-avatar">{{ current_user.username[0]|upper }}</span>
+            <span class="user-name">{{ current_user.full_name or current_user.username }}</span>
+            <span class="user-role-badge role-{{ current_user.role|lower }}">{{ current_user.role }}</span>
+            <span class="user-caret">&#9662;</span>
+          </button>
+          <div class="user-menu-dropdown" id="userMenuDropdown">
+            <a href="{{ url_for('perfil') }}" class="user-menu-item">Configuracion de perfil</a>
+            <a href="{{ url_for('logout') }}" class="user-menu-item user-menu-item-danger">Salir</a>
+          </div>
+        </div>
+      </div>
+    </header>
+    <main class="content">
+{% elif current_user.is_authenticated and embed %}
+<main class="content embed-content">
+{% else %}
+<main class="auth-content">
+{% endif %}
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        <div class="flash-stack">
+          {% for category, message in messages %}
+          <div class="flash-{{ 'ok' if category == 'ok' else 'error' }}">{{ message }}</div>
+          {% endfor %}
+        </div>
+        {% endif %}
+      {% endwith %}
+      {% block content %}{% endblock %}
+{% if current_user.is_authenticated and not embed %}
+    </main>
+  </div>
+</div>
+
+<!-- Modal global de detalle (remitos, solicitudes) -->
+<div class="modal-overlay detail-overlay" id="detail-modal" onclick="if(event.target===this) dismissDetail()">
+  <div class="detail-box">
+    <button type="button" class="detail-close" onclick="dismissDetail()" aria-label="Cerrar">&times;</button>
+    <iframe id="detail-frame" class="detail-frame" title="Detalle"></iframe>
+  </div>
+</div>
+{% elif current_user.is_authenticated and embed %}
+</main>
+{% else %}
+</main>
+{% endif %}
+<script src="https://cdn.jsdelivr.net/npm/tom-select@2.3.1/dist/js/tom-select.complete.min.js"></script>
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+{% if current_user.is_authenticated and not embed %}
+<script>
+  function openDetail(url) {
+    var f = document.getElementById('detail-frame');
+    var ov = document.getElementById('detail-modal');
+    if (!f || !ov) return;
+    f.src = url + (url.indexOf('?') > -1 ? '&' : '?') + 'embed=1';
+    ov.classList.add('open');
+    document.body.classList.add('modal-open');
+    history.pushState({ detail: true }, '', '#detalle');
+  }
+  function closeDetail() {
+    var f = document.getElementById('detail-frame');
+    var ov = document.getElementById('detail-modal');
+    if (!ov) return;
+    ov.classList.remove('open');
+    document.body.classList.remove('modal-open');
+    if (f) f.src = 'about:blank';
+  }
+  // Cierre manual (X, clic afuera, Escape): pasa por el historial para que
+  // el botón "atrás" quede consistente.
+  function dismissDetail() {
+    if (location.hash === '#detalle') history.back(); else closeDetail();
+  }
+  // Cerrar con el botón "atrás" del navegador.
+  window.addEventListener('popstate', function () {
+    var ov = document.getElementById('detail-modal');
+    if (ov && ov.classList.contains('open')) closeDetail();
+  });
+  // Cerrar con Escape.
+  document.addEventListener('keydown', function (e) {
+    var ov = document.getElementById('detail-modal');
+    if (e.key === 'Escape' && ov && ov.classList.contains('open')) dismissDetail();
+  });
+</script>
+{% endif %}
+{% block extra_scripts %}{% endblock %}
+</body>
+</html>

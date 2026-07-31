@@ -1,0 +1,92 @@
+/* ================================================================
+   metricas.css  -  Estilos EXCLUSIVOS de la sección Métricas.
+   Archivo NUEVO y aislado: no modifica app.css ni legacy.css.
+   Se carga solo en /metricas via {% block extra_head %}.
+   Reutiliza las variables de color de app.css (:root).
+   ================================================================ */
+
+/* ---------- Sub-navegación por pestañas ---------- */
+.mx-tabs{
+  display:flex; flex-wrap:wrap; gap:6px;
+  border-bottom:1px solid var(--border);
+  margin:0 0 18px; padding-bottom:12px;
+}
+.mx-tab{
+  text-decoration:none; font-size:13px; font-weight:600;
+  color:var(--text-muted); padding:8px 14px; border-radius:999px;
+  border:1px solid transparent; transition:all .15s ease; white-space:nowrap;
+}
+.mx-tab:hover{ background:var(--accent-soft); color:var(--accent-soft-text); }
+.mx-tab.active{ background:var(--accent); color:#fff; box-shadow:0 2px 8px oklch(52% 0.14 250 / .35); }
+
+/* ---------- Filtro de período ---------- */
+.mx-filter{
+  display:flex; flex-wrap:wrap; align-items:flex-end; gap:14px;
+  background:var(--surface); border:1px solid var(--border);
+  border-radius:var(--radius-lg); padding:14px 16px; margin-bottom:20px;
+  box-shadow:var(--shadow-sm);
+}
+.mx-filter .mx-field{ display:flex; flex-direction:column; gap:4px; }
+.mx-filter label{ font-size:11px; font-weight:600; color:var(--text-muted); text-transform:uppercase; letter-spacing:.03em; }
+.mx-filter input[type="date"]{
+  font:inherit; font-size:13px; padding:7px 10px;
+  border:1px solid var(--border-strong); border-radius:var(--radius-sm); background:#fff;
+}
+.mx-presets{ display:flex; flex-wrap:wrap; gap:6px; }
+.mx-preset{
+  font-size:12px; font-weight:600; text-decoration:none;
+  color:var(--text-muted); padding:7px 12px; border-radius:999px;
+  border:1px solid var(--border-strong); background:#fff; transition:all .15s ease;
+}
+.mx-preset:hover{ border-color:var(--accent); color:var(--accent); }
+.mx-preset.active{ background:var(--accent); border-color:var(--accent); color:#fff; }
+.mx-range-note{ font-size:12.5px; color:var(--text-faint); margin-left:auto; align-self:center; font-variant-numeric:tabular-nums; }
+
+/* ---------- KPI cards (mejora estética sobre summary-card) ---------- */
+.summary-grid{ gap:14px; }
+.summary-card{
+  position:relative; overflow:hidden;
+  border-radius:var(--radius-lg);
+  padding:16px 16px 15px; gap:5px;
+  box-shadow:var(--shadow-sm);
+  transition:transform .15s ease, box-shadow .15s ease;
+}
+.summary-card::before{
+  content:""; position:absolute; left:0; top:0; bottom:0; width:4px;
+  background:var(--accent); opacity:.85;
+}
+.summary-card.warn::before{ background:var(--warn); }
+.summary-card.danger::before{ background:var(--danger); }
+.summary-card.ok::before{ background:var(--ok); }
+.summary-card .label{ font-size:11.5px; text-transform:uppercase; letter-spacing:.03em; color:var(--text-muted); font-weight:600; }
+.summary-card .value{ font-size:30px; font-weight:700; letter-spacing:-0.02em; line-height:1.05; }
+.summary-card .hint{ font-size:12px; color:var(--text-faint); }
+.summary-card.ok .value{ color:var(--ok-soft-text); }
+.summary-card:hover{ transform:translateY(-2px); box-shadow:0 6px 18px oklch(20% 0 0 / .10); }
+
+/* ---------- Paneles de gráficos ---------- */
+.mx-grid{ display:grid; gap:16px; grid-template-columns:repeat(2,minmax(0,1fr)); margin-top:16px; }
+.mx-grid.cols-1{ grid-template-columns:1fr; }
+.mx-grid.cols-3{ grid-template-columns:repeat(3,minmax(0,1fr)); }
+@media (max-width:960px){ .mx-grid,.mx-grid.cols-3{ grid-template-columns:1fr; } }
+
+.mx-panel{
+  background:var(--surface); border:1px solid var(--border);
+  border-radius:var(--radius-lg); padding:16px 18px 18px;
+  box-shadow:var(--shadow-sm); display:flex; flex-direction:column;
+}
+.mx-panel-title{ font-size:13.5px; font-weight:700; color:var(--text); margin-bottom:2px; }
+.mx-panel-sub{ font-size:12px; color:var(--text-faint); margin-bottom:12px; }
+.mx-chart{ position:relative; width:100%; height:260px; }
+.mx-chart.tall{ height:320px; }
+.mx-chart.short{ height:200px; }
+.mx-empty{ color:var(--text-faint); font-size:13px; padding:26px 2px; text-align:center; }
+
+/* ---------- Tablas dentro de métricas ---------- */
+.mx-panel .table-scroll{ margin-top:4px; }
+.badge-truck{ display:inline-block; font-size:10px; font-weight:700; color:var(--accent-soft-text);
+  background:var(--accent-soft); border-radius:5px; padding:1px 6px; margin-left:6px; vertical-align:middle; }
+
+/* Título de sección */
+.mx-section-title{ font-size:14px; font-weight:700; color:var(--text-muted);
+  text-transform:uppercase; letter-spacing:.04em; margin:22px 2px 2px; }

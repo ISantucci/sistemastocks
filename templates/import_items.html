@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Importar ítems · TNGStocks{% endblock %}
+{% block page_title %}Importar ítems (CSV){% endblock %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <h2>Importar ítems desde CSV</h2>
+    <p>Alta masiva de ítems. Esta importación <strong>solo crea ítems nuevos</strong>: no actualiza los existentes.</p>
+  </div>
+</div>
+
+<div class="card">
+  <form method="post" enctype="multipart/form-data">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="field">
+      <label>Archivo CSV</label>
+      <input type="file" name="file" accept=".csv" required>
+      <div class="muted">Codificaciones soportadas: UTF-8 (con o sin BOM), CP1252, Latin-1. Delimitador: coma o punto y coma.</div>
+    </div>
+    <div class="field-actions">
+      <button type="submit" class="btn btn-primary">Importar</button>
+      <a href="{{ url_for('items') }}" class="btn btn-secondary">Volver a Ítems</a>
+    </div>
+  </form>
+</div>
+
+<div class="card">
+  <div class="card-header"><span class="card-title">Columnas esperadas</span></div>
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr><th>Columna</th><th>Obligatoria</th><th>Detalle</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>code</code></td><td>Sí</td><td>Código único del ítem. Si ya existe, la fila se salta.</td></tr>
+        <tr><td><code>name</code></td><td>Sí</td><td>Nombre del ítem.</td></tr>
+        <tr><td><code>category</code></td><td>Sí</td><td>Nombre exacto de una categoría existente. No se crean categorías nuevas.</td></tr>
+        <tr><td><code>description</code></td><td>No</td><td>Texto libre opcional.</td></tr>
+        <tr><td><code>reference_link</code></td><td>No</td><td>Enlace de referencia de compra (se guarda, máx 500 caracteres).</td></tr>
+        <tr><td><code>trackable</code></td><td>No</td><td>1/0, true/false, si/no. Por defecto: No.</td></tr>
+        <tr><td><code>stock_min</code></td><td>No</td><td>Entero ≥ 0. Vacío = 0. En rastreables se guarda 0.</td></tr>
+        <tr><td><code>is_active</code></td><td>No</td><td>1/0, true/false, si/no. Por defecto: Sí.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="muted" style="margin-top:10px;">
+    Filas sin <code>code</code>/<code>name</code> o duplicadas se cuentan como <em>saltadas</em>.
+    Filas con categoría inexistente o valores inválidos se cuentan como <em>errores</em>.
+    Si falla el guardado, no se crea ningún ítem.
+  </p>
+</div>
+{% endblock %}

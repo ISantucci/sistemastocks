@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}Remito {{ remito.number }} · TNGStocks{% endblock %}
+{% block page_title %}Remito {{ remito.number }}{% endblock %}
+{% block content %}
+<div class="page-header no-print">
+  <div>
+    <h2>Remito {{ remito.number }}</h2>
+    <p><span class="badge badge-ok">{{ remito.status }}</span></p>
+  </div>
+  <div style="display:flex; gap:10px;">
+    <button type="button" class="btn btn-secondary" onclick="window.print()"
+            title="Se abre el diálogo de impresión: elegí 'Guardar como PDF' como destino.">Guardar PDF</button>
+    <button type="button" class="btn btn-primary" onclick="window.print()">Imprimir</button>
+    {% if not embed %}<a href="{{ url_for('remitos') }}" class="btn btn-secondary">Volver</a>{% endif %}
+  </div>
+</div>
+
+<div class="rem-sheet">
+  <!-- Encabezado -->
+  <div class="rem-head">
+    <div class="rem-logo">
+      <img src="{{ url_for('static', filename='img/logo_tng.png') }}" alt="TNGvial">
+    </div>
+    <div class="rem-title">
+      <div class="rem-title-big">REMITO</div>
+      <div class="rem-title-num">N&ordm; &nbsp; {{ remito.number }}</div>
+    </div>
+    <div class="rem-date">
+      <div class="rem-date-label">FECHA</div>
+      <div class="rem-date-val">{{ remito.created_at.strftime("%d / %m / %Y") }}</div>
+    </div>
+  </div>
+
+  <!-- Origen / Destino: solo responsable -->
+  <div class="rem-parties">
+    <div class="rem-party">
+      <div class="rem-party-title">DATOS DE ORIGEN (ENTREGA)</div>
+      <div class="rem-line"><span class="rem-k">Responsable:</span>
+        <span class="rem-v">{{ remito.responsible_from.full_name if remito.responsible_from else "" }}</span>
+      </div>
+    </div>
+    <div class="rem-party rem-party-right">
+      <div class="rem-party-title">DATOS DE DESTINO (RECIBE)</div>
+      <div class="rem-line"><span class="rem-k">Responsable:</span>
+        <span class="rem-v">{{ remito.responsible_to.full_name if remito.responsible_to else "" }}</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Ítems -->
+  <table class="rem-items">
+    <thead>
+      <tr>
+        <th class="rem-c-cant">CANT.</th>
+        <th class="rem-c-det">DETALLE / DESCRIPCIÓN</th>
+        <th class="rem-c-cod">CÓDIGO / ID</th>
+        <th class="rem-c-obs">OBSERVACIONES</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for ln in lines %}
+      <tr>
+        <td class="rem-c-cant">{{ ln.movement.qty }}</td>
+        <td class="rem-c-det">{{ ln.movement.item.name }}</td>
+        <td class="rem-c-cod">{{ ln.movement.item.code }}</td>
+        <td class="rem-c-obs">{{ ln.movement.observation or "" }}</td>
+      </tr>
+      {% endfor %}
+      {# Filas vacías para completar visualmente el cuerpo del remito #}
+      {% for _ in range(fill_rows) %}
+      <tr class="rem-empty"><td>&nbsp;</td><td></td><td></td><td></td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <!-- Firmas -->
+  <div class="rem-signs">
+    <div class="rem-sign">
+      <div class="rem-sign-title">ENTREGA</div>
+      <div class="rem-line"><span class="rem-k">Firma:</span><span class="rem-blank"></span></div>
+    </div>
+    <div class="rem-sign rem-sign-right">
+      <div class="rem-sign-title">RECIBE</div>
+      <div class="rem-line"><span class="rem-k">Firma:</span><span class="rem-blank"></span></div>
+    </div>
+  </div>
+
+  <!-- Aclaraciones -->
+  <div class="rem-notes">
+    <span class="rem-k">ACLARACIONES / OBSERVACIONES ADICIONALES:</span>
+    <span class="rem-v">{{ remito.observation or "" }}</span>
+  </div>
+</div>
+{% endblock %}

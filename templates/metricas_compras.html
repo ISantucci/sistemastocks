@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block page_title %}Métricas{% endblock %}
+{% block extra_head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/metricas.css') }}">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+{% endblock %}
+{% block title %}Métricas · Compras{% endblock %}
+{% block content %}
+{% include "_metricas_head.html" %}
+<div class="page-header"><div><h2>Compras · Solicitudes</h2><p>Gestión de solicitudes de compra en el período.</p></div></div>
+<div class="summary-grid">
+  {% for c in cards %}
+  {% if c.href %}
+  <a href="{{ c.href }}" class="summary-card {{ c.tone }} is-link">
+    <span class="label">{{ c.label }}</span><span class="value">{{ c.value }}</span><span class="hint">{{ c.hint }}</span>
+  </a>
+  {% else %}
+  <div class="summary-card {{ c.tone }}">
+    <span class="label">{{ c.label }}</span><span class="value">{{ c.value }}</span><span class="hint">{{ c.hint }}</span>
+  </div>
+  {% endif %}
+  {% endfor %}
+</div>
+<div class="mx-grid">
+  <div class="mx-panel"><div class="mx-panel-title">Solicitudes por mes</div><div class="mx-chart"><canvas id="c_trend"></canvas></div></div>
+  <div class="mx-panel"><div class="mx-panel-title">Estado de solicitudes</div><div class="mx-chart"><canvas id="c_estado"></canvas></div></div>
+</div>
+<div class="mx-grid">
+  <div class="mx-panel"><div class="mx-panel-title">Ítems más solicitados</div><div class="mx-chart tall"><canvas id="c_items"></canvas></div></div>
+  <div class="mx-panel"><div class="mx-panel-title">Categorías más solicitadas</div><div class="mx-chart tall"><canvas id="c_cats"></canvas></div></div>
+</div>
+<div class="mx-grid cols-1">
+  <div class="mx-panel"><div class="mx-panel-title">Solicitudes por usuario</div><div class="mx-chart"><canvas id="c_user"></canvas></div></div>
+</div>
+{% endblock %}
+{% block extra_scripts %}
+<script src="{{ url_for('static', filename='js/metricas.js') }}"></script>
+<script>
+MX.barV('c_trend', {{ trend_rows|map(attribute='label')|list|tojson }}, {{ trend_rows|map(attribute='value')|list|tojson }}, {tone:''});
+MX.doughnut('c_estado', {{ estado_labels|tojson }}, {{ estado_values|tojson }});
+MX.barH('c_items', {{ top_items|map(attribute='label')|list|tojson }}, {{ top_items|map(attribute='value')|list|tojson }}, {tone:''});
+MX.barH('c_cats', {{ top_cats|map(attribute='label')|list|tojson }}, {{ top_cats|map(attribute='value')|list|tojson }}, {tone:'ok'});
+MX.barH('c_user', {{ by_user|map(attribute='label')|list|tojson }}, {{ by_user|map(attribute='value')|list|tojson }}, {tone:''});
+</script>
+{% endblock %}

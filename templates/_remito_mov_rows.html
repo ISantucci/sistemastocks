@@ -1,0 +1,19 @@
+{# Fragmento: filas de movimientos para el modal de nuevo remito. #}
+{% if same %}
+  <tr><td colspan="6" class="muted">Desde y Hacia no pueden ser la misma ubicación.</td></tr>
+{% elif movements is none %}
+  <tr><td colspan="6" class="muted">Elegí Desde y Hacia para ver los movimientos.</td></tr>
+{% elif movements|length == 0 %}
+  <tr><td colspan="6" class="muted">No hay movimientos disponibles en esa relación (o ya están en un remito).</td></tr>
+{% else %}
+  {% for m in movements %}
+  <tr>
+    <td><input type="checkbox" name="movement_id" value="{{ m.id }}" checked></td>
+    <td>{{ m.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+    <td>{{ m.item.code }} — {{ m.item.name }}</td>
+    <td class="num">{{ m.qty }}</td>
+    <td>{{ m.user.full_name }}</td>
+    <td>{{ m.observation or "" }}</td>
+  </tr>
+  {% endfor %}
+{% endif %}

@@ -1,0 +1,39 @@
+{# Macros de gráficos para la sección Métricas. CSS puro, sin librerías externas
+   (funciona sin internet, ideal para la red local). #}
+
+{# Barras horizontales. rows = lista de dicts: {label, value, max, tone, badge} #}
+{% macro hbars(rows) %}
+  {% if rows %}
+  <div class="mx-bars">
+    {% for r in rows %}
+    <div class="mx-bar-row">
+      <span class="mx-bar-label" title="{{ r.label }}">{{ r.label }}{% if r.badge %}<span class="badge-truck">{{ r.badge }}</span>{% endif %}</span>
+      <span class="mx-bar-track">
+        <span class="mx-bar-fill {{ r.tone or '' }}" style="width: {{ ((r.value / r.max * 100) if r.max and r.max > 0 else 0)|round(1) }}%;"></span>
+      </span>
+      <span class="mx-bar-val">{{ r.value }}</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="mx-empty">Sin datos en el período seleccionado.</div>
+  {% endif %}
+{% endmacro %}
+
+{# Barras verticales para tendencia. rows = lista de dicts: {label, value, max} #}
+{% macro vbars(rows) %}
+  {% if rows and rows|sum(attribute='value') > 0 %}
+  <div class="mx-cols">
+    {% for r in rows %}
+    <div class="mx-col">
+      <div class="mx-col-bar" style="height: {{ ((r.value / r.max * 100) if r.max and r.max > 0 else 0)|round(1) }}%;">
+        <span class="mx-col-num">{{ r.value }}</span>
+      </div>
+      <span class="mx-col-lbl">{{ r.label }}</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="mx-empty">Sin datos en el período seleccionado.</div>
+  {% endif %}
+{% endmacro %}

@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block content %}
+  <h2>Ajuste de stock</h2>
+  <p class="muted">
+    Esto sirve para corregir cantidades sin tocar SQL. Queda registrado como movimiento <b>AJUSTE</b>.
+  </p>
+
+  <form method="post" style="max-width:720px;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="filters-grid" style="--cols: 3;">
+      <div class="filter-item">
+        <label>Item</label>
+        <select name="item_id" required>
+          <option value="" selected disabled>Seleccionar item...</option>
+          {% for it in items %}
+            <option value="{{ it.id }}">{{ it.code }} - {{ it.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+
+      <div class="filter-item">
+        <label>Ubicación</label>
+        <select name="location_id" required>
+          <option value="" selected disabled>Seleccionar ubicación...</option>
+          {% for loc in locations %}
+            <option value="{{ loc.id }}">{{ loc.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+
+      <div class="filter-item">
+        <label>Acción</label>
+        <select name="action" required>
+          <option value="SUMAR">SUMAR</option>
+          <option value="RESTAR">RESTAR</option>
+        </select>
+      </div>
+
+      <div class="filter-item">
+        <label>Cantidad</label>
+        <input type="number" name="qty" min="1" value="1" required>
+      </div>
+
+      <div class="filter-item" style="grid-column: span 2;">
+        <label>Motivo / Observación (obligatorio)</label>
+        <input name="reason" placeholder="Ej: conteo físico / corrección / ajuste por devolución" required>
+      </div>
+    </div>
+
+    <div class="filters-actions" style="margin-top:10px;">
+      <button type="submit">Aplicar ajuste</button>
+      <a href="{{ url_for('admin_panel') }}">Volver</a>
+    </div>
+  </form>
+
+  <hr />
+  <p class="muted">
+    Reglas:
+    <br>• <b>SUMAR</b> se registra como <code>Proveedor → tu ubicación</code> (Proveedor es externa).
+    <br>• <b>RESTAR</b> se registra como <code>tu ubicación → Baja/Descarte</code>.
+  </p>
+{% endblock %}

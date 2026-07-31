@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Perfil · TNGStocks{% endblock %}
+{% block page_title %}Configuración de perfil{% endblock %}
+{% block content %}
+<div class="page-center">
+  <div class="page-header" style="justify-content:center; text-align:center;">
+    <div><h2>Configuración de perfil</h2><p>Usuario: <b>{{ current_user.full_name }}</b> <span class="badge role-{{ current_user.role|lower }}">{{ current_user.role }}</span></p></div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><span class="card-title">Cambiar contraseña</span></div>
+    <form method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <div class="field"><label>Contraseña actual</label><input type="password" name="current_password" required autocomplete="current-password"></div>
+      <div class="field"><label>Nueva contraseña</label><input type="password" name="new_password" required minlength="4" autocomplete="new-password"></div>
+      <div class="field"><label>Confirmar nueva contraseña</label><input type="password" name="confirm_password" required minlength="4" autocomplete="new-password"></div>
+      <div style="margin-top:16px;"><button type="submit" class="btn btn-primary">Guardar</button></div>
+    </form>
+  </div>
+</div>
+{% endblock %}

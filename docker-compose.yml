@@ -1,0 +1,13 @@
+services:
+  sistemastocks:
+    build: .
+    container_name: sistemastocks
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    env_file:
+      - /home/isantucci/srv/sistemastocks/env/.env
+    volumes:
+      - /home/isantucci/srv/sistemastocks/data:/data
+      - /home/isantucci/srv/sistemastocks/backups:/backups
+      - /home/isantucci/srv/sistemastocks/logs:/logs

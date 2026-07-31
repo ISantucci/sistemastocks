@@ -1,0 +1,200 @@
+{% extends "base.html" %}
+{% block title %}Descartes · TNGStocks{% endblock %}
+{% block page_title %}Descartes{% endblock %}
+{% block content %}
+<div class="page-header"><div><h2>Descartes</h2><p>Dar de baja ítems dañados o irrecuperables.</p></div></div>
+
+<div class="card">
+  <div class="card-header"><span class="card-title">Registrar descarte</span></div>
+  <form method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="form-grid">
+      <div class="field">
+        <label>Desde</label>
+        <select name="from_location_id" id="from_location_id" required>
+          <option value="" selected disabled>Seleccionar ubicación...</option>
+          {% for loc in form_locations %}
+            <option value="{{ loc.id }}">{{ loc.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label>Item <span class="muted" style="font-weight:400;">(según la ubicación)</span></label>
+        <select name="item_id" id="item_id" required>
+          <option value="" selected disabled>Elegí la ubicación primero...</option>
+          {% for it in items %}
+            <option value="{{ it.id }}">{{ it.code }} - {{ it.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label>Cantidad</label>
+        <input type="number" name="qty" min="1" value="1" required />
+      </div>
+      <div class="field">
+        <label>Motivo de descarte</label>
+        <select name="scrap_reason" required>
+          <option value="" selected disabled>Seleccionar motivo...</option>
+          <option value="Irrecuperable">Irrecuperable</option>
+          <option value="Roto">Roto</option>
+          <option value="Vencido">Vencido</option>
+          <option value="Obsoleto">Obsoleto</option>
+          <option value="Otro">Otro</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Observación (opcional)</label>
+        <input name="observation" placeholder="Ej: SD dañada / cámara quemada" />
+      </div>
+    </div>
+    <div style="margin-top:16px;">
+      <button type="submit" class="btn btn-danger">Registrar descarte</button>
+    </div>
+  </form>
+</div>
+
+<div class="page-header" style="margin-top:8px;"><div><h2 style="font-size:16px;">Historial de descartes</h2></div></div>
+
+<style>
+  .filters-collapse{margin-bottom:14px;}
+  .filters-toggle{list-style:none;cursor:pointer;display:inline-flex;align-items:center;gap:8px;
+    padding:8px 14px;border:1px solid var(--border,#d0d5dd);border-radius:8px;
+    font-weight:600;font-size:14px;background:var(--surface,#fff);user-select:none;}
+  .filters-toggle::-webkit-details-marker{display:none;}
+  .filters-collapse[open] .filters-caret{transform:rotate(180deg);}
+  .filters-caret{transition:transform .15s ease;margin-left:2px;}
+  .filters-collapse .card{margin-top:10px;}
+  @media (min-width:768px){ .filters-toggle{display:none;} .filters-collapse .card{margin-top:0;} }
+</style>
+<details class="filters-collapse" id="scrapFilters">
+<summary class="filters-toggle">
+  <span class="nav-icon">&#9776;</span> Filtros
+  <span class="filters-caret">&#9662;</span>
+</summary>
+<div class="card">
+  <form method="get" class="filters-grid">
+    <div class="field">
+      <label>Desde</label>
+      <input type="date" name="from_date" value="{{ from_date }}">
+    </div>
+    <div class="field">
+      <label>Hasta</label>
+      <input type="date" name="to_date" value="{{ to_date }}">
+    </div>
+    <div class="field">
+      <label>Item</label>
+      <select name="item_filter" class="js-buscar">
+        <option value="">Todos</option>
+        {% for it in items %}
+          <option value="{{ it.id }}" {% if item_filter and (item_filter|string) == (it.id|string) %}selected{% endif %}>{{ it.code }} - {{ it.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label>Responsable</label>
+      <select name="user_filter" class="js-buscar">
+        <option value="">Todos</option>
+        {% for u in users %}
+          <option value="{{ u.id }}" {% if user_filter and (user_filter|string) == (u.id|string) %}selected{% endif %}>{{ u.full_name or u.username }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label>Motivo</label>
+      <select name="reason">
+        <option value="">Todos</option>
+        {% for r in ["Irrecuperable","Roto","Vencido","Obsoleto","Otro"] %}
+          <option value="{{ r }}" {% if reason_filter == r %}selected{% endif %}>{{ r }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label>Mostrar</label>
+      <select name="limit">
+        {% for n in [50, 100, 200, 500] %}
+          <option value="{{ n }}" {% if limit and (limit|string) == (n|string) %}selected{% endif %}>{{ n }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field-actions">
+      <button type="submit" class="btn btn-primary">Aplicar filtros</button>
+      <a href="{{ url_for('scrap_report') }}" class="btn btn-secondary">Limpiar</a>
+    </div>
+  </form>
+</div>
+</details>
+{# fin filtros colapsables #}
+
+<div class="table-card">
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr><th>Fecha</th><th>Item</th><th class="num">Cantidad</th><th>Desde</th><th>Motivo</th><th>Responsable</th></tr>
+      </thead>
+      <tbody>
+        {% for s in scraps %}
+        <tr>
+          <td>{{ s.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+          <td>{{ s.item.code }} — {{ s.item.name }}</td>
+          <td class="num">{{ s.quantity }}</td>
+          <td>{{ s.location.name }}</td>
+          <td><span class="badge badge-danger">{{ s.reason or "-" }}</span></td>
+          <td>{{ s.user.full_name or s.user.username }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="muted">Sin registros.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  // Filtros: en desktop siempre visibles; en mobile colapsados por defecto.
+  var scrapFilters = document.getElementById("scrapFilters");
+  if (scrapFilters) {
+    var syncScrapFilters = function () {
+      if (window.matchMedia("(min-width:768px)").matches) { scrapFilters.open = true; }
+    };
+    syncScrapFilters();
+    window.addEventListener("resize", syncScrapFilters);
+  }
+  var stockMap = {{ stock_map|tojson }};
+  var fromSel = document.getElementById("from_location_id");
+  var itemEl = document.getElementById("item_id");
+  if (!itemEl) return;
+
+  var allItems = [];
+  Array.from(itemEl.options).forEach(function (o) {
+    if (o.value) allItems.push({ value: o.value, text: o.text });
+  });
+
+  var ts = new TomSelect(itemEl, {
+    create: false,
+    sortField: { field: "text", direction: "asc" },
+    placeholder: "Buscar item por codigo o nombre...",
+    closeAfterSelect: true,
+    onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
+    onChange: function () { this.blur(); }
+  });
+
+  function refreshItems() {
+    var locId = fromSel ? String(fromSel.value || "") : "";
+    var allowed = stockMap[locId] || [];
+    var allowedSet = {};
+    allowed.forEach(function (id) { allowedSet[String(id)] = true; });
+    ts.clear(true);
+    ts.clearOptions();
+    allItems.forEach(function (o) { if (allowedSet[o.value]) ts.addOption(o); });
+    ts.refreshOptions(false);
+    if (!locId) { ts.disable(); } else { ts.enable(); }
+  }
+
+  if (fromSel && fromSel.tagName === "SELECT") {
+    fromSel.addEventListener("change", refreshItems);
+  }
+  refreshItems();
+});
+</script>
+{% endblock %}

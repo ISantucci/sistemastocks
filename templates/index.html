@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% block title %}Inicio · TNGStocks{% endblock %}
+{% block page_title %}Inicio{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <h2>Hola, {{ current_user.full_name or current_user.username }}</h2>
+    <p>Resumen del estado actual del depósito.</p>
+  </div>
+</div>
+
+<div class="summary-grid">
+  {% for c in cards %}
+  {% if c.href %}
+  <a href="{{ c.href }}" class="summary-card {{ c.tone }} is-link">
+    <span class="label">{{ c.label }}</span>
+    <span class="value">{{ c.value }}</span>
+    <span class="hint">{{ c.hint }}</span>
+  </a>
+  {% else %}
+  <div class="summary-card {{ c.tone }}">
+    <span class="label">{{ c.label }}</span>
+    <span class="value">{{ c.value }}</span>
+    <span class="hint">{{ c.hint }}</span>
+  </div>
+  {% endif %}
+  {% endfor %}
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <span class="card-title">Últimos movimientos</span>
+    {% if me and me.role in ["ADMIN", "SUPERVISOR"] %}
+    <a href="{{ url_for('movements') }}" class="btn btn-secondary btn-sm">Ver todos</a>
+    {% endif %}
+  </div>
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr><th>Fecha</th><th>Item</th><th class="num">Qty</th><th>Desde</th><th>Hacia</th><th>Responsable</th></tr>
+      </thead>
+      <tbody>
+        {% for m in ultimos_movimientos %}
+        <tr>
+          <td>{{ m.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+          <td>{{ m.item.code }} - {{ m.item.name }}</td>
+          <td class="num">{{ m.qty }}</td>
+          <td>{{ m.from_location.name }}</td>
+          <td>{{ m.to_location.name }}</td>
+          <td>{{ m.user.full_name }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="muted">Sin movimientos registrados.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% if top_consumos %}
+<div class="card">
+  <div class="card-header"><span class="card-title">Top consumos del mes</span></div>
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr><th>Item</th><th class="num">Unidades</th></tr>
+      </thead>
+      <tbody>
+        {% for row in top_consumos %}
+        <tr>
+          <td>{{ row.item.code }} - {{ row.item.name }}</td>
+          <td class="num">{{ row.total }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+<div class="card">
+  <div class="card-header"><span class="card-title">Accesos rápidos</span></div>
+  <div style="display:flex; flex-wrap:wrap; gap:10px;">
+    {# Accesos rápidos = exactamente las secciones que el rol puede abrir en el menú. #}
+    <a href="{{ url_for('stock') }}" class="btn btn-secondary">Stock</a>
+    {% if me and me.role in ["ADMIN", "SUPERVISOR", "TECNICO", "LECTOR"] %}
+    <a href="{{ url_for('movements') }}" class="btn btn-secondary">Movimientos</a>
+    {% endif %}
+    {% if me and me.role in ["ADMIN", "SUPERVISOR"] %}
+    <a href="{{ url_for('movements_bulk') }}" class="btn btn-secondary">Carga múltiple</a>
+    {% endif %}
+    {% if me and me.role in ["ADMIN", "SUPERVISOR", "TECNICO"] %}
+    <a href="{{ url_for('item_usage') }}" class="btn btn-secondary">Utilizados</a>
+    {% endif %}
+    {% if me and me.role in ["ADMIN", "SUPERVISOR"] %}
+    <a href="{{ url_for('scrap_report') }}" class="btn btn-secondary">Descartes</a>
+    {% endif %}
+    {% if me and me.role in ["ADMIN", "SUPERVISOR", "TECNICO"] %}
+    <a href="{{ url_for('pending_deliveries') }}" class="btn btn-secondary">Pendientes</a>
+    {% endif %}
+    {% if me and me.role in ["ADMIN", "SUPERVISOR", "LECTOR"] %}
+    <a href="{{ url_for('reparaciones') }}" class="btn btn-secondary">Reparaciones</a>
+    {% endif %}
+    {% if me and me.role in ["ADMIN", "SUPERVISOR"] %}
+    <a href="{{ url_for('stock_alerts') }}" class="btn btn-secondary">Alertas</a>
+    {% endif %}
+    {% if me and me.role in ["ADMIN", "SUPERVISOR", "LECTOR"] %}
+    <a href="{{ url_for('purchase_requests') }}" class="btn btn-secondary">Solicitudes de compra</a>
+    {% endif %}
+    <a href="{{ url_for('remitos') }}" class="btn btn-secondary">Remitos</a>
+    {% if me and me.role in ["ADMIN", "SUPERVISOR", "LECTOR"] %}
+    <a href="{{ url_for('items') }}" class="btn btn-secondary">Ítems</a>
+    {% endif %}
+    {% if me and me.role in ["ADMIN", "SUPERVISOR"] %}
+    <a href="{{ url_for('categories') }}" class="btn btn-secondary">Categorías</a>
+    <a href="{{ url_for('locations') }}" class="btn btn-secondary">Ubicaciones</a>
+    {% endif %}
+    {% if me and me.role == "ADMIN" %}
+    <a href="{{ url_for('users') }}" class="btn btn-secondary">Usuarios</a>
+    {% endif %}
+    {% if me and me.role in ["ADMIN", "SUPERVISOR", "LECTOR"] %}
+    <a href="{{ url_for('metricas') }}" class="btn btn-secondary">Métricas</a>
+    {% endif %}
+    {% if me and me.role in ["ADMIN", "SUPERVISOR"] %}
+    <a href="{{ url_for('conteo') }}" class="btn btn-secondary">Conteo de stock</a>
+    {% endif %}
+    {% if me and me.role == "ADMIN" %}
+    <a href="{{ url_for('admin_panel') }}" class="btn btn-secondary">Admin</a>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

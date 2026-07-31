@@ -1,0 +1,33 @@
+{# Cabecera común de la sección Métricas: pestañas + filtro de período.
+   Variables esperadas: active_tab, desde, hasta, preset, range_label, presets,
+   show_filter (bool, default True). #}
+<div class="mx-tabs">
+  <a class="mx-tab {% if active_tab == 'resumen' %}active{% endif %}" href="{{ url_for('metricas') }}">Resumen</a>
+  <a class="mx-tab {% if active_tab == 'compras' %}active{% endif %}" href="{{ url_for('metricas_compras') }}">Compras</a>
+  <a class="mx-tab {% if active_tab == 'consumo' %}active{% endif %}" href="{{ url_for('metricas_consumo') }}">Consumo / Uso</a>
+  <a class="mx-tab {% if active_tab == 'descartes' %}active{% endif %}" href="{{ url_for('metricas_descartes') }}">Descartes</a>
+  <a class="mx-tab {% if active_tab == 'camionetas' %}active{% endif %}" href="{{ url_for('metricas_camionetas') }}">Camionetas</a>
+  <a class="mx-tab {% if active_tab == 'inventario' %}active{% endif %}" href="{{ url_for('metricas_inventario') }}">Inventario</a>
+  <a class="mx-tab {% if active_tab == 'movimientos' %}active{% endif %}" href="{{ url_for('metricas_movimientos') }}">Movimientos</a>
+  <a class="mx-tab {% if active_tab == 'reparaciones' %}active{% endif %}" href="{{ url_for('metricas_reparaciones') }}">Reparaciones</a>
+</div>
+
+{% if show_filter is not defined or show_filter %}
+<form class="mx-filter" method="get" action="{{ request.path }}">
+  <div class="mx-presets">
+    {% for key, lbl in presets %}
+    <a class="mx-preset {% if preset == key %}active{% endif %}" href="{{ request.path }}?preset={{ key }}">{{ lbl }}</a>
+    {% endfor %}
+  </div>
+  <div class="mx-field">
+    <label for="mx-desde">Desde</label>
+    <input type="date" id="mx-desde" name="desde" value="{{ desde }}">
+  </div>
+  <div class="mx-field">
+    <label for="mx-hasta">Hasta</label>
+    <input type="date" id="mx-hasta" name="hasta" value="{{ hasta }}">
+  </div>
+  <button type="submit" class="btn btn-secondary btn-sm">Aplicar</button>
+  <span class="mx-range-note">{{ range_label }}</span>
+</form>
+{% endif %}

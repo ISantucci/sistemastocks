@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}Solicitud {{ pr.number }} · TNGStocks{% endblock %}
+{% block page_title %}Solicitud {{ pr.number }}{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <h2>Solicitud {{ pr.number }}</h2>
+    <p>
+      Creada {{ pr.created_at.strftime("%Y-%m-%d %H:%M") }} por {{ pr.created_by.full_name }}.
+      Estado:
+      {% if pr.status == "REALIZADA" %}
+        <span class="badge badge-ok">REALIZADA</span>
+      {% else %}
+        <span class="badge badge-neutral">PENDIENTE</span>
+      {% endif %}
+    </p>
+  </div>
+  {% if not embed %}<a href="{{ url_for('purchase_requests') }}" class="btn btn-secondary">Volver</a>{% endif %}
+</div>
+
+<div class="table-card">
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr><th>Código</th><th>Ítem</th><th class="num">Cantidad</th></tr>
+      </thead>
+      <tbody>
+        {% for ln in pr.lines %}
+        <tr>
+          <td>{{ ln.item.code }}</td>
+          <td>{{ ln.item.name }}</td>
+          <td class="num">{{ ln.qty }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% if pr.observation %}
+<div class="card"><strong>Observación:</strong> {{ pr.observation }}</div>
+{% endif %}
+
+<div class="card">
+  <h3 style="margin-top:0;">Mail de solicitud</h3>
+  <p class="muted">Copiá y pegá en tu cliente de correo. El envío por ahora es manual.</p>
+  <div class="field">
+    <label>Para</label>
+    <input id="sc-to" value="{{ email.to }}" readonly onclick="this.select();">
+  </div>
+  <div class="field">
+    <label>Asunto</label>
+    <input id="sc-subject" value="{{ email.subject }}" readonly onclick="this.select();">
+  </div>
+  <div class="field">
+    <label>Cuerpo</label>
+    <textarea id="sc-body" rows="10" readonly onclick="this.select();">{{ email.body }}</textarea>
+  </div>
+  <button type="button" class="btn btn-secondary" onclick="copyPRBody()">Copiar cuerpo</button>
+  <span id="sc-copied" class="muted" style="margin-left:8px;"></span>
+</div>
+
+{% if me and me.role in ["ADMIN","SUPERVISOR"] and pr.status != "REALIZADA" %}
+<div class="card">
+  <form method="post" action="{{ url_for('purchase_request_mark_done', pr_id=pr.id) }}"
+        onsubmit="return confirm('¿Marcar la solicitud {{ pr.number }} como realizada? Los ítems quedarán como Solicitado=Sí en Alertas de Stock.');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button type="submit" class="btn btn-primary">Marcar como realizada</button>
+    <span class="muted" style="margin-left:8px;">Marcala una vez que hayas enviado el mail.</span>
+  </form>
+</div>
+{% endif %}
+
+<script>
+  function copyPRBody() {
+    var ta = document.getElementById('sc-body');
+    var out = document.getElementById('sc-copied');
+    if (!ta) return;
+    ta.select();
+    try {
+      navigator.clipboard.writeText(ta.value);
+    } catch (e) {
+      document.execCommand('copy');
+    }
+    if (out) { out.textContent = 'Copiado.'; setTimeout(function(){ out.textContent=''; }, 2000); }
+  }
+</script>
+{% endblock %}

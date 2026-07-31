@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}Categorías · TNGStocks{% endblock %}
+{% block page_title %}Categorías{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div><h2>Categorías</h2><p>Agrupación de ítems del catálogo.</p></div>
+  {% if me and me.role == "ADMIN" %}
+    <button type="button" class="btn btn-primary" onclick="openModal('modal-cat-new')">+ Nueva categoría</button>
+  {% endif %}
+</div>
+
+<div class="table-card">
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th class="num"><a href="{{ url_for('categories', sort_by='id', sort_dir='desc' if selected_sort_by == 'id' and selected_sort_dir == 'asc' else 'asc') }}">ID{% if selected_sort_by == 'id' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th><a href="{{ url_for('categories', sort_by='name', sort_dir='desc' if selected_sort_by == 'name' and selected_sort_dir == 'asc' else 'asc') }}">Nombre{% if selected_sort_by == 'name' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th><a href="{{ url_for('categories', sort_by='description', sort_dir='desc' if selected_sort_by == 'description' and selected_sort_dir == 'asc' else 'asc') }}">Descripción{% if selected_sort_by == 'description' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th>Prefijo</th>
+          {% if me and me.role == "ADMIN" %}<th>Acciones</th>{% endif %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in categories %}
+        <tr>
+          <td class="num">{{ c.id }}</td>
+          <td><b>{{ c.name }}</b></td>
+          <td>{{ c.description or "—" }}</td>
+          <td>{{ c.prefix or "—" }}</td>
+          {% if me and me.role == "ADMIN" %}
+          <td class="actions-cell"><button type="button" class="btn btn-secondary btn-sm" onclick="openModal('modal-cat-{{ c.id }}')">Editar</button></td>
+          {% endif %}
+        </tr>
+        {% else %}
+        <tr><td colspan="{% if me and me.role == 'ADMIN' %}5{% else %}4{% endif %}" class="muted">Sin categorías. Creá la primera con "+ Nueva categoría".</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% if me and me.role == "ADMIN" %}
+<!-- Modal: nueva categoría -->
+<div class="modal-overlay" id="modal-cat-new">
+  <div class="modal">
+    <div class="modal-header"><span class="modal-title">Nueva categoría</span><button type="button" class="modal-close" onclick="closeModal('modal-cat-new')">&times;</button></div>
+    <form method="post" action="{{ url_for('categories') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <div class="modal-body">
+        <div class="field"><label>Nombre</label><input name="name" required></div>
+        <div class="field"><label>Prefijo de código (3 letras)</label>
+          <input name="prefix" maxlength="3" minlength="3" pattern="[A-Za-z]{3}" placeholder="Ej. CAB" required style="text-transform:uppercase;">
+          <div class="muted">Se usa para el código de los items (ej. CAB-001). Único por categoría.</div>
+        </div>
+        <div class="field"><label>Descripción (opcional)</label><input name="description"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-cat-new')">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endif %}
+
+{% if me and me.role == "ADMIN" %}
+<!-- Modales: editar categoría (solo ADMIN) -->
+{% for c in categories %}
+<div class="modal-overlay" id="modal-cat-{{ c.id }}">
+  <div class="modal">
+    <div class="modal-header"><span class="modal-title">Editar categoría</span><button type="button" class="modal-close" onclick="closeModal('modal-cat-{{ c.id }}')">&times;</button></div>
+    <form method="post" action="{{ url_for('category_edit', cat_id=c.id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <div class="modal-body">
+        <div class="field"><label>Nombre</label><input name="name" value="{{ c.name }}" required></div>
+        <div class="field"><label>Prefijo de código (3 letras)</label>
+          {% if c.id in locked_prefix_ids %}
+          <input value="{{ c.prefix or '' }}" disabled style="text-transform:uppercase;">
+          <div class="muted">Bloqueado: la categoría ya tiene items, no se puede cambiar el prefijo.</div>
+          {% else %}
+          <input name="prefix" value="{{ c.prefix or '' }}" maxlength="3" minlength="3" pattern="[A-Za-z]{3}" placeholder="Ej. CAB" required style="text-transform:uppercase;">
+          <div class="muted">Único por categoría. Se puede cambiar solo mientras la categoría no tenga items.</div>
+          {% endif %}
+        </div>
+        <div class="field"><label>Descripción (opcional)</label><input name="description" value="{{ c.description or '' }}"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-cat-{{ c.id }}')">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar cambios</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endfor %}
+{% endif %}
+{% endblock %}

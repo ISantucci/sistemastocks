@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Pendientes · TNGStocks{% endblock %}
+{% block page_title %}Pendientes de entrega{% endblock %}
+{% block content %}
+<div class="page-header"><div><h2>Pendientes de entrega</h2><p>Entregas sin devolución confirmada.</p></div></div>
+
+<div class="table-card">
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Fecha</th><th>Entrega</th><th>Recibe</th><th>ID Item</th><th>Nombre item</th><th>Debe devolver</th><th>Comentario</th><th>Devuelto</th><th>Acción</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in pendings %}
+        <tr>
+          <td>{{ p.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+          <td>{{ p.responsible_from.username }}</td>
+          <td>{{ p.responsible_to.username }}</td>
+          <td>{{ p.item.code }}</td>
+          <td>{{ p.item.name }}</td>
+          {% set swap = p.return_item_id and p.return_item_id != p.item_id %}
+          <td>
+            {% if swap %}<span class="badge badge-warn">{{ p.return_item.code }}</span> x{{ p.return_qty or p.movement.qty }}
+            {% else %}<span class="muted">mismo</span> x{{ p.return_qty or p.movement.qty }}{% endif %}
+          </td>
+          <td>{{ p.comment or "" }}</td>
+          <td>
+            {% if p.returned %}
+              <span class="badge badge-ok">Devuelto</span>
+            {% else %}
+              <span class="badge badge-warn">Pendiente</span>
+            {% endif %}
+          </td>
+          <td class="actions-cell">
+            {% if me.role == "TECNICO" %}
+            {% if not p.returned %}<span class="muted">Solo lectura</span>{% endif %}
+            {% elif not p.returned %}
+            <form method="post" class="pending-action">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <input type="hidden" name="pending_id" value="{{ p.id }}">
+              <div class="check-inline" style="gap:14px;">
+                <label class="check-inline"><input type="radio" name="return_action" value="return" checked> {{ "Ingresar OK (Jaula)" if swap else "Devolver" }}</label>
+                <label class="check-inline"><input type="radio" name="return_action" value="repair"> A reparación</label>
+                <label class="check-inline"><input type="radio" name="return_action" value="scrap" id="scrap_radio_{{ p.id }}"> Enviar a Descartes</label>
+              </div>
+              <div id="scrap_opts_{{ p.id }}" style="display:none; margin-top:6px;">
+                <select name="scrap_reason">
+                  <option value="">Motivo...</option>
+                  <option value="Irrecuperable">Irrecuperable</option>
+                  <option value="Roto">Roto</option>
+                  <option value="Vencido">Vencido</option>
+                  <option value="Obsoleto">Obsoleto</option>
+                  <option value="Otro">Otro</option>
+                </select>
+              </div>
+              <input type="text" name="return_observation" placeholder="Observación (opcional)" style="margin-top:6px;">
+              <div style="margin-top:6px;"><button class="btn btn-primary btn-sm">Confirmar</button></div>
+              <script>
+              (function(){
+                var radio = document.getElementById("scrap_radio_{{ p.id }}");
+                var opts  = document.getElementById("scrap_opts_{{ p.id }}");
+                radio.closest("form").querySelectorAll("input[name=return_action]").forEach(function(r){
+                  r.addEventListener("change", function(){ opts.style.display = radio.checked ? "block" : "none"; });
+                });
+              })();
+              </script>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="9" class="muted">Sin pendientes.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

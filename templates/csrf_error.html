@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Sesión vencida · TNGStocks{% endblock %}
+{% block page_title %}Formulario vencido{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>No se pudo procesar el envío</h2>
+  <p>La sesión del formulario venció o el envío no es válido. Volvé a cargar la página e intentá nuevamente.</p>
+  <div class="field-actions" style="margin-top:12px;">
+    <a href="{{ url_for('home') }}" class="btn btn-primary">Ir al inicio</a>
+  </div>
+</div>
+{% endblock %}

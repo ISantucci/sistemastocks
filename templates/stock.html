@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}Stock · TNGStocks{% endblock %}
+{% block page_title %}Stock{% endblock %}
+{% block content %}
+<style>
+  .stock-red{background-color:#ffe5e5;color:#a40000;font-weight:700;}
+  .stock-yellow{background-color:#fff6cc;color:#8a6d00;font-weight:700;}
+  .stock-green{background-color:#e7f7e7;color:#1f6b1f;font-weight:700;}
+</style>
+
+<div class="page-header">
+  <div>
+    <h2>Stock</h2>
+    <p>Existencias por ubicación e ítem.</p>
+  </div>
+  <a href="{{ url_for('stock_export_csv', location_id=selected_location_id, category_id=selected_category_id, trackable=selected_trackable, q=selected_q) }}" class="btn btn-secondary">Export CSV</a>
+</div>
+
+<div class="card">
+  <form method="get" class="filters-grid">
+    <div class="field">
+      <label>Ubicación</label>
+      {% if is_tecnico and locations|length == 1 %}
+        <input type="text" value="{{ locations[0].name }}" readonly disabled />
+        <input type="hidden" name="location_id" value="{{ locations[0].id }}" />
+      {% elif is_tecnico %}
+        <select name="location_id" class="js-buscar">
+          {% for loc in locations %}
+            <option value="{{ loc.id }}" {% if selected_location_id == loc.id|string %}selected{% endif %}>{{ loc.name }}</option>
+          {% endfor %}
+        </select>
+      {% else %}
+        <select name="location_id" class="js-buscar">
+          <option value="">Todas</option>
+          {% for loc in locations %}
+            <option value="{{ loc.id }}" {% if selected_location_id == loc.id|string %}selected{% endif %}>{{ loc.name }}</option>
+          {% endfor %}
+        </select>
+      {% endif %}
+    </div>
+    <div class="field">
+      <label>Categoría</label>
+      <select name="category_id" class="js-buscar">
+        <option value="">Todas</option>
+        {% for c in categories %}
+          <option value="{{ c.id }}" {% if selected_category_id == c.id|string %}selected{% endif %}>{{ c.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label>Rastreable</label>
+      <select name="trackable">
+        <option value="" {% if selected_trackable == "" %}selected{% endif %}>Todos</option>
+        <option value="1" {% if selected_trackable == "1" %}selected{% endif %}>Sí</option>
+        <option value="0" {% if selected_trackable == "0" %}selected{% endif %}>No</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Buscar item</label>
+      <select name="q" class="js-buscar">
+        <option value="">Todos</option>
+        {% for it in items %}
+          <option value="{{ it.code }}" {% if selected_q == it.code %}selected{% endif %}>{{ it.code }} - {{ it.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field-actions">
+      <button type="submit" class="btn btn-primary">Filtrar</button>
+      <a href="{{ url_for('stock') }}" class="btn btn-secondary">Limpiar</a>
+    </div>
+  </form>
+</div>
+
+<div class="table-card">
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Ubicación</th>
+          <th>Código</th>
+          <th>Nombre</th>
+          <th>Categoría</th>
+          <th>Rastreable</th>
+          <th>Descripción</th>
+          <th class="num">Cantidad</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in stock_rows %}
+        <tr>
+          <td>{{ row.location.name }}</td>
+          <td>{{ row.item.code }}</td>
+          <td>{{ row.item.name }}</td>
+          <td>{{ row.item.category.name }}</td>
+          <td>{{ "Sí" if row.item.trackable else "No" }}</td>
+          <td>{{ row.item.description or "" }}</td>
+          <td class="num {{ stock_level_class(row.item, row.quantity) }}">{{ row.quantity }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7" class="muted">Sin resultados.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

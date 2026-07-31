@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block title %}Conteo de stock · TNGStocks{% endblock %}
+{% block page_title %}Conteo de stock{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <h2>Conteo de stock</h2>
+    <p class="muted">Contá el stock físico de una ubicación. Las diferencias se registran como ajustes trazables (movimientos), igual que "Ajustar stock". No borra ni edita el histórico.</p>
+  </div>
+</div>
+
+{% if step == "choose" %}
+<div class="card" style="max-width:520px;">
+  <div class="card-header"><span class="card-title">1) Elegí la ubicación a contar</span></div>
+  <form method="get" action="{{ url_for('conteo') }}">
+    <div class="field">
+      <label>Ubicación</label>
+      <select name="location_id" required>
+        <option value="">— Seleccioná —</option>
+        {% for l in locations %}
+        <option value="{{ l.id }}">{{ l.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div style="margin-top:12px;"><button type="submit" class="btn btn-primary">Continuar</button></div>
+  </form>
+</div>
+
+{% elif step == "count" %}
+<div class="card">
+  <div class="card-header">
+    <span class="card-title">2) Conteo físico — {{ location.name }}</span>
+    <a href="{{ url_for('conteo') }}" class="btn btn-secondary btn-sm">Cambiar ubicación</a>
+  </div>
+  <form method="post" action="{{ url_for('conteo') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="location_id" value="{{ location.id }}">
+    <input type="hidden" name="action" value="preview">
+    <p class="muted">Escribí lo que contaste físicamente. Si dejás un campo vacío, ese ítem no se toca.</p>
+    <div class="table-scroll" style="max-height:55vh;">
+      <table class="data-table">
+        <thead>
+          <tr><th>Ítem</th><th class="num">Sistema</th><th class="num">Contado</th></tr>
+        </thead>
+        <tbody>
+          {% for stock, item in stock_rows %}
+          <tr>
+            <td>{{ item.code }} — {{ item.name }}</td>
+            <td class="num">{{ stock.quantity }}</td>
+            <td class="num"><input type="number" name="contado_{{ item.id }}" min="0" placeholder="{{ stock.quantity }}" style="width:90px;"></td>
+          </tr>
+          {% else %}
+          <tr><td colspan="3" class="muted">Esta ubicación no tiene stock cargado.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="field" style="margin-top:12px; max-width:420px;">
+      <label>Motivo del conteo (obligatorio)</label>
+      <input name="motivo" maxlength="255" required placeholder="Ej: conteo mensual camioneta">
+    </div>
+    <div style="margin-top:12px;"><button type="submit" class="btn btn-primary">Ver diferencias</button></div>
+  </form>
+</div>
+
+{% elif step == "preview" %}
+<div class="card">
+  <div class="card-header"><span class="card-title">3) Confirmá las diferencias — {{ location.name }}</span></div>
+  <p class="muted">Estos son los ajustes que se van a registrar. Un <strong>sobrante</strong> ingresa desde Proveedor; un <strong>faltante</strong> sale hacia Descartes. Revisá antes de confirmar.</p>
+  <div class="table-scroll" style="max-height:55vh;">
+    <table class="data-table">
+      <thead>
+        <tr><th>Ítem</th><th class="num">Sistema</th><th class="num">Contado</th><th class="num">Diferencia</th></tr>
+      </thead>
+      <tbody>
+        {% for d in diffs %}
+        <tr>
+          <td>{{ d.item.code }} — {{ d.item.name }}</td>
+          <td class="num">{{ d.sistema }}</td>
+          <td class="num">{{ d.contado }}</td>
+          <td class="num">{% if d.delta > 0 %}+{{ d.delta }}{% else %}{{ d.delta }}{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <form method="post" action="{{ url_for('conteo') }}" style="margin-top:12px;" onsubmit="return confirm('Se registrarán los ajustes de conteo. ¿Confirmar?');">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="location_id" value="{{ location.id }}">
+    <input type="hidden" name="motivo" value="{{ motivo }}">
+    <input type="hidden" name="action" value="apply">
+    {% for d in diffs %}
+    <input type="hidden" name="contado_{{ d.item.id }}" value="{{ d.contado }}">
+    {% endfor %}
+    <button type="submit" class="btn btn-primary">Confirmar y registrar ajustes</button>
+    <a href="{{ url_for('conteo', location_id=location.id) }}" class="btn btn-secondary">Volver a contar</a>
+  </form>
+</div>
+{% endif %}
+{% endblock %}

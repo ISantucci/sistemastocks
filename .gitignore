@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+data/
+data_local/
+backups/
+backups_local/
+logs/
+logs_local/
+*.db
+.env

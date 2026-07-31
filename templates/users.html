@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}Usuarios · TNGStocks{% endblock %}
+{% block page_title %}Usuarios{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div><h2>Usuarios</h2><p>Cuentas y roles del sistema.</p></div>
+  <button type="button" class="btn btn-primary" onclick="openModal('modal-user-new')">+ Nuevo usuario</button>
+</div>
+
+<div class="card">
+  <form method="get" class="filters-grid">
+    <div class="field">
+      <label>Buscar</label>
+      <input name="q" placeholder="Username o nombre..." value="{{ q }}" />
+    </div>
+    <div class="field-actions">
+      <button type="submit" class="btn btn-primary">Filtrar</button>
+      <a href="{{ url_for('users') }}" class="btn btn-secondary">Limpiar</a>
+    </div>
+  </form>
+</div>
+
+<div class="table-card">
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th><a href="{{ url_for('users', q=q, sort_by='id', sort_dir='desc' if selected_sort_by == 'id' and selected_sort_dir == 'asc' else 'asc') }}">ID{% if selected_sort_by == 'id' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th><a href="{{ url_for('users', q=q, sort_by='username', sort_dir='desc' if selected_sort_by == 'username' and selected_sort_dir == 'asc' else 'asc') }}">Username{% if selected_sort_by == 'username' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th><a href="{{ url_for('users', q=q, sort_by='full_name', sort_dir='desc' if selected_sort_by == 'full_name' and selected_sort_dir == 'asc' else 'asc') }}">Nombre{% if selected_sort_by == 'full_name' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th><a href="{{ url_for('users', q=q, sort_by='role', sort_dir='desc' if selected_sort_by == 'role' and selected_sort_dir == 'asc' else 'asc') }}">Rol{% if selected_sort_by == 'role' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th>Acciones</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for u in users %}
+        <tr>
+          <td>{{ u.id }}</td>
+          <td>{{ u.username }}</td>
+          <td>{{ u.full_name }}</td>
+          <td><span class="badge role-{{ u.role|lower }}">{{ u.role }}</span></td>
+          <td class="actions-cell">
+            {% if u.id in manageable_ids %}
+              <button type="button" class="btn btn-secondary btn-sm" onclick="openModal('modal-user-{{ u.id }}')">Editar</button>
+            {% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="muted">Sin usuarios.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Modal: nuevo usuario -->
+<div class="modal-overlay" id="modal-user-new">
+  <div class="modal">
+    <div class="modal-header"><span class="modal-title">Nuevo usuario</span><button type="button" class="modal-close" onclick="closeModal('modal-user-new')">&times;</button></div>
+    <form method="post" action="{{ url_for('users') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <div class="modal-body">
+        <div class="field"><label>Username</label><input name="username" required></div>
+        <div class="field"><label>Nombre completo</label><input name="full_name" required></div>
+        <div class="field"><label>Rol</label>
+          <select name="role" required>
+            <option value="" selected disabled>Seleccionar rol...</option>
+            {% for r in roles %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="field"><label>Contraseña</label><input name="password" type="password" minlength="8" required></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-user-new')">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+{% for u in users %}
+{% if u.id in manageable_ids %}
+<!-- Modal: editar usuario -->
+<div class="modal-overlay" id="modal-user-{{ u.id }}">
+  <div class="modal">
+    <div class="modal-header"><span class="modal-title">Editar usuario</span><button type="button" class="modal-close" onclick="closeModal('modal-user-{{ u.id }}')">&times;</button></div>
+    <form method="post" action="{{ url_for('user_edit', user_id=u.id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <div class="modal-body">
+        <div class="field"><label>Username</label><input name="username" value="{{ u.username }}" required></div>
+        <div class="field"><label>Nombre completo</label><input name="full_name" value="{{ u.full_name }}" required></div>
+        <div class="field"><label>Rol</label>
+          <select name="role" required>
+            {% for r in roles %}<option value="{{ r }}" {% if u.role == r %}selected{% endif %}>{{ r }}</option>{% endfor %}
+          </select>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-user-{{ u.id }}')">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar cambios</button>
+      </div>
+    </form>
+    <form method="post" action="{{ url_for('user_password', user_id=u.id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <div class="modal-body" style="border-top:1px solid var(--border); padding-top:14px;">
+        <span class="card-title">Contraseña</span>
+        <p class="muted" style="margin:4px 0 10px;">La contraseña está cifrada y no puede mostrarse. Podés establecer una nueva.</p>
+        <div class="field">
+          <label>Nueva contraseña</label>
+          <div class="pw-wrap">
+            <input name="password" type="password" id="pw-{{ u.id }}" minlength="8" required>
+            {% if can_see_passwords %}
+            <button type="button" class="pw-eye" onclick="togglePw('pw-{{ u.id }}', this)" aria-label="Ver contraseña">&#128065;</button>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="submit" class="btn btn-primary">Actualizar contraseña</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endif %}
+{% endfor %}
+{% endblock %}

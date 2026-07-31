@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block page_title %}Métricas{% endblock %}
+{% block extra_head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/metricas.css') }}">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+{% endblock %}
+{% block title %}Métricas · Inventario{% endblock %}
+{% block content %}
+{% include "_metricas_head.html" %}
+<div class="page-header"><div><h2>Inventario</h2><p>Foto actual del stock · no depende del período.</p></div></div>
+<div class="summary-grid">
+  {% for c in cards %}
+  {% if c.href %}
+  <a href="{{ c.href }}" class="summary-card {{ c.tone }} is-link">
+    <span class="label">{{ c.label }}</span><span class="value">{{ c.value }}</span><span class="hint">{{ c.hint }}</span>
+  </a>
+  {% else %}
+  <div class="summary-card {{ c.tone }}">
+    <span class="label">{{ c.label }}</span><span class="value">{{ c.value }}</span><span class="hint">{{ c.hint }}</span>
+  </div>
+  {% endif %}
+  {% endfor %}
+</div>
+<div class="mx-grid">
+  <div class="mx-panel"><div class="mx-panel-title">Stock por categoría</div><div class="mx-chart tall"><canvas id="i_cats"></canvas></div></div>
+  <div class="mx-panel"><div class="mx-panel-title">Stock por ubicación</div><div class="mx-chart tall"><canvas id="i_loc"></canvas></div></div>
+</div>
+{% endblock %}
+{% block extra_scripts %}
+<script src="{{ url_for('static', filename='js/metricas.js') }}"></script>
+<script>
+MX.doughnut('i_cats', {{ by_cat|map(attribute='label')|list|tojson }}, {{ by_cat|map(attribute='value')|list|tojson }});
+MX.barH('i_loc', {{ by_loc|map(attribute='label')|list|tojson }}, {{ by_loc|map(attribute='value')|list|tojson }}, {tone:''});
+</script>
+{% endblock %}

@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+  <h2>Editar usuario</h2>
+  <form method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div>
+      <label>Username</label><br />
+      <input name="username" value="{{ u.username }}" required />
+    </div>
+    <div>
+      <label>Nombre completo</label><br />
+      <input name="full_name" value="{{ u.full_name }}" required />
+    </div>
+    <div>
+      <label>Rol</label><br />
+      <select name="role" required>
+        {% for r in roles %}
+          <option value="{{ r }}" {% if u.role == r %}selected{% endif %}>{{ r }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <button type="submit">Guardar cambios</button>
+    <a href="{{ url_for('users') }}">Cancelar</a>
+  </form>
+
+  <hr />
+  <p><a href="{{ url_for('user_password', user_id=u.id) }}">Cambiar contraseña…</a></p>
+{% endblock %}

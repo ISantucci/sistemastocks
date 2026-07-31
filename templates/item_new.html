@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block content %}
+  <h2>Nuevo item</h2>
+
+  <form method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div>
+      <label>Categoría</label><br />
+      <select name="category_id" id="category_id" required onchange="updateCodePreview()">
+        <option value="" selected disabled>Elegí...</option>
+        {% for c in categories %}
+          <option value="{{ c.id }}" data-next="{{ next_codes.get(c.id, '') }}">{{ c.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label>Código (automático)</label><br />
+      <input id="code_preview" value="" placeholder="Elegí una categoría" readonly disabled style="background:#eee;color:#666;" />
+      <div class="muted">Se completa solo según la categoría. El definitivo se asigna al guardar.</div>
+    </div>
+    <div>
+      <label>Nombre</label><br />
+      <input name="name" required />
+      <div class="muted">No puede repetir el nombre de otro item.</div>
+    </div>
+    <div>
+      <label>Descripción (opcional)</label><br />
+      <input name="description" />
+    </div>
+    <div>
+      <label>Link de referencia</label><br />
+      <input type="url" name="reference_link" maxlength="500" placeholder="https://..." />
+      <div class="muted">Opcional. Link de referencia de compra.</div>
+    </div>
+    <div>
+      <label><input type="checkbox" name="trackable" /> Rastreable (únicos / seriales)</label>
+    </div>
+    <div>
+      <label>Stock de seguridad (solo NO rastreables)</label><br />
+      <input type="number" name="stock_min" min="0" value="0" />
+      <div class="muted">Si el item es rastreable, este valor se ignora.</div>
+    </div>
+    <button type="submit">Guardar</button>
+  </form>
+
+  <script>
+    function updateCodePreview() {
+      var sel = document.getElementById('category_id');
+      var out = document.getElementById('code_preview');
+      var opt = sel.options[sel.selectedIndex];
+      var next = opt ? (opt.getAttribute('data-next') || '') : '';
+      out.value = next || '(esta categoría no tiene prefijo asignado)';
+    }
+  </script>
+{% endblock %}

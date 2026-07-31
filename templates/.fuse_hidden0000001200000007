@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block page_title %}Métricas{% endblock %}
+{% block extra_head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/metricas.css') }}">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+{% endblock %}
+{% block title %}Métricas · Movimientos{% endblock %}
+{% block content %}
+{% include "_metricas_head.html" %}
+<div class="page-header"><div><h2>Movimientos</h2><p>Actividad operativa del período.</p></div></div>
+<div class="summary-grid">
+  {% for c in cards %}
+  {% if c.href %}
+  <a href="{{ c.href }}" class="summary-card {{ c.tone }} is-link">
+    <span class="label">{{ c.label }}</span><span class="value">{{ c.value }}</span><span class="hint">{{ c.hint }}</span>
+  </a>
+  {% else %}
+  <div class="summary-card {{ c.tone }}">
+    <span class="label">{{ c.label }}</span><span class="value">{{ c.value }}</span><span class="hint">{{ c.hint }}</span>
+  </div>
+  {% endif %}
+  {% endfor %}
+</div>
+<div class="mx-grid cols-1">
+  <div class="mx-panel"><div class="mx-panel-title">Movimientos por mes</div><div class="mx-chart"><canvas id="m_trend"></canvas></div></div>
+</div>
+<div class="mx-grid">
+  <div class="mx-panel"><div class="mx-panel-title">Movimientos por usuario</div><div class="mx-chart tall"><canvas id="m_user"></canvas></div></div>
+  <div class="mx-panel"><div class="mx-panel-title">Rutas más usadas</div><div class="mx-chart tall"><canvas id="m_route"></canvas></div></div>
+</div>
+<div class="mx-grid cols-1">
+  <div class="mx-panel"><div class="mx-panel-title">Ítems más movidos</div><div class="mx-chart tall"><canvas id="m_items"></canvas></div></div>
+</div>
+{% block extra_scripts %}
+<script src="{{ url_for('static', filename='js/metricas.js') }}"></script>
+<script>
+MX.line('m_trend', {{ trend_rows|map(attribute='label')|list|tojson }}, {{ trend_rows|map(attribute='value')|list|tojson }}, {label:'Movimientos'});
+MX.barH('m_user', {{ by_user|map(attribute='label')|list|tojson }}, {{ by_user|map(attribute='value')|list|tojson }});
+MX.barH('m_route', {{ by_route|map(attribute='label')|list|tojson }}, {{ by_route|map(attribute='value')|list|tojson }});
+MX.barH('m_items', {{ top_items|map(attribute='label')|list|tojson }}, {{ top_items|map(attribute='value')|list|tojson }}, {tone:'ok'});
+</script>
+{% endblock %}

@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block content %}
+  <h2>Editar item</h2>
+
+  <form method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div>
+      <label>Código</label><br>
+      <input value="{{ it.code }}" readonly disabled>
+      <div class="muted" style="margin-top:4px;">El código es automático y no se puede editar.</div>
+    </div>
+
+    <div>
+      <label>Nombre</label><br>
+      <input name="name" value="{{ it.name }}" required>
+    </div>
+
+    <div>
+      <label>Descripción</label><br>
+      <input name="description" value="{{ it.description or '' }}">
+    </div>
+
+    <div>
+      <label>Link de referencia</label><br>
+      <input type="url" name="reference_link" maxlength="500" value="{{ it.reference_link or '' }}" placeholder="https://...">
+      <div class="muted" style="margin-top:4px;">Opcional. Dejar vacío para quitarlo.</div>
+    </div>
+
+    <div>
+      <label>Categoría</label><br>
+      <select disabled>
+        {% for c in categories %}
+          <option value="{{ c.id }}" {% if c.id == it.category_id %}selected{% endif %}>{{ c.name }}</option>
+        {% endfor %}
+      </select>
+      <div class="muted" style="margin-top:4px;">La categoría no se puede cambiar (el código depende de ella).</div>
+    </div>
+
+    <div style="margin-top:8px;">
+      <label>
+        <input type="checkbox" name="trackable" {% if it.trackable %}checked{% endif %}>
+        Rastreable (máx 1 por ubicación)
+      </label>
+    </div>
+
+    <div style="margin-top:8px;">
+      <label>Stock de seguridad (solo NO rastreables)</label><br>
+      <input type="number" name="stock_min" min="0" value="{{ it.stock_min or 0 }}" {% if it.trackable %}disabled{% endif %}>
+      <div class="muted" style="margin-top:4px;">
+        Si el item es rastreable, este valor se ignora.
+      </div>
+    </div>
+
+    <div style="margin-top:8px;">
+      <label>
+        <input type="checkbox" name="is_active" {% if it.is_active %}checked{% endif %}>
+        Activo
+      </label>
+      <div class="muted" style="margin-top:4px;">
+        Si lo desactivás, no aparece en formularios (movimientos/remitos), pero queda en históricos.
+      </div>
+    </div>
+
+    <div style="margin-top:14px;">
+      <button type="submit">Guardar cambios</button>
+      <a href="{{ url_for('items') }}" style="margin-left:10px;">Volver</a>
+    </div>
+  </form>
+{% endblock %}

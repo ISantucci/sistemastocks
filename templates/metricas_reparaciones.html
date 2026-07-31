@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block page_title %}Métricas{% endblock %}
+{% block extra_head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/metricas.css') }}">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+{% endblock %}
+{% block title %}Métricas · Reparaciones{% endblock %}
+{% block content %}
+{% include "_metricas_head.html" %}
+<div class="page-header"><div><h2>Reparaciones y Pendientes</h2><p>Ciclo de reparación y seguimiento de pendientes.</p></div></div>
+<div class="summary-grid">
+  {% for c in cards %}
+  {% if c.href %}
+  <a href="{{ c.href }}" class="summary-card {{ c.tone }} is-link">
+    <span class="label">{{ c.label }}</span><span class="value">{{ c.value }}</span><span class="hint">{{ c.hint }}</span>
+  </a>
+  {% else %}
+  <div class="summary-card {{ c.tone }}">
+    <span class="label">{{ c.label }}</span><span class="value">{{ c.value }}</span><span class="hint">{{ c.hint }}</span>
+  </div>
+  {% endif %}
+  {% endfor %}
+</div>
+<div class="mx-grid">
+  <div class="mx-panel"><div class="mx-panel-title">Estado del ciclo de reparación</div><div class="mx-chart"><canvas id="r_estado"></canvas></div></div>
+  <div class="mx-panel"><div class="mx-panel-title">Reparaciones por ítem</div><div class="mx-chart"><canvas id="r_item"></canvas></div></div>
+</div>
+<div class="mx-grid cols-1">
+  <div class="mx-panel"><div class="mx-panel-title">Pendientes abiertos por responsable</div><div class="mx-chart"><canvas id="r_pend"></canvas></div></div>
+</div>
+{% endblock %}
+{% block extra_scripts %}
+<script src="{{ url_for('static', filename='js/metricas.js') }}"></script>
+<script>
+MX.doughnut('r_estado', {{ estado_labels|tojson }}, {{ estado_values|tojson }});
+MX.barH('r_item', {{ by_item|map(attribute='label')|list|tojson }}, {{ by_item|map(attribute='value')|list|tojson }}, {tone:'warn'});
+MX.barH('r_pend', {{ pend_by_user|map(attribute='label')|list|tojson }}, {{ pend_by_user|map(attribute='value')|list|tojson }}, {tone:'danger'});
+</script>
+{% endblock %}

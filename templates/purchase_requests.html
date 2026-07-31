@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block title %}Solicitudes de Compra · TNGStocks{% endblock %}
+{% block page_title %}Solicitudes de Compra{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <h2>Solicitudes de Compra</h2>
+    <p>Pedidos de compra de ítems que entraron en alerta de stock.</p>
+  </div>
+  {% if me and me.role in ["ADMIN","SUPERVISOR"] %}
+    <button type="button" class="btn btn-primary" onclick="openModal('modal-sc-new')">+ Nueva solicitud</button>
+  {% endif %}
+</div>
+
+<div class="table-card">
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Código</th><th>Fecha</th><th>Estado</th><th class="num">Ítems</th><th>Creador</th><th>Obs.</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in requests %}
+        <tr>
+          <td><a href="{{ url_for('purchase_request_detail', pr_id=r.id) }}" onclick="openDetail(this.href); return false;">{{ r.number }}</a></td>
+          <td>{{ r.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+          <td>
+            {% if r.status == "REALIZADA" %}
+              <span class="badge badge-ok">REALIZADA</span>
+            {% else %}
+              <span class="badge badge-neutral">PENDIENTE</span>
+            {% endif %}
+          </td>
+          <td class="num">{{ r.lines|length }}</td>
+          <td>{{ r.created_by.full_name }}</td>
+          <td>{{ r.observation or "" }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="muted">Sin solicitudes.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% if me and me.role in ["ADMIN","SUPERVISOR"] %}
+<!-- Modal: nueva solicitud de compra -->
+<div class="modal-overlay" id="modal-sc-new">
+  <div class="modal" style="max-width:860px;">
+    <div class="modal-header">
+      <span class="modal-title">Nueva solicitud de compra</span>
+      <button type="button" class="modal-close" onclick="closeModal('modal-sc-new')">&times;</button>
+    </div>
+    <form method="post" action="{{ url_for('purchase_request_new') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <div class="modal-body">
+        {% if alert_items %}
+          <p class="muted">Aparecen solo los ítems que hoy están en alerta. Marcá los que querés pedir y poné la cantidad.</p>
+          <div class="table-scroll" style="max-height:50vh;">
+            <table class="data-table">
+              <thead>
+                <tr><th></th><th>Ítem</th><th>Nivel</th><th class="num">Stock actual</th><th class="num">Stock mínimo</th><th class="num">Cantidad a pedir</th></tr>
+              </thead>
+              <tbody>
+                {% for e in alert_items %}
+                <tr>
+                  <td><input type="checkbox" name="item_id" value="{{ e.item.id }}"></td>
+                  <td>{{ e.item.code }} — {{ e.item.name }}</td>
+                  <td>
+                    {% if e.worst == 'stock-red' %}
+                      <span class="badge badge-danger">Crítico</span>
+                    {% else %}
+                      <span class="badge badge-warn">Bajo</span>
+                    {% endif %}
+                  </td>
+                  <td class="num">{{ e.total_qty }}</td>
+                  <td class="num">{{ e.item.stock_min }}</td>
+                  {% set sugerido = e.item.stock_min - e.total_qty %}
+                  {% if sugerido < 1 %}{% set sugerido = 1 %}{% endif %}
+                  <td class="num"><input type="number" name="qty_{{ e.item.id }}" min="1" value="{{ sugerido }}" style="width:90px;" title="Sugerido para llegar al mínimo. Podés pedir más."></td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          <div class="field" style="margin-top:12px;">
+            <label>Observación (opcional)</label>
+            <input name="observation" maxlength="255">
+          </div>
+        {% else %}
+          <p class="muted">No hay ítems en alerta en este momento.</p>
+        {% endif %}
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-sc-new')">Cancelar</button>
+        {% if alert_items %}
+        <button type="submit" class="btn btn-primary">Guardar solicitud</button>
+        {% endif %}
+      </div>
+    </form>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
