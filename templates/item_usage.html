@@ -131,7 +131,7 @@
           <td>{{ m.created_at.strftime("%Y-%m-%d") }}</td>
           <td>{{ m.created_at.strftime("%H:%M") }}</td>
           <td>{{ m.item.code }} - {{ m.item.name }}</td>
-          <td class="num">{{ m.qty }}</td>
+          <td class="num">{{ fmt_qty(m.qty, m.item) }}</td>
           <td>{{ m.from_location.name }}</td>
           <td>{{ m.user.full_name }}</td>
           <td>{{ m.observation or "" }}</td>

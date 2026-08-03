@@ -136,7 +136,7 @@
         <tr>
           <td>{{ s.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
           <td>{{ s.item.code }} — {{ s.item.name }}</td>
-          <td class="num">{{ s.quantity }}</td>
+          <td class="num">{{ fmt_qty(s.quantity, s.item) }}</td>
           <td>{{ s.location.name }}</td>
           <td><span class="badge badge-danger">{{ s.reason or "-" }}</span></td>
           <td>{{ s.user.full_name or s.user.username }}</td>

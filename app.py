@@ -402,6 +402,11 @@ class Item(db.Model):
     # migración idempotente sobre bases existentes.
     reference_link = db.Column(db.String(500), nullable=True)
 
+    # Forma de contabilización de la cantidad: 'unidad' (default, comportamiento
+    # histórico) o 'metros'. Solo afecta cómo se muestra/rotula la cantidad; no
+    # cambia la lógica de stock (sigue siendo un entero).
+    unit = db.Column(db.String(16), default="unidad", nullable=False)
+
 
 class Stock(db.Model):
     __tablename__ = "stock"
@@ -898,6 +903,8 @@ def ensure_sqlite_schema() -> None:
                 add_column("items", "stock_min INTEGER NOT NULL DEFAULT 0")
             if "reference_link" not in c:
                 add_column("items", "reference_link TEXT")
+            if "unit" not in c:
+                add_column("items", "unit VARCHAR(16) NOT NULL DEFAULT 'unidad'")
 
         if table_exists("categories"):
             c = columns("categories")
@@ -1934,6 +1941,9 @@ def item_new():
         trackable = True if request.form.get("trackable") == "on" else False
         stock_min_raw = request.form.get("stock_min", "").strip()
         reference_link = (request.form.get("reference_link", "") or "").strip()[:500] or None
+        unit = request.form.get("unit", "unidad").strip()
+        if unit not in ("unidad", "metros"):
+            unit = "unidad"
 
         # Si el alta viene del modal (fetch AJAX), respondemos JSON para poder
         # mostrar el error dentro del popup sin recargar ni perder lo cargado.
@@ -1988,6 +1998,7 @@ def item_new():
                 trackable=trackable,
                 stock_min=stock_min,
                 reference_link=reference_link,
+                unit=unit,
             ))
             try:
                 db.session.commit()
@@ -2027,6 +2038,9 @@ def item_edit(item_id: int):
         stock_min_raw = request.form.get("stock_min", "").strip()
         is_active = True if request.form.get("is_active") == "on" else False
         reference_link = (request.form.get("reference_link", "") or "").strip()[:500] or None
+        unit = request.form.get("unit", "unidad").strip()
+        if unit not in ("unidad", "metros"):
+            unit = "unidad"
 
         stock_min = 0
         if not trackable:
@@ -2060,6 +2074,7 @@ def item_edit(item_id: int):
         it.stock_min = 0 if trackable else stock_min
         it.is_active = is_active
         it.reference_link = reference_link  # None cuando queda vacío
+        it.unit = unit
 
         try:
             db.session.commit()
@@ -3195,10 +3210,24 @@ def remito_detail(remito_id: int):
     return render_template("remito_detail.html", remito=r, lines=lines, fill_rows=fill_rows, embed=embed)
 
 
+def fmt_qty(qty, item=None):
+    """Cantidad lista para mostrar, con su unidad al lado.
+
+    - 'metros' -> "300 metros"
+    - 'unidad' (o sin dato) -> "300" (comportamiento histórico, sin etiqueta).
+    No cambia la lógica de stock: solo formatea para la vista.
+    """
+    unit = getattr(item, "unit", None) if item is not None else None
+    if unit == "metros":
+        return f"{qty} metros"
+    return f"{qty}"
+
+
 @app.context_processor
 def inject_stock_helpers():
     return {
-        "stock_level_class": stock_level_class
+        "stock_level_class": stock_level_class,
+        "fmt_qty": fmt_qty,
     }
 
 @app.context_processor

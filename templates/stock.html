@@ -94,7 +94,7 @@
           <td>{{ row.item.category.name }}</td>
           <td>{{ "Sí" if row.item.trackable else "No" }}</td>
           <td>{{ row.item.description or "" }}</td>
-          <td class="num {{ stock_level_class(row.item, row.quantity) }}">{{ row.quantity }}</td>
+          <td class="num {{ stock_level_class(row.item, row.quantity) }}">{{ fmt_qty(row.quantity, row.item) }}</td>
         </tr>
         {% else %}
         <tr><td colspan="7" class="muted">Sin resultados.</td></tr>

@@ -60,7 +60,7 @@
     <tbody>
       {% for ln in lines %}
       <tr>
-        <td class="rem-c-cant">{{ ln.movement.qty }}</td>
+        <td class="rem-c-cant">{{ fmt_qty(ln.movement.qty, ln.movement.item) }}</td>
         <td class="rem-c-det">{{ ln.movement.item.name }}</td>
         <td class="rem-c-cod">{{ ln.movement.item.code }}</td>
         <td class="rem-c-obs">{{ ln.movement.observation or "" }}</td>

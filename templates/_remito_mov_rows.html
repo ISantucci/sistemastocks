@@ -11,7 +11,7 @@
     <td><input type="checkbox" name="movement_id" value="{{ m.id }}" checked></td>
     <td>{{ m.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
     <td>{{ m.item.code }} — {{ m.item.name }}</td>
-    <td class="num">{{ m.qty }}</td>
+    <td class="num">{{ fmt_qty(m.qty, m.item) }}</td>
     <td>{{ m.user.full_name }}</td>
     <td>{{ m.observation or "" }}</td>
   </tr>

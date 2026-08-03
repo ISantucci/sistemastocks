@@ -107,6 +107,13 @@
         <div class="field"><label>Nombre</label><input name="name" required><div class="muted">No puede repetir el nombre de otro ítem.</div></div>
         <div class="field"><label>Descripción (opcional)</label><input name="description"></div>
         <div class="field"><label>Link de referencia</label><input type="url" name="reference_link" maxlength="500" placeholder="https://..."><div class="muted">Opcional. Link de referencia de compra.</div></div>
+        <div class="field"><label>Forma de contabilización</label>
+          <select name="unit">
+            <option value="unidad" selected>Unidad</option>
+            <option value="metros">Metros</option>
+          </select>
+          <div class="muted">"Metros" muestra la cantidad con "metros" al lado (ej. cables). "Unidad" es lo normal.</div>
+        </div>
         <div class="field"><label class="check-inline"><input type="checkbox" name="trackable"> Rastreable (únicos / seriales)</label></div>
         <div class="field"><label>Stock de seguridad (solo NO rastreables)</label><input type="number" name="stock_min" min="0" value="0"><div class="muted">Si el ítem es rastreable, este valor se ignora.</div></div>
       </div>
@@ -135,6 +142,13 @@
             {% for c in categories %}<option value="{{ c.id }}" {% if c.id == it.category_id %}selected{% endif %}>{{ c.name }}</option>{% endfor %}
           </select>
           <div class="muted">La categoría no se puede cambiar (el código depende de ella).</div>
+        </div>
+        <div class="field"><label>Forma de contabilización</label>
+          <select name="unit">
+            <option value="unidad" {% if it.unit != 'metros' %}selected{% endif %}>Unidad</option>
+            <option value="metros" {% if it.unit == 'metros' %}selected{% endif %}>Metros</option>
+          </select>
+          <div class="muted">"Metros" muestra la cantidad con "metros" al lado (ej. cables). "Unidad" es lo normal.</div>
         </div>
         <div class="field"><label class="check-inline"><input type="checkbox" name="trackable" {% if it.trackable %}checked{% endif %}> Rastreable (máx 1 por ubicación)</label></div>
         <div class="field"><label>Stock de seguridad (solo NO rastreables)</label><input type="number" name="stock_min" min="0" value="{{ it.stock_min or 0 }}" {% if it.trackable %}disabled{% endif %}></div>
