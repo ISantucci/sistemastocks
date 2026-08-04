@@ -99,6 +99,7 @@
 <script>
   var descartes_id = "{{ descartes_id or '' }}";
   var stockMap = {{ stock_map|tojson }};
+  var externalLocIds = ({{ external_location_ids|tojson }} || []).map(String);
 
   // Lista completa de items (para reconstruir opciones por ubicacion)
   var allBulkItems = [
@@ -109,10 +110,11 @@
   function allowedForCurrentFrom() {
     var fromSel = document.getElementById("bulk_from_location_id");
     var locId = fromSel ? String(fromSel.value || "") : "";
+    var isExternal = externalLocIds.indexOf(locId) !== -1;
     var allowed = stockMap[locId] || [];
     var set = {};
     allowed.forEach(function (id) { set[String(id)] = true; });
-    return { locId: locId, set: set };
+    return { locId: locId, set: set, all: isExternal };
   }
 
   function applyStockFilterToLine(el) {
@@ -121,7 +123,8 @@
     var info = allowedForCurrentFrom();
     ts.clear(true);
     ts.clearOptions();
-    allBulkItems.forEach(function (o) { if (info.set[o.value]) ts.addOption(o); });
+    // Externa (Proveedor/Baja): todos los ítems; interna: solo con stock.
+    allBulkItems.forEach(function (o) { if (info.all || info.set[o.value]) ts.addOption(o); });
     ts.refreshOptions(false);
     if (!info.locId) { ts.disable(); } else { ts.enable(); }
   }

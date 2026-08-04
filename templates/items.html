@@ -66,7 +66,12 @@
         {% for it in items %}
         <tr {% if not it.is_active %}class="row-inactive"{% endif %}>
           <td>{{ it.code }}</td>
-          <td>{{ it.name }}</td>
+          <td>
+            {{ it.name }}
+            {% if it.serialized %}
+              <button type="button" class="badge badge-ok" style="cursor:pointer;border:none;margin-left:6px;" onclick="openDetail('{{ url_for('item_units', item_id=it.id) }}')">Seriales</button>
+            {% endif %}
+          </td>
           <td>{{ it.category.name }}</td>
           <td>{{ "Sí" if it.trackable else "No" }}</td>
           <td class="num">{{ "-" if it.trackable else it.stock_min }}</td>
@@ -114,7 +119,8 @@
           </select>
           <div class="muted">"Metros" muestra la cantidad con "metros" al lado (ej. cables). "Unidad" es lo normal.</div>
         </div>
-        <div class="field"><label class="check-inline"><input type="checkbox" name="trackable"> Rastreable (únicos / seriales)</label></div>
+        <div class="field"><label class="check-inline"><input type="checkbox" name="trackable"> Rastreable (máx 1 en todo el sistema)</label></div>
+        <div class="field"><label class="check-inline"><input type="checkbox" name="serialized"> Serializado (varias unidades con N° de serie)</label><div class="muted">Se cuenta por cantidad, pero además llevás cada serial. Los seriales se cargan desde la ficha del ítem.</div></div>
         <div class="field"><label>Stock de seguridad (solo NO rastreables)</label><input type="number" name="stock_min" min="0" value="0"><div class="muted">Si el ítem es rastreable, este valor se ignora.</div></div>
       </div>
       <div class="modal-footer">
@@ -150,7 +156,8 @@
           </select>
           <div class="muted">"Metros" muestra la cantidad con "metros" al lado (ej. cables). "Unidad" es lo normal.</div>
         </div>
-        <div class="field"><label class="check-inline"><input type="checkbox" name="trackable" {% if it.trackable %}checked{% endif %}> Rastreable (máx 1 por ubicación)</label></div>
+        <div class="field"><label class="check-inline"><input type="checkbox" name="trackable" {% if it.trackable %}checked{% endif %}> Rastreable (máx 1 en todo el sistema)</label></div>
+        <div class="field"><label class="check-inline"><input type="checkbox" name="serialized" {% if it.serialized %}checked{% endif %}> Serializado (varias unidades con N° de serie)</label><div class="muted">Los seriales se cargan desde el botón «Seriales» del ítem.</div></div>
         <div class="field"><label>Stock de seguridad (solo NO rastreables)</label><input type="number" name="stock_min" min="0" value="{{ it.stock_min or 0 }}" {% if it.trackable %}disabled{% endif %}></div>
         <div class="field"><label class="check-inline"><input type="checkbox" name="is_active" {% if it.is_active %}checked{% endif %}> Activo</label><div class="muted">Si lo desactivás, no aparece en formularios pero queda en históricos.</div></div>
       </div>

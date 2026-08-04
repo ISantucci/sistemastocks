@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% block title %}Seriales · {{ it.code }}{% endblock %}
+{% block page_title %}Seriales de {{ it.code }}{% endblock %}
+{% block content %}
+
+<style>
+  .units-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:10px;margin-bottom:6px;}
+  .units-sub{color:var(--text-secondary,#666);font-size:14px;margin-bottom:16px;}
+  .units-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;}
+  .unit-card{border:1px solid var(--border,#d0d5dd);border-radius:12px;padding:12px 14px;background:var(--surface,#fff);}
+  .unit-card .sn{font-weight:600;font-size:15px;word-break:break-all;}
+  .unit-card .meta{color:var(--text-secondary,#666);font-size:13px;margin-top:4px;}
+  .unit-card .notes{font-size:13px;margin-top:6px;}
+  .unit-card .card-actions{margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;}
+  .unit-edit{margin-top:10px;border-top:1px dashed var(--border,#d0d5dd);padding-top:10px;}
+  .unit-edit input{width:100%;margin-bottom:6px;}
+  .units-section-title{margin:22px 0 8px;font-size:15px;}
+  .badge-neutral{background:#eee;color:#555;border-radius:6px;padding:2px 8px;font-size:12px;}
+</style>
+
+<div class="units-head">
+  <h2 style="margin:0;">{{ it.code }} — {{ it.name }}</h2>
+  {% if it.serialized %}<span class="badge badge-ok">Serializado</span>{% else %}<span class="badge badge-danger">No serializado</span>{% endif %}
+</div>
+<div class="units-sub">
+  En stock con serial: <b>{{ en_stock|length }}</b> · Fuera de stock (histórico): <b>{{ fuera|length }}</b>
+</div>
+
+{% if not it.serialized %}
+<div class="flash-error">
+  Este ítem no está marcado como serializado. Editá el ítem y activá «Serializado» para poder cargar números de serie.
+</div>
+{% endif %}
+
+{% if me and me.role == "ADMIN" and it.serialized %}
+<div class="card" style="margin-bottom:18px;">
+  <div class="card-header"><span class="card-title">Registrar serial de stock existente</span></div>
+  <form method="post" action="{{ url_for('item_unit_new', item_id=it.id) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    {% if embed %}<input type="hidden" name="embed" value="1">{% endif %}
+    <div class="form-grid">
+      <div class="field">
+        <label>Número de serie</label>
+        <input name="serial" maxlength="120" required placeholder="Ej: AH04790PAJ00037">
+      </div>
+      <div class="field">
+        <label>Ubicación (donde está físicamente)</label>
+        <select name="location_id" required>
+          <option value="" selected disabled>Elegí ubicación...</option>
+          {% for r in loc_rooms %}
+            <option value="{{ r.loc.id }}" {% if r.room <= 0 %}disabled{% endif %}>
+              {{ r.loc.name }} — cupo {{ r.room }} (stock {{ r.qty }}, con serial {{ r.labeled }})
+            </option>
+          {% endfor %}
+        </select>
+        <div class="muted" style="margin-top:4px;">Solo podés etiquetar hasta la cantidad que ya tenés en stock ahí.</div>
+      </div>
+      <div class="field">
+        <label>Notas (opcional)</label>
+        <input name="notes" maxlength="255" placeholder="Ej: caja roja / lote 2025-07">
+      </div>
+    </div>
+    <div style="margin-top:12px;">
+      <button type="submit" class="btn btn-primary">Registrar serial</button>
+    </div>
+  </form>
+</div>
+{% endif %}
+
+{% set shown = en_stock if not focus_loc else (en_stock | selectattr('location_id', 'equalto', focus_loc.id) | list) %}
+<h3 class="units-section-title">En stock{% if focus_loc %} — {{ focus_loc.name }}{% endif %}</h3>
+{% if focus_loc %}
+<div class="muted" style="margin-bottom:8px;">
+  Mostrando los seriales en {{ focus_loc.name }}.
+  <a href="{{ url_for('item_units', item_id=it.id, embed='1' if embed else none) }}">Ver todas las ubicaciones</a>
+</div>
+{% endif %}
+{% if shown %}
+<div class="units-grid">
+  {% for u in shown %}
+  <div class="unit-card">
+    <div class="sn">{{ u.serial }}</div>
+    <div class="meta">{{ u.location.name if u.location else "—" }}</div>
+    {% if u.notes %}<div class="notes">{{ u.notes }}</div>{% endif %}
+    {% if me and me.role == "ADMIN" %}
+    <div class="card-actions">
+      <button type="button" class="btn btn-secondary btn-sm" onclick="toggleEdit('edit-{{ u.id }}')">Editar</button>
+      <form method="post" action="{{ url_for('item_unit_delete', unit_id=u.id) }}"
+            onsubmit="return confirm('¿Quitar el serial {{ u.serial }}? No afecta el stock, solo la etiqueta.');" style="display:inline;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        {% if embed %}<input type="hidden" name="embed" value="1">{% endif %}
+        <button type="submit" class="btn btn-danger btn-sm">Quitar</button>
+      </form>
+    </div>
+    <div class="unit-edit" id="edit-{{ u.id }}" style="display:none;">
+      <form method="post" action="{{ url_for('item_unit_edit', unit_id=u.id) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        {% if embed %}<input type="hidden" name="embed" value="1">{% endif %}
+        <input name="serial" maxlength="120" value="{{ u.serial }}" required>
+        <input name="notes" maxlength="255" value="{{ u.notes or '' }}" placeholder="Notas (opcional)">
+        <button type="submit" class="btn btn-primary btn-sm">Guardar</button>
+      </form>
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<p class="muted">No hay seriales cargados en stock todavía.</p>
+{% endif %}
+
+{% if fuera %}
+<h3 class="units-section-title">Fuera de stock (histórico)</h3>
+<div class="units-grid">
+  {% for u in fuera %}
+  <div class="unit-card">
+    <div class="sn">{{ u.serial }}</div>
+    <div class="meta">
+      {% if u.status == "ENTREGADO" %}<span class="badge-neutral">Entregado</span>
+      {% elif u.status == "DESCARTADO" %}<span class="badge-neutral">Descartado</span>
+      {% else %}<span class="badge-neutral">{{ u.status }}</span>{% endif %}
+    </div>
+    {% if u.notes %}<div class="notes">{{ u.notes }}</div>{% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<script>
+  function toggleEdit(id){
+    var el = document.getElementById(id);
+    if (el) el.style.display = (el.style.display === "none" || !el.style.display) ? "block" : "none";
+  }
+</script>
+{% endblock %}

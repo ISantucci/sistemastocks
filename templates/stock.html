@@ -90,7 +90,12 @@
         <tr>
           <td>{{ row.location.name }}</td>
           <td>{{ row.item.code }}</td>
-          <td>{{ row.item.name }}</td>
+          <td>
+            {{ row.item.name }}
+            {% if row.item.serialized %}
+              <button type="button" class="badge badge-ok" style="cursor:pointer;border:none;margin-left:6px;" onclick="openDetail('{{ url_for('item_units', item_id=row.item.id, loc=row.location.id) }}')">Seriales</button>
+            {% endif %}
+          </td>
           <td>{{ row.item.category.name }}</td>
           <td>{{ "Sí" if row.item.trackable else "No" }}</td>
           <td>{{ row.item.description or "" }}</td>
