@@ -28,7 +28,7 @@
           <td>{{ r.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
           <td>{{ r.item.code }}</td>
           <td>{{ r.item.name }}</td>
-          <td>{{ r.quantity }}</td>
+          <td>{{ fmt_qty(r.quantity, r.item) }}</td>
           <td>{{ r.source_location.name if r.source_location else "—" }}</td>
           <td class="actions-cell">
             {% if me.role == "LECTOR" %}
@@ -103,7 +103,7 @@
           <td>{{ r.resolved_at.strftime("%Y-%m-%d %H:%M") if r.resolved_at else "—" }}</td>
           <td>{{ r.item.code }}</td>
           <td>{{ r.item.name }}</td>
-          <td>{{ r.quantity }}</td>
+          <td>{{ fmt_qty(r.quantity, r.item) }}</td>
           <td>
             {% if r.status == "REPARADO" %}<span class="badge badge-ok">Reparado</span>
             {% else %}<span class="badge badge-warn">Descartado</span>{% endif %}

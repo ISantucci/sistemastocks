@@ -402,6 +402,51 @@ class Item(db.Model):
     # migración idempotente sobre bases existentes.
     reference_link = db.Column(db.String(500), nullable=True)
 
+    # Forma de contabilización de la cantidad: 'unidad' (default, comportamiento
+    # histórico) o 'metros'. Solo afecta cómo se muestra/rotula la cantidad; no
+    # cambia la lógica de stock (sigue siendo un entero).
+    unit = db.Column(db.String(16), default="unidad", nullable=False)
+
+    # Ítem serializado: además del stock por cantidad (comportamiento histórico),
+    # se llevan unidades individuales con número de serie en la tabla item_units.
+    # Es OPT-IN e independiente de 'trackable'. Un ítem NO serializado se comporta
+    # exactamente igual que antes (esta columna queda en 0/False).
+    serialized = db.Column(db.Boolean, default=False, nullable=False)
+
+
+# Estados de una unidad serializada.
+UNIT_EN_STOCK = "EN_STOCK"      # presente en una ubicación interna
+UNIT_ENTREGADO = "ENTREGADO"    # salió del sistema (entregado / externo)
+UNIT_DESCARTADO = "DESCARTADO"  # fue a Descartes
+
+
+class ItemUnit(db.Model):
+    """Unidad física individual de un ítem serializado (un serial = una fila).
+
+    Convive con Stock (cantidad agregada): la disponibilidad se sigue leyendo del
+    stock por cantidad. Estas filas agregan trazabilidad por serial, sin cambiar
+    la lógica de stock existente para ítems no serializados.
+    """
+    __tablename__ = "item_units"
+    id = db.Column(db.Integer, primary_key=True)
+
+    item_id = db.Column(db.Integer, db.ForeignKey("items.id"), nullable=False, index=True)
+    serial = db.Column(db.String(120), nullable=False)
+
+    status = db.Column(db.String(16), nullable=False, default=UNIT_EN_STOCK)
+    # Ubicación actual (solo si status = EN_STOCK). NULL cuando salió del sistema.
+    location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), nullable=True)
+
+    notes = db.Column(db.String(255), nullable=True)
+    created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
+
+    item = db.relationship("Item", backref="units")
+    location = db.relationship("Location")
+
+    # El serial es único dentro de un mismo ítem (no global: dos modelos distintos
+    # podrían, en teoría, compartir formato de serie).
+    __table_args__ = (db.UniqueConstraint("item_id", "serial", name="uq_unit_item_serial"),)
+
 
 class Stock(db.Model):
     __tablename__ = "stock"
@@ -724,6 +769,94 @@ def upsert_stock(item_id: int, location_id: int, delta: int) -> None:
         row.quantity = new_qty
 
 
+# ------------------ HELPERS: UNIDADES SERIALIZADAS ------------------
+
+def units_in_stock_query(item_id: int, location_id: int | None = None):
+    """Unidades EN_STOCK de un ítem (opcionalmente en una ubicación)."""
+    q = ItemUnit.query.filter_by(item_id=item_id, status=UNIT_EN_STOCK)
+    if location_id is not None:
+        q = q.filter_by(location_id=location_id)
+    return q
+
+
+def count_units_in_stock(item_id: int, location_id: int) -> int:
+    return units_in_stock_query(item_id, location_id).count()
+
+
+def resolve_serial_units_out(item_id: int, from_id: int, qty: int, form, field: str = "unit_id"):
+    """Regla auto/elegir para sacar unidades serializadas de una ubicación interna.
+
+    Devuelve (units, error_msg):
+      - si hay más seriales que la cantidad (avail > qty): hay que elegir cuáles
+        (se leen del form). Si no eligió exactamente qty, error.
+      - si hay 1 o tantos como la cantidad (avail <= qty): se usan todos (auto).
+      - si no hay seriales cargados (avail = 0): units=[] (se mueve por cantidad).
+    """
+    from_units = (units_in_stock_query(item_id, from_id)
+                  .order_by(ItemUnit.created_at, ItemUnit.id).all())
+    avail = len(from_units)
+    if avail > qty:
+        ids = {int(x) for x in form.getlist(field) if x.isdigit()}
+        chosen = [u for u in from_units if u.id in ids]
+        if len(chosen) != qty:
+            return None, (f"Hay {avail} seriales en el origen y movés {qty}: "
+                          f"elegí exactamente {qty}.")
+        return chosen, None
+    return from_units, None
+
+
+def apply_serial_units_out(units, to_id: int):
+    """Aplica el destino a cada unidad que sale y devuelve sus seriales (para obs).
+
+    - a Descartes -> DESCARTADO
+    - a ubicación externa (Utilizado, Proveedor, etc.) -> ENTREGADO
+    - a ubicación interna (otra camioneta, depósito) -> se reubica, sigue EN_STOCK
+    """
+    to_loc = Location.query.get(to_id)
+    is_descartes = bool(to_loc and to_loc.name == LOCATION_DESCARTES)
+    to_ext = bool(to_loc and to_loc.is_external)
+    for u in units:
+        if is_descartes:
+            u.status = UNIT_DESCARTADO
+            u.location_id = None
+        elif to_ext:
+            u.status = UNIT_ENTREGADO
+            u.location_id = None
+        else:
+            u.location_id = to_id
+    return [u.serial for u in units]
+
+
+def serial_obs(observation, serials):
+    """Agrega los seriales movidos a la observación (para log y remito)."""
+    if not serials:
+        return observation
+    sn = "S/N: " + ", ".join(serials)
+    return (f"{observation} · {sn}" if observation else sn)[:255]
+
+
+def build_units_map(location_ids=None):
+    """Mapa de seriales EN_STOCK para el selector de egreso serializado.
+
+    Estructura: { item_id: { loc_id: [[unit_id, serial], ...] } }
+    location_ids: si se pasa, limita a esas ubicaciones (ej. camionetas del técnico).
+    Devuelve (units_map, serialized_item_ids).
+    """
+    serialized_item_ids = [it.id for it in Item.query.filter_by(serialized=True).all()]
+    units_map = {}
+    if serialized_item_ids:
+        uq = (ItemUnit.query
+              .filter(ItemUnit.status == UNIT_EN_STOCK,
+                      ItemUnit.item_id.in_(serialized_item_ids),
+                      ItemUnit.location_id.isnot(None)))
+        if location_ids is not None:
+            ids = list(location_ids) or [-1]
+            uq = uq.filter(ItemUnit.location_id.in_(ids))
+        for u in uq.order_by(ItemUnit.serial).all():
+            units_map.setdefault(u.item_id, {}).setdefault(u.location_id, []).append([u.id, u.serial])
+    return units_map, serialized_item_ids
+
+
 def next_movement_number():
     y = now_ar().year
     last = Movement.query.filter_by(year=y).order_by(Movement.seq.desc()).first()
@@ -898,6 +1031,27 @@ def ensure_sqlite_schema() -> None:
                 add_column("items", "stock_min INTEGER NOT NULL DEFAULT 0")
             if "reference_link" not in c:
                 add_column("items", "reference_link TEXT")
+            if "unit" not in c:
+                add_column("items", "unit VARCHAR(16) NOT NULL DEFAULT 'unidad'")
+            if "serialized" not in c:
+                add_column("items", "serialized INTEGER NOT NULL DEFAULT 0")
+
+        # Unidades serializadas (aditivo). Tabla nueva: si no existe, se crea.
+        # Los ítems existentes quedan con serialized=0 y sin unidades, o sea sin
+        # cambios de comportamiento.
+        if not table_exists("item_units"):
+            cur.execute("""
+                CREATE TABLE item_units (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_id INTEGER NOT NULL REFERENCES items(id),
+                    serial VARCHAR(120) NOT NULL,
+                    status VARCHAR(16) NOT NULL DEFAULT 'EN_STOCK',
+                    location_id INTEGER REFERENCES locations(id),
+                    notes VARCHAR(255),
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(item_id, serial)
+                )
+            """)
 
         if table_exists("categories"):
             c = columns("categories")
@@ -1374,6 +1528,18 @@ def admin_adjust_stock():
         if not it or not it.is_active:
             flash("El item seleccionado está dado de baja o no existe.", "error")
             return redirect(url_for("admin_adjust_stock"))
+
+        # Serializados: SUMAR se permite (agrega cupo para luego etiquetar seriales
+        # desde la ficha del ítem). RESTAR se bloquea: una baja debe elegir qué
+        # serial sale (desde Movimientos) o quitarse desde la ficha, para no
+        # desincronizar las unidades.
+        if it.serialized and action == "RESTAR":
+            flash(
+                "Ese ítem es serializado: para dar de baja stock elegí el serial "
+                "desde Movimientos (o quitá el serial desde la ficha del ítem).",
+                "error",
+            )
+            return redirect(url_for("admin_adjust_stock"))
         location_id = int(location_id)
 
         if proveedor is None or baja is None:
@@ -1538,6 +1704,7 @@ def conteo():
                 return redirect(url_for("conteo", location_id=location.id))
 
             aplicados = 0
+            serial_faltantes = []
             try:
                 for d in diffs:
                     item = d["item"]
@@ -1547,6 +1714,13 @@ def conteo():
                     contado = d["contado"]
                     delta = contado - sistema
                     if delta == 0:
+                        continue
+
+                    # Serializado con faltante: no se ajusta a ciegas (hay que elegir
+                    # qué serial falta). Se omite y se avisa; el sobrante sí se aplica
+                    # (agrega cupo para etiquetar seriales después).
+                    if item.serialized and delta < 0:
+                        serial_faltantes.append(f"{item.code} {item.name}")
                         continue
 
                     if delta > 0:
@@ -1574,6 +1748,12 @@ def conteo():
 
                 db.session.commit()
                 flash(f"Conteo aplicado: {aplicados} ajuste(s) registrado(s) en {location.name}.", "ok")
+                if serial_faltantes:
+                    flash(
+                        "Ítems serializados con faltante NO ajustados (elegí el serial "
+                        "desde Movimientos/Descarte): " + "; ".join(serial_faltantes),
+                        "error",
+                    )
             except Exception as e:
                 db.session.rollback()
                 flash(f"No se pudo aplicar el conteo: {e}", "error")
@@ -1932,8 +2112,16 @@ def item_new():
         description = request.form.get("description", "").strip() or None
         category_id = request.form.get("category_id", "").strip()
         trackable = True if request.form.get("trackable") == "on" else False
+        serialized = True if request.form.get("serialized") == "on" else False
+        # Serializado y rastreable (único, máx 1) son excluyentes: si es serializado
+        # se lleva por unidades y no aplica la regla de "1 en todo el sistema".
+        if serialized:
+            trackable = False
         stock_min_raw = request.form.get("stock_min", "").strip()
         reference_link = (request.form.get("reference_link", "") or "").strip()[:500] or None
+        unit = request.form.get("unit", "unidad").strip()
+        if unit not in ("unidad", "metros"):
+            unit = "unidad"
 
         # Si el alta viene del modal (fetch AJAX), respondemos JSON para poder
         # mostrar el error dentro del popup sin recargar ni perder lo cargado.
@@ -1986,8 +2174,10 @@ def item_new():
                 description=description,
                 category_id=category.id,
                 trackable=trackable,
+                serialized=serialized,
                 stock_min=stock_min,
                 reference_link=reference_link,
+                unit=unit,
             ))
             try:
                 db.session.commit()
@@ -2024,9 +2214,15 @@ def item_edit(item_id: int):
         description = request.form.get("description", "").strip() or None
         category_id = request.form.get("category_id", "").strip()
         trackable = True if request.form.get("trackable") == "on" else False
+        serialized = True if request.form.get("serialized") == "on" else False
+        if serialized:
+            trackable = False
         stock_min_raw = request.form.get("stock_min", "").strip()
         is_active = True if request.form.get("is_active") == "on" else False
         reference_link = (request.form.get("reference_link", "") or "").strip()[:500] or None
+        unit = request.form.get("unit", "unidad").strip()
+        if unit not in ("unidad", "metros"):
+            unit = "unidad"
 
         stock_min = 0
         if not trackable:
@@ -2056,10 +2252,12 @@ def item_edit(item_id: int):
         it.name = name
         it.description = description
         it.trackable = trackable
+        it.serialized = serialized
         # si se marca rastreable, el stock mínimo se ignora
         it.stock_min = 0 if trackable else stock_min
         it.is_active = is_active
         it.reference_link = reference_link  # None cuando queda vacío
+        it.unit = unit
 
         try:
             db.session.commit()
@@ -2112,6 +2310,188 @@ def item_delete(item_id: int):
         flash(f"No se pudo eliminar: {e}", "error")
 
     return redirect(url_for("items"))
+
+
+# ---- SERIALES / UNIDADES DE ÍTEM ----
+
+UNIT_VIEW_ROLES = ("ADMIN", "SUPERVISOR", "LECTOR")
+
+
+def _units_redirect(item_id: int):
+    """Redirige a la ficha de seriales, preservando el modo embed (popup)."""
+    if request.values.get("embed") == "1":
+        return redirect(url_for("item_units", item_id=item_id, embed="1"))
+    return redirect(url_for("item_units", item_id=item_id))
+
+
+def _units_context(it: "Item"):
+    """Datos para la ficha de seriales: unidades por estado y cupo por ubicación."""
+    units = ItemUnit.query.filter_by(item_id=it.id).order_by(ItemUnit.status, ItemUnit.serial).all()
+    en_stock = [u for u in units if u.status == UNIT_EN_STOCK]
+    fuera = [u for u in units if u.status != UNIT_EN_STOCK]
+
+    # Cupo para etiquetar seriales por ubicación interna: no se pueden registrar
+    # más unidades EN_STOCK que la cantidad de stock agregado en esa ubicación.
+    labeled_by_loc = {}
+    for u in en_stock:
+        labeled_by_loc[u.location_id] = labeled_by_loc.get(u.location_id, 0) + 1
+
+    loc_rooms = []
+    for loc in Location.query.order_by(Location.name).all():
+        if loc.is_external:
+            continue
+        st = Stock.query.filter_by(item_id=it.id, location_id=loc.id).first()
+        qty = (st.quantity if st else 0) or 0
+        labeled = labeled_by_loc.get(loc.id, 0)
+        room = qty - labeled
+        loc_rooms.append({"loc": loc, "qty": qty, "labeled": labeled, "room": room})
+
+    return {"units": units, "en_stock": en_stock, "fuera": fuera, "loc_rooms": loc_rooms}
+
+
+@app.route("/items/<int:item_id>/units", methods=["GET"])
+@login_required
+@role_required("ADMIN", "SUPERVISOR", "LECTOR", "TECNICO")
+def item_units(item_id: int):
+    it = Item.query.get_or_404(item_id)
+    ctx = _units_context(it)
+    embed = request.args.get("embed") == "1"
+
+    # Filtro opcional por ubicación (ej. abrir desde Stock sobre una camioneta).
+    focus_loc = None
+    loc_raw = request.args.get("loc", "").strip()
+    if loc_raw.isdigit():
+        focus_loc = Location.query.get(int(loc_raw))
+        # TECNICO: solo puede enfocar ubicaciones de las que es responsable.
+        if current_user.role == "TECNICO":
+            allowed = {l.id for l in Location.query.join(LocationResponsible).filter(
+                LocationResponsible.user_id == current_user.id).all()}
+            if focus_loc and focus_loc.id not in allowed:
+                focus_loc = None
+
+    return render_template("item_units.html", it=it, embed=embed, focus_loc=focus_loc, **ctx)
+
+
+@app.route("/items/<int:item_id>/units/new", methods=["POST"])
+@login_required
+@role_required("ADMIN")
+def item_unit_new(item_id: int):
+    """Registra un serial de stock EXISTENTE en una ubicación (onboarding/etiquetado).
+
+    No mueve stock: solo asocia un número de serie a stock que ya está en esa
+    ubicación. Regla: no se pueden etiquetar más seriales EN_STOCK que la cantidad
+    de stock agregado en esa ubicación (unidades_etiquetadas <= stock).
+    """
+    it = Item.query.get_or_404(item_id)
+    if not it.serialized:
+        flash("Ese ítem no es serializado. Activá 'Serializado' en la ficha del ítem.", "error")
+        return _units_redirect(it.id)
+
+    serial = (request.form.get("serial", "") or "").strip()[:120]
+    location_id_raw = (request.form.get("location_id", "") or "").strip()
+    notes = (request.form.get("notes", "") or "").strip()[:255] or None
+
+    if not serial:
+        flash("El número de serie es obligatorio.", "error")
+        return _units_redirect(it.id)
+    if not location_id_raw.isdigit():
+        flash("Elegí la ubicación donde está la unidad.", "error")
+        return _units_redirect(it.id)
+    location_id = int(location_id_raw)
+
+    loc = Location.query.get(location_id)
+    if not loc or loc.is_external:
+        flash("Ubicación inválida para registrar un serial.", "error")
+        return _units_redirect(it.id)
+
+    # Serial único dentro del ítem (case-insensitive).
+    dup = ItemUnit.query.filter(
+        ItemUnit.item_id == it.id,
+        func.lower(ItemUnit.serial) == serial.lower(),
+    ).first()
+    if dup:
+        flash(f"El serial «{serial}» ya está cargado para este ítem.", "error")
+        return _units_redirect(it.id)
+
+    st = Stock.query.filter_by(item_id=it.id, location_id=location_id).first()
+    qty = (st.quantity if st else 0) or 0
+    labeled = count_units_in_stock(it.id, location_id)
+    if labeled >= qty:
+        flash(
+            f"No hay cupo en «{loc.name}»: hay {qty} en stock y ya {labeled} con serial. "
+            "Ingresá stock desde Movimientos antes de etiquetar más seriales.",
+            "error",
+        )
+        return _units_redirect(it.id)
+
+    try:
+        db.session.add(ItemUnit(
+            item_id=it.id, serial=serial, status=UNIT_EN_STOCK,
+            location_id=location_id, notes=notes,
+        ))
+        db.session.commit()
+        flash(f"Serial «{serial}» registrado en {loc.name}.", "ok")
+    except Exception as e:
+        db.session.rollback()
+        flash(f"No se pudo registrar el serial: {e}", "error")
+    return _units_redirect(it.id)
+
+
+@app.route("/units/<int:unit_id>/edit", methods=["POST"])
+@login_required
+@role_required("ADMIN")
+def item_unit_edit(unit_id: int):
+    """Corrige el número de serie o las notas de una unidad. No mueve stock."""
+    u = ItemUnit.query.get_or_404(unit_id)
+    serial = (request.form.get("serial", "") or "").strip()[:120]
+    notes = (request.form.get("notes", "") or "").strip()[:255] or None
+
+    if not serial:
+        flash("El número de serie es obligatorio.", "error")
+        return _units_redirect(u.item_id)
+
+    dup = ItemUnit.query.filter(
+        ItemUnit.item_id == u.item_id,
+        func.lower(ItemUnit.serial) == serial.lower(),
+        ItemUnit.id != u.id,
+    ).first()
+    if dup:
+        flash(f"Ya existe otro serial «{serial}» en este ítem.", "error")
+        return _units_redirect(u.item_id)
+
+    try:
+        u.serial = serial
+        u.notes = notes
+        db.session.commit()
+        flash("Serial actualizado.", "ok")
+    except Exception as e:
+        db.session.rollback()
+        flash(f"No se pudo actualizar: {e}", "error")
+    return _units_redirect(u.item_id)
+
+
+@app.route("/units/<int:unit_id>/delete", methods=["POST"])
+@login_required
+@role_required("ADMIN")
+def item_unit_delete(unit_id: int):
+    """Quita la etiqueta de serial de una unidad EN_STOCK. No toca stock agregado.
+
+    Solo se permite borrar unidades EN_STOCK (las que ya salieron conservan
+    trazabilidad y no se borran)."""
+    u = ItemUnit.query.get_or_404(unit_id)
+    item_id = u.item_id
+    if u.status != UNIT_EN_STOCK:
+        flash("No se puede borrar un serial que ya salió del stock (histórico).", "error")
+        return _units_redirect(item_id)
+    try:
+        serial = u.serial
+        db.session.delete(u)
+        db.session.commit()
+        flash(f"Serial «{serial}» quitado.", "ok")
+    except Exception as e:
+        db.session.rollback()
+        flash(f"No se pudo quitar el serial: {e}", "error")
+    return _units_redirect(item_id)
 
 
 # ---- STOCK (con filtros) ----
@@ -2379,6 +2759,39 @@ def movements():
             flash("Motivo de descarte obligatorio.", "error")
             return redirect(url_for("movements"))
 
+        # --- ÍTEM SERIALIZADO: resolver qué seriales entran/salen ---
+        # Para ítems serializados la cantidad la definen los seriales, no el campo
+        # "qty" del form. Acá se valida y se arma el plan; los cambios en las filas
+        # ItemUnit se aplican dentro del try junto al stock (misma transacción).
+        from_ext = location_is_external(from_id)
+        to_ext = location_is_external(to_id)
+        serial_units_to_apply = []   # unidades existentes a mover (origen interno)
+        serial_new_serials = []      # seriales nuevos a crear (ingreso desde externo)
+        if it.serialized:
+            if from_ext:
+                # Ingreso: se cargan seriales nuevos.
+                raw = request.form.getlist("unit_serial")
+                serial_new_serials = [s.strip() for s in raw if s.strip()]
+                if not serial_new_serials:
+                    flash("Ítem serializado: ingresá al menos un número de serie.", "error")
+                    return redirect(url_for("movements"))
+                low = [s.lower() for s in serial_new_serials]
+                if len(set(low)) != len(low):
+                    flash("Hay números de serie repetidos en la carga.", "error")
+                    return redirect(url_for("movements"))
+                existing = {u.serial.lower() for u in ItemUnit.query.filter_by(item_id=item_id).all()}
+                dup = [s for s in serial_new_serials if s.lower() in existing]
+                if dup:
+                    flash(f"Ya existe(n) el/los serial(es): {', '.join(dup)}", "error")
+                    return redirect(url_for("movements"))
+                qty = len(serial_new_serials)
+            else:
+                # Movimiento desde ubicación interna: regla auto/elegir (helper).
+                serial_units_to_apply, err = resolve_serial_units_out(item_id, from_id, qty, request.form)
+                if err:
+                    flash(err, "error")
+                    return redirect(url_for("movements"))
+
         pending_responsible_id = None
 
         if generate_pending:
@@ -2413,10 +2826,20 @@ def movements():
                 pending_return_qty = int(pending_return_qty_raw)
 
         try:
-            if not location_is_external(from_id):
+            if not from_ext:
                 upsert_stock(item_id, from_id, -qty)
-            if not location_is_external(to_id):
+            if not to_ext:
                 upsert_stock(item_id, to_id, qty)
+
+            # Serializado: seriales a la observación (log y remito), sin tocar templates.
+            obs_final = observation
+            if it.serialized:
+                moved_serials = (
+                    serial_new_serials
+                    if serial_new_serials
+                    else [u.serial for u in serial_units_to_apply]
+                )
+                obs_final = serial_obs(observation, moved_serials)
 
             y, seq, number = next_movement_number()
 
@@ -2426,13 +2849,25 @@ def movements():
                 from_location_id=from_id,
                 to_location_id=to_id,
                 user_id=current_user.id,
-                observation=observation,
+                observation=obs_final,
                 year=y,
                 seq=seq,
                 number=number,
             )
             db.session.add(m)
             db.session.flush()
+
+            # Serializado: aplicar los cambios de estado/ubicación a cada unidad.
+            if it.serialized:
+                if serial_new_serials:
+                    for s in serial_new_serials:
+                        db.session.add(ItemUnit(
+                            item_id=item_id,
+                            serial=s,
+                            status=UNIT_EN_STOCK,
+                            location_id=(None if to_ext else to_id),
+                        ))
+                apply_serial_units_out(serial_units_to_apply, to_id)
 
             if generate_pending:
                 # Un pendiente por unidad que debe volver (cada uno qty 1), asi
@@ -2484,12 +2919,26 @@ def movements():
     for s in Stock.query.filter(Stock.quantity > 0).all():
         stock_map.setdefault(s.location_id, []).append(s.item_id)
 
+    # Ubicaciones externas (Proveedor/Baja): no tienen stock propio, por eso el
+    # selector "Item" debe ofrecer TODOS los items al elegirlas como origen.
+    external_location_ids = [l.id for l in locations_list if l.is_external]
+
+    # Seriales disponibles (EN_STOCK) por ítem y ubicación, para el selector del
+    # egreso de ítems serializados. Estructura: { item_id: { loc_id: [[unit_id, serial], ...] } }
+    # El TECNICO solo necesita (y solo debe ver) los seriales de sus ubicaciones.
+    units_map, serialized_item_ids = build_units_map(
+        location_ids=tech_location_ids if is_tecnico else None
+    )
+
     return render_template(
         "movements.html",
         items=items_list,
         locations=locations_list,
         logs=logs,
         stock_map=stock_map,
+        external_location_ids=external_location_ids,
+        units_map=units_map,
+        serialized_item_ids=serialized_item_ids,
         users=users_list,
         from_date=filters["date_from"],
         to_date=filters["date_to"],
@@ -2606,6 +3055,16 @@ def movements_bulk():
                 flash(f"Linea {idx}: el item seleccionado no existe o esta inactivo.", "error")
                 return redirect(url_for("movements_bulk"))
 
+            # Serializados: la carga múltiple no permite elegir seriales, así que
+            # se bloquea para no desincronizar las unidades. Se usa Movimientos.
+            if it.serialized:
+                flash(
+                    f"Linea {idx}: «{it.code} - {it.name}» es serializado. "
+                    "Cargalo desde Movimientos para elegir los seriales.",
+                    "error",
+                )
+                return redirect(url_for("movements_bulk"))
+
             parsed_lines.append({
                 "item_id": item_id,
                 "qty": qty,
@@ -2679,12 +3138,16 @@ def movements_bulk():
     for s in Stock.query.filter(Stock.quantity > 0).all():
         stock_map.setdefault(s.location_id, []).append(s.item_id)
 
+    # Externas: ofrecer todos los items al elegirlas como origen (no tienen stock).
+    external_location_ids = [l.id for l in locations_list if l.is_external]
+
     return render_template(
         "movements_bulk.html",
         items=items_list,
         locations=locations_list,
         descartes_id=_descartes_b.id if _descartes_b else None,
         stock_map=stock_map,
+        external_location_ids=external_location_ids,
     )
 
 
@@ -2826,7 +3289,19 @@ def item_usage():
                 flash("Item no existe o está dado de baja.", "error")
                 return redirect(url_for("item_usage"))
 
+            # Serializado: resolver qué seriales se consumen (auto/elegir).
+            serial_units = []
+            if item.serialized:
+                serial_units, err = resolve_serial_units_out(item_id, from_location_id, qty, request.form)
+                if err:
+                    flash(err, "error")
+                    return redirect(url_for("item_usage"))
+
             upsert_stock(item_id, from_location_id, -qty)
+
+            base_obs = observation or "Utilizado"
+            if item.serialized:
+                base_obs = serial_obs(base_obs, [u.serial for u in serial_units])
 
             y, seq, number = next_movement_number()
             m = Movement(
@@ -2835,12 +3310,16 @@ def item_usage():
                 from_location_id=from_location_id,
                 to_location_id=utilizados_loc.id,
                 user_id=current_user.id,
-                observation=observation or "Utilizado",
+                observation=base_obs,
                 year=y,
                 seq=seq,
                 number=number,
             )
             db.session.add(m)
+            db.session.flush()
+            if item.serialized:
+                # "Utilizado" es externa -> las unidades quedan ENTREGADO (consumidas).
+                apply_serial_units_out(serial_units, utilizados_loc.id)
             db.session.commit()
             flash(f"Item marcado como utilizado. Movimiento {number} registrado.", "ok")
             return redirect(url_for("item_usage"))
@@ -2913,6 +3392,10 @@ def item_usage():
     for s in Stock.query.filter(Stock.quantity > 0).all():
         stock_map.setdefault(s.location_id, []).append(s.item_id)
 
+    units_map, serialized_item_ids = build_units_map(
+        location_ids=tech_location_ids if is_tecnico else None
+    )
+
     return render_template(
         "item_usage.html",
         items=items,
@@ -2920,6 +3403,8 @@ def item_usage():
         movements=movements_list,
         is_tecnico=is_tecnico,
         stock_map=stock_map,
+        units_map=units_map,
+        serialized_item_ids=serialized_item_ids,
         users=users_list,
         from_date=f_date_from,
         to_date=f_date_to,
@@ -3195,10 +3680,24 @@ def remito_detail(remito_id: int):
     return render_template("remito_detail.html", remito=r, lines=lines, fill_rows=fill_rows, embed=embed)
 
 
+def fmt_qty(qty, item=None):
+    """Cantidad lista para mostrar, con su unidad al lado.
+
+    - 'metros' -> "300 metros"
+    - 'unidad' (o sin dato) -> "300" (comportamiento histórico, sin etiqueta).
+    No cambia la lógica de stock: solo formatea para la vista.
+    """
+    unit = getattr(item, "unit", None) if item is not None else None
+    if unit == "metros":
+        return f"{qty} metros"
+    return f"{qty}"
+
+
 @app.context_processor
 def inject_stock_helpers():
     return {
-        "stock_level_class": stock_level_class
+        "stock_level_class": stock_level_class,
+        "fmt_qty": fmt_qty,
     }
 
 @app.context_processor
@@ -3439,6 +3938,18 @@ def pending_deliveries():
                     to_id = jaula.id
                 else:
                     to_id = original_movement.from_location_id
+
+            # Guarda serializados: la devolución/reparación por serial todavía no está
+            # modelada. Se bloquea para no desincronizar las unidades; el serial se
+            # maneja manualmente desde Movimientos.
+            _ret_item = Item.query.get(returns_item_id)
+            if _ret_item and _ret_item.serialized:
+                flash(
+                    "El ítem es serializado: gestioná la devolución/reparación del "
+                    "serial desde Movimientos (esta pantalla aún no maneja seriales).",
+                    "error",
+                )
+                return redirect(url_for("pending_deliveries"))
 
             if not location_is_external(from_id):
                 upsert_stock(returns_item_id, from_id, -qty)
@@ -3816,10 +4327,22 @@ def scrap_report():
                 flash("Item no existe o está dado de baja.", "error")
                 return redirect(url_for("scrap_report"))
 
+            # Serializado: resolver qué seriales se descartan (auto/elegir).
+            serial_units = []
+            if item.serialized:
+                serial_units, err = resolve_serial_units_out(item_id, from_location_id, qty, request.form)
+                if err:
+                    flash(err, "error")
+                    return redirect(url_for("scrap_report"))
+
             if not location_is_external(from_location_id):
                 upsert_stock(item_id, from_location_id, -qty)
             if not location_is_external(descartes_loc.id):
                 upsert_stock(item_id, descartes_loc.id, qty)
+
+            base_obs = observation or ("Descarte: " + reason)
+            if item.serialized:
+                base_obs = serial_obs(base_obs, [u.serial for u in serial_units])
 
             y, seq, number = next_movement_number()
             m = Movement(
@@ -3828,13 +4351,15 @@ def scrap_report():
                 from_location_id=from_location_id,
                 to_location_id=descartes_loc.id,
                 user_id=current_user.id,
-                observation=observation or ("Descarte: " + reason),
+                observation=base_obs,
                 year=y,
                 seq=seq,
                 number=number,
             )
             db.session.add(m)
             db.session.flush()
+            if item.serialized:
+                apply_serial_units_out(serial_units, descartes_loc.id)
             db.session.add(Scrap(
                 item_id=item_id,
                 location_id=from_location_id,
@@ -3892,6 +4417,8 @@ def scrap_report():
     for s in Stock.query.filter(Stock.quantity > 0).all():
         stock_map.setdefault(s.location_id, []).append(s.item_id)
 
+    units_map, serialized_item_ids = build_units_map()
+
     return render_template(
         "scrap_report.html",
         scraps=scraps,
@@ -3899,6 +4426,8 @@ def scrap_report():
         form_locations=form_locations,
         items=items_all,
         stock_map=stock_map,
+        units_map=units_map,
+        serialized_item_ids=serialized_item_ids,
         users=users_list,
         from_date=f_date_from,
         to_date=f_date_to,
@@ -3948,6 +4477,16 @@ def reparaciones():
         item_id = r.item_id
         qty = r.quantity
         from_id = repair_loc.id
+
+        # Guarda serializados: la reparación por serial aún no está modelada.
+        _rep_item = Item.query.get(item_id)
+        if _rep_item and _rep_item.serialized:
+            flash(
+                "El ítem es serializado: resolvé la reparación del serial desde "
+                "Movimientos (esta pantalla aún no maneja seriales).",
+                "error",
+            )
+            return redirect(url_for("reparaciones"))
 
         if action == "reparado":
             dest = Location.query.filter_by(name=LOCATION_JAULA_TNG).first()

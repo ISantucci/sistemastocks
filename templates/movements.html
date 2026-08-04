@@ -59,9 +59,19 @@
         </select>
       </div>
 
-      <div class="field">
+      <div class="field" id="qty_box">
         <label>Cantidad</label>
-        <input type="number" name="qty" min="1" value="1" required />
+        <input type="number" name="qty" id="qty_input" min="1" value="1" required />
+      </div>
+
+      <div class="field" id="serial_auto_hint" style="display:none;">
+        <label>Seriales</label>
+        <div class="muted" id="serial_auto_text">Se usan automáticamente los seriales disponibles.</div>
+      </div>
+
+      <div class="field" id="serial_pick_box" style="display:none;">
+        <label>¿Cuál/es salen? <span class="muted" id="serial_pick_status" style="font-weight:400;"></span></label>
+        <div id="serial_pick_list" class="serial-pick-list"></div>
       </div>
 
       <div class="field" id="scrap_reason_box" style="display:none;">
@@ -146,6 +156,10 @@
   .filters-caret{transition:transform .15s ease;margin-left:2px;}
   .filters-collapse .card{margin-top:10px;}
   @media (min-width:768px){ .filters-toggle{display:none;} .filters-collapse .card{margin-top:0;} }
+  .serial-pick-list{display:flex;flex-wrap:wrap;gap:8px;margin-top:4px;}
+  .serial-pick-list label{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--border,#d0d5dd);
+    border-radius:8px;padding:6px 10px;font-size:14px;cursor:pointer;background:var(--surface,#fff);}
+  .serial-pick-list input{margin:0;}
 </style>
 <details class="filters-collapse" id="movFilters">
 <summary class="filters-toggle">
@@ -211,7 +225,7 @@
           <td>{{ m.created_at.strftime("%Y-%m-%d") }}</td>
           <td>{{ m.created_at.strftime("%H:%M") }}</td>
           <td>{{ m.item.code }} - {{ m.item.name }}</td>
-          <td class="num">{{ m.qty }}</td>
+          <td class="num">{{ fmt_qty(m.qty, m.item) }}</td>
           <td>{{ m.from_location.name }}</td>
           <td>{{ m.to_location.name }}</td>
           <td>{{ m.user.full_name }}</td>
@@ -238,8 +252,24 @@ document.addEventListener("DOMContentLoaded", function () {
   }
   // Item dinamico segun "Desde": solo se ofrecen items con stock (>0) en esa ubicacion.
   var stockMap = {{ stock_map|tojson }};
+  var externalLocIds = ({{ external_location_ids|tojson }} || []).map(String);
   var fromSel = document.getElementById("from_location_id");
   var itemEl = document.getElementById("item_id");
+
+  // Selector de seriales (auto/elegir) compartido.
+  var refreshSerialUI = initSerialPicker({
+    unitsMap: {{ units_map|tojson }},
+    serializedItems: {{ serialized_item_ids|tojson }},
+    itemEl: itemEl,
+    fromSel: fromSel,
+    qtyInput: document.getElementById("qty_input"),
+    pickBox: document.getElementById("serial_pick_box"),
+    pickList: document.getElementById("serial_pick_list"),
+    pickStatus: document.getElementById("serial_pick_status"),
+    autoHint: document.getElementById("serial_auto_hint"),
+    autoText: document.getElementById("serial_auto_text")
+  });
+
   if (itemEl && !itemEl.tomselect) {
     var allItems = [];
     Array.from(itemEl.options).forEach(function (o) {
@@ -252,19 +282,26 @@ document.addEventListener("DOMContentLoaded", function () {
       placeholder: "Elegí la ubicación de origen primero...",
       closeAfterSelect: true,
       onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
-      onChange: function () { this.blur(); }
+      onChange: function () { this.blur(); refreshSerialUI(); }
     });
 
     var refreshItems = function () {
       var locId = fromSel ? String(fromSel.value || "") : "";
-      var allowed = stockMap[locId] || [];
-      var allowedSet = {};
-      allowed.forEach(function (id) { allowedSet[String(id)] = true; });
+      var isExternal = externalLocIds.indexOf(locId) !== -1;
       tsItem.clear(true);
       tsItem.clearOptions();
-      allItems.forEach(function (o) { if (allowedSet[o.value]) tsItem.addOption(o); });
+      if (isExternal) {
+        // Ubicación externa (Proveedor/Baja): puede mover cualquier ítem.
+        allItems.forEach(function (o) { tsItem.addOption(o); });
+      } else {
+        var allowed = stockMap[locId] || [];
+        var allowedSet = {};
+        allowed.forEach(function (id) { allowedSet[String(id)] = true; });
+        allItems.forEach(function (o) { if (allowedSet[o.value]) tsItem.addOption(o); });
+      }
       tsItem.refreshOptions(false);
       if (!locId) { tsItem.disable(); } else { tsItem.enable(); }
+      refreshSerialUI();
     };
 
     if (fromSel && fromSel.tagName === "SELECT") {

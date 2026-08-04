@@ -29,7 +29,15 @@
       </div>
       <div class="field">
         <label>Cantidad</label>
-        <input type="number" name="qty" min="1" value="1" required />
+        <input type="number" name="qty" id="qty_input" min="1" value="1" required />
+      </div>
+      <div class="field" id="serial_auto_hint" style="display:none;">
+        <label>Seriales</label>
+        <div class="muted" id="serial_auto_text">Se usan automáticamente los seriales disponibles.</div>
+      </div>
+      <div class="field" id="serial_pick_box" style="display:none;">
+        <label>¿Cuál/es se descartan? <span class="muted" id="serial_pick_status" style="font-weight:400;"></span></label>
+        <div id="serial_pick_list" class="serial-pick-list"></div>
       </div>
       <div class="field">
         <label>Motivo de descarte</label>
@@ -65,6 +73,10 @@
   .filters-caret{transition:transform .15s ease;margin-left:2px;}
   .filters-collapse .card{margin-top:10px;}
   @media (min-width:768px){ .filters-toggle{display:none;} .filters-collapse .card{margin-top:0;} }
+  .serial-pick-list{display:flex;flex-wrap:wrap;gap:8px;margin-top:4px;}
+  .serial-pick-list label{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--border,#d0d5dd);
+    border-radius:8px;padding:6px 10px;font-size:14px;cursor:pointer;background:var(--surface,#fff);}
+  .serial-pick-list input{margin:0;}
 </style>
 <details class="filters-collapse" id="scrapFilters">
 <summary class="filters-toggle">
@@ -136,7 +148,7 @@
         <tr>
           <td>{{ s.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
           <td>{{ s.item.code }} — {{ s.item.name }}</td>
-          <td class="num">{{ s.quantity }}</td>
+          <td class="num">{{ fmt_qty(s.quantity, s.item) }}</td>
           <td>{{ s.location.name }}</td>
           <td><span class="badge badge-danger">{{ s.reason or "-" }}</span></td>
           <td>{{ s.user.full_name or s.user.username }}</td>
@@ -165,6 +177,20 @@ document.addEventListener("DOMContentLoaded", function () {
   var itemEl = document.getElementById("item_id");
   if (!itemEl) return;
 
+  // Selector de seriales (auto/elegir) compartido.
+  var refreshSerialUI = initSerialPicker({
+    unitsMap: {{ units_map|tojson }},
+    serializedItems: {{ serialized_item_ids|tojson }},
+    itemEl: itemEl,
+    fromSel: fromSel,
+    qtyInput: document.getElementById("qty_input"),
+    pickBox: document.getElementById("serial_pick_box"),
+    pickList: document.getElementById("serial_pick_list"),
+    pickStatus: document.getElementById("serial_pick_status"),
+    autoHint: document.getElementById("serial_auto_hint"),
+    autoText: document.getElementById("serial_auto_text")
+  });
+
   var allItems = [];
   Array.from(itemEl.options).forEach(function (o) {
     if (o.value) allItems.push({ value: o.value, text: o.text });
@@ -176,7 +202,7 @@ document.addEventListener("DOMContentLoaded", function () {
     placeholder: "Buscar item por codigo o nombre...",
     closeAfterSelect: true,
     onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
-    onChange: function () { this.blur(); }
+    onChange: function () { this.blur(); refreshSerialUI(); }
   });
 
   function refreshItems() {
@@ -189,6 +215,7 @@ document.addEventListener("DOMContentLoaded", function () {
     allItems.forEach(function (o) { if (allowedSet[o.value]) ts.addOption(o); });
     ts.refreshOptions(false);
     if (!locId) { ts.disable(); } else { ts.enable(); }
+    refreshSerialUI();
   }
 
   if (fromSel && fromSel.tagName === "SELECT") {

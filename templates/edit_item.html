@@ -37,6 +37,17 @@
     </div>
 
     <div style="margin-top:8px;">
+      <label>Forma de contabilización</label><br>
+      <select name="unit">
+        <option value="unidad" {% if it.unit != 'metros' %}selected{% endif %}>Unidad</option>
+        <option value="metros" {% if it.unit == 'metros' %}selected{% endif %}>Metros</option>
+      </select>
+      <div class="muted" style="margin-top:4px;">
+        "Metros" muestra la cantidad con "metros" al lado (ej. cables). "Unidad" es lo normal.
+      </div>
+    </div>
+
+    <div style="margin-top:8px;">
       <label>
         <input type="checkbox" name="trackable" {% if it.trackable %}checked{% endif %}>
         Rastreable (máx 1 por ubicación)

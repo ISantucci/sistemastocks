@@ -46,7 +46,7 @@
           {% for stock, item in stock_rows %}
           <tr>
             <td>{{ item.code }} — {{ item.name }}</td>
-            <td class="num">{{ stock.quantity }}</td>
+            <td class="num">{{ fmt_qty(stock.quantity, item) }}</td>
             <td class="num"><input type="number" name="contado_{{ item.id }}" min="0" placeholder="{{ stock.quantity }}" style="width:90px;"></td>
           </tr>
           {% else %}

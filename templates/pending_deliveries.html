@@ -22,8 +22,8 @@
           <td>{{ p.item.name }}</td>
           {% set swap = p.return_item_id and p.return_item_id != p.item_id %}
           <td>
-            {% if swap %}<span class="badge badge-warn">{{ p.return_item.code }}</span> x{{ p.return_qty or p.movement.qty }}
-            {% else %}<span class="muted">mismo</span> x{{ p.return_qty or p.movement.qty }}{% endif %}
+            {% if swap %}<span class="badge badge-warn">{{ p.return_item.code }}</span> x{{ fmt_qty(p.return_qty or p.movement.qty, p.return_item) }}
+            {% else %}<span class="muted">mismo</span> x{{ fmt_qty(p.return_qty or p.movement.qty, p.item) }}{% endif %}
           </td>
           <td>{{ p.comment or "" }}</td>
           <td>

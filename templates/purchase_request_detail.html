@@ -29,7 +29,7 @@
         <tr>
           <td>{{ ln.item.code }}</td>
           <td>{{ ln.item.name }}</td>
-          <td class="num">{{ ln.qty }}</td>
+          <td class="num">{{ fmt_qty(ln.qty, ln.item) }}</td>
         </tr>
         {% endfor %}
       </tbody>
