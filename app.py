@@ -4623,7 +4623,10 @@ def stock_alerts():
     q = (
         db.session.query(Item, Stock)
         .join(Stock, Item.id == Stock.item_id)
-        .join(Category, Category.id == Item.category_id)
+        # LEFT OUTER JOIN: no descartar items en alerta cuya categoria sea NULL o
+        # inexistente. Antes era INNER JOIN y esos items desaparecian de Alertas
+        # (aunque si aparecian en Solicitud de compra y en el badge).
+        .outerjoin(Category, Category.id == Item.category_id)
         .filter(
             Item.is_active == True,
             Item.trackable == False,
@@ -4674,7 +4677,7 @@ def stock_alerts():
         "location": lambda a: (a["stock"].location.name or "").lower(),
         "code": lambda a: (a["item"].code or "").lower(),
         "name": lambda a: (a["item"].name or "").lower(),
-        "category": lambda a: (a["item"].category.name or "").lower(),
+        "category": lambda a: ((a["item"].category.name if a["item"].category else "") or "").lower(),
         "quantity": lambda a: a["stock"].quantity,
     }
     keyfn = keyfns.get(sort_by, keyfns["code"])
