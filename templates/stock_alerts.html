@@ -61,7 +61,7 @@
           <td>{{ a.stock.location.name }}</td>
           <td>{{ a.item.code }}</td>
           <td>{{ a.item.name }}</td>
-          <td>{{ a.item.category.name }}</td>
+          <td>{{ a.item.category.name if a.item.category else "—" }}</td>
           <td class="num {{ a.level }}">{{ fmt_qty(a.stock.quantity, a.stock.item) }}</td>
           <td>{% if a.item.reference_link %}<a href="{{ a.item.reference_link }}" target="_blank" rel="noopener noreferrer">Abrir</a>{% else %}—{% endif %}</td>
         </tr>

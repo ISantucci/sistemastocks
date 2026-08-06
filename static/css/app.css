@@ -394,6 +394,12 @@ table.data-table{ width: 100%; border-collapse: collapse; font-size: 13px; }
 .badge-danger{ background: var(--danger-soft); color: var(--danger-soft-text); }
 .badge-accent{ background: var(--accent-soft); color: var(--accent-soft-text); }
 
+/* Semaforo de stock (global). Antes vivia inline en stock.html, por eso Alertas
+   de Stock no mostraba colores. Ahora aplica en cualquier vista. */
+.stock-red{ background-color:#ffe5e5; color:#a40000; font-weight:700; }
+.stock-yellow{ background-color:#fff6cc; color:#8a6d00; font-weight:700; }
+.stock-green{ background-color:#e7f7e7; color:#1f6b1f; font-weight:700; }
+
 /* ---------- Flash messages ---------- */
 .flash-stack{ display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
 .flash-ok, .flash-error{
