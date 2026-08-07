@@ -8,4 +8,11 @@ backups_local/
 logs/
 logs_local/
 *.db
+*.db-wal
+*.db-shm
 .env
+env/
+*.env
+*.bak
+*.bak_*
+SistemaStocksTNG.zip

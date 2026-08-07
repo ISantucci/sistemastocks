@@ -89,6 +89,64 @@ def handle_csrf_error(e):
     )
 
 
+# ------------------ SEGURIDAD: cookies de sesion + headers ------------------
+# Endurecimiento de la cookie de sesion. SESSION_COOKIE_SECURE es opt-in por
+# entorno para NO romper el acceso por HTTP en la EC2 si todavia no hay TLS
+# delante (default false = comportamiento actual). Poner en "true" cuando la
+# app quede detras de HTTPS.
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=(
+        os.environ.get("SESSION_COOKIE_SECURE", "false").strip().lower() == "true"
+    ),
+)
+
+
+@app.after_request
+def _security_headers(resp):
+    # Cabeceras de seguridad basicas. No se agrega CSP estricta a proposito:
+    # los templates usan estilos/scripts inline y una CSP estricta los romperia.
+    # X-Frame-Options=SAMEORIGIN (no DENY) para no romper las vistas embebidas
+    # del mismo dominio (parametro ?embed=1).
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    return resp
+
+
+# ------------------ RATE LIMITING (flask-limiter) ------------------
+# Limite por usuario autenticado (o por IP si es anonimo). Storage en memoria:
+# alcanza porque produccion corre 1 solo proceso (waitress). Se puede desactivar
+# por entorno con RATELIMIT_ENABLED=false (los tests lo desactivan).
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+
+
+def _rate_key():
+    try:
+        if current_user.is_authenticated:
+            return f"user:{current_user.id}"
+    except Exception:
+        pass
+    return get_remote_address()
+
+
+limiter = Limiter(
+    key_func=_rate_key,
+    default_limits=["120 per minute"],
+    storage_uri="memory://",
+    enabled=(os.environ.get("RATELIMIT_ENABLED", "true").strip().lower() == "true"),
+)
+limiter.init_app(app)
+
+
+@limiter.request_filter
+def _rate_exempt_static():
+    # No limitar los assets estaticos (una sola pagina pide varios archivos).
+    return request.endpoint == "static"
+
+
 # Concurrencia SQLite: WAL permite lecturas concurrentes con una escritura,
 # y busy_timeout hace que una escritura espere (en ms) en vez de fallar con
 # "database is locked" cuando hay varios usuarios a la vez.
@@ -1501,6 +1559,7 @@ def home():
 # ---- AUTH ----
 
 @app.route("/login", methods=["GET", "POST"])
+@limiter.limit("5 per minute", methods=["POST"], error_message="Demasiados intentos de acceso. Espera un minuto e intenta de nuevo.")
 def login():
     if request.method == "POST":
         username = request.form.get("username", "").strip()
