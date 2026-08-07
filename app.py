@@ -3775,7 +3775,14 @@ def remitos():
             )
         )
 
-    remitos_list = query.order_by(Remito.created_at.desc()).limit(500).all()
+    sort_by = (request.args.get("sort_by") or "date").strip()
+    sort_dir = (request.args.get("sort_dir") or "desc").strip().lower()
+    if sort_by == "number":
+        _col = Remito.number
+    else:
+        sort_by = "date"
+        _col = Remito.created_at
+    remitos_list = query.order_by(_col.desc() if sort_dir == "desc" else _col.asc()).limit(500).all()
     locations_list = Location.query.order_by(Location.name).all()
 
     # Usuarios que son responsables de alguna ubicación, para el filtro.
@@ -3793,6 +3800,8 @@ def remitos():
         locations=locations_list,
         responsible_users=responsible_users,
         responsible_id=resp_id,
+        selected_sort_by=sort_by,
+        selected_sort_dir=sort_dir,
         today=now_ar().date().isoformat(),
     )
 
@@ -4284,11 +4293,21 @@ def pending_deliveries():
         pendings_q = pendings_q.filter(
             PendingDelivery.responsible_to_id == current_user.id
         )
-    pendings = pendings_q.order_by(PendingDelivery.created_at.desc()).all()
+    sort_by = (request.args.get("sort_by") or "date").strip()
+    sort_dir = (request.args.get("sort_dir") or "desc").strip().lower()
+    if sort_by == "item":
+        pendings_q = pendings_q.join(Item, Item.id == PendingDelivery.item_id)
+        _col = Item.code
+    else:
+        sort_by = "date"
+        _col = PendingDelivery.created_at
+    pendings = pendings_q.order_by(_col.desc() if sort_dir == "desc" else _col.asc()).all()
 
     return render_template(
         "pending_deliveries.html",
-        pendings=pendings
+        pendings=pendings,
+        selected_sort_by=sort_by,
+        selected_sort_dir=sort_dir,
     )
 
 @app.route("/import/items", methods=["GET", "POST"])
