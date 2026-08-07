@@ -128,6 +128,8 @@
         {% endfor %}
       </select>
     </div>
+    <input type="hidden" name="sort_by" value="{{ selected_sort_by or 'date' }}">
+    <input type="hidden" name="sort_dir" value="{{ selected_sort_dir or 'desc' }}">
     <div class="field-actions">
       <button type="submit" class="btn btn-primary">Aplicar filtros</button>
       <a href="{{ url_for('scrap_report') }}" class="btn btn-secondary">Limpiar</a>
@@ -141,7 +143,14 @@
   <div class="table-scroll">
     <table class="data-table">
       <thead>
-        <tr><th>Fecha</th><th>Item</th><th class="num">Cantidad</th><th>Desde</th><th>Motivo</th><th>Responsable</th></tr>
+        <tr>
+          <th><a href="{{ url_for('scrap_report', from_date=from_date, to_date=to_date, item_id=item_filter, user_id=user_filter, reason=reason_filter, limit=limit, sort_by='date', sort_dir='asc' if selected_sort_by == 'date' and selected_sort_dir == 'desc' else 'desc') }}">Fecha{% if selected_sort_by == 'date' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th><a href="{{ url_for('scrap_report', from_date=from_date, to_date=to_date, item_id=item_filter, user_id=user_filter, reason=reason_filter, limit=limit, sort_by='item', sort_dir='desc' if selected_sort_by == 'item' and selected_sort_dir == 'asc' else 'asc') }}">Item{% if selected_sort_by == 'item' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th class="num"><a href="{{ url_for('scrap_report', from_date=from_date, to_date=to_date, item_id=item_filter, user_id=user_filter, reason=reason_filter, limit=limit, sort_by='qty', sort_dir='desc' if selected_sort_by == 'qty' and selected_sort_dir == 'asc' else 'asc') }}">Cantidad{% if selected_sort_by == 'qty' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th>Desde</th>
+          <th>Motivo</th>
+          <th><a href="{{ url_for('scrap_report', from_date=from_date, to_date=to_date, item_id=item_filter, user_id=user_filter, reason=reason_filter, limit=limit, sort_by='user', sort_dir='desc' if selected_sort_by == 'user' and selected_sort_dir == 'asc' else 'asc') }}">Responsable{% if selected_sort_by == 'user' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+        </tr>
       </thead>
       <tbody>
         {% for s in scraps %}

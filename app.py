@@ -3609,6 +3609,9 @@ def item_usage():
     f_limit = int(f_limit_raw) if f_limit_raw.isdigit() else default_limit
     f_limit = max(1, min(f_limit, 5000))
 
+    sort_by = (request.args.get("sort_by") or "date").strip()
+    sort_dir = (request.args.get("sort_dir") or "desc").strip().lower()
+
     if utilizados_id and (not is_tecnico or tech_location_ids):
         hq = Movement.query.filter(Movement.to_location_id == utilizados_id)
         if is_tecnico:
@@ -3621,7 +3624,19 @@ def item_usage():
             hq = hq.filter(Movement.item_id == int(f_item))
         if (not is_tecnico) and f_user.isdigit():
             hq = hq.filter(Movement.user_id == int(f_user))
-        movements_list = hq.order_by(Movement.created_at.desc()).limit(f_limit).all()
+        if sort_by == "item":
+            hq = hq.join(Item)
+            _col = Item.code
+        elif sort_by == "user":
+            hq = hq.join(User)
+            _col = User.username
+        elif sort_by == "qty":
+            _col = Movement.qty
+        else:
+            sort_by = "date"
+            _col = Movement.created_at
+        hq = hq.order_by(_col.desc() if sort_dir == "desc" else _col.asc())
+        movements_list = hq.limit(f_limit).all()
     else:
         movements_list = []
 
@@ -3663,6 +3678,8 @@ def item_usage():
         item_filter=f_item,
         user_filter=f_user,
         limit=str(f_limit),
+        selected_sort_by=sort_by,
+        selected_sort_dir=sort_dir,
     )
 
 
@@ -4642,6 +4659,9 @@ def scrap_report():
     f_limit = int(f_limit_raw) if f_limit_raw.isdigit() else 500
     f_limit = max(1, min(f_limit, 5000))
 
+    sort_by = (request.args.get("sort_by") or "date").strip()
+    sort_dir = (request.args.get("sort_dir") or "desc").strip().lower()
+
     q = Scrap.query
     if reason_filter:
         q = q.filter_by(reason=reason_filter)
@@ -4653,7 +4673,18 @@ def scrap_report():
         q = q.filter(Scrap.item_id == int(f_item))
     if f_user.isdigit():
         q = q.filter(Scrap.user_id == int(f_user))
-    scraps = q.order_by(Scrap.created_at.desc()).limit(f_limit).all()
+    if sort_by == "item":
+        q = q.join(Item)
+        _col = Item.code
+    elif sort_by == "user":
+        q = q.join(User)
+        _col = User.username
+    elif sort_by == "qty":
+        _col = Scrap.quantity
+    else:
+        sort_by = "date"
+        _col = Scrap.created_at
+    scraps = q.order_by(_col.desc() if sort_dir == "desc" else _col.asc()).limit(f_limit).all()
 
     # Datos para el formulario de descarte + filtrado dinámico por ubicación
     # Origen: camionetas + la Jaula central (se descartan items desde ahi tambien).
@@ -4687,6 +4718,8 @@ def scrap_report():
         item_filter=f_item,
         user_filter=f_user,
         limit=str(f_limit),
+        selected_sort_by=sort_by,
+        selected_sort_dir=sort_dir,
     )
 
 
@@ -4825,6 +4858,9 @@ def reparaciones():
     f_limit = int(f_limit_raw) if f_limit_raw.isdigit() else 500
     f_limit = max(1, min(f_limit, 5000))
 
+    sort_by = (request.args.get("sort_by") or "date").strip()
+    sort_dir = (request.args.get("sort_dir") or "desc").strip().lower()
+
     q = Repair.query.filter(Repair.status != "EN_REPARACION")
     if f_status in ("REPARADO", "DESCARTADO"):
         q = q.filter(Repair.status == f_status)
@@ -4834,7 +4870,15 @@ def reparaciones():
         q = q.filter(Repair.resolved_at <= datetime.fromisoformat(f_date_to + "T23:59:59"))
     if f_item.isdigit():
         q = q.filter(Repair.item_id == int(f_item))
-    historial = q.order_by(Repair.resolved_at.desc()).limit(f_limit).all()
+    if sort_by == "item":
+        q = q.join(Item)
+        _col = Item.code
+    elif sort_by == "status":
+        _col = Repair.status
+    else:
+        sort_by = "date"
+        _col = Repair.resolved_at
+    historial = q.order_by(_col.desc() if sort_dir == "desc" else _col.asc()).limit(f_limit).all()
 
     # Resumen del mes en curso
     now = now_ar()
@@ -4860,6 +4904,8 @@ def reparaciones():
         status_filter=f_status,
         item_filter=f_item,
         limit=str(f_limit),
+        selected_sort_by=sort_by,
+        selected_sort_dir=sort_dir,
     )
 
 
