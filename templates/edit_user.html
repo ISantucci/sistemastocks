@@ -12,6 +12,10 @@
       <input name="full_name" value="{{ u.full_name }}" required />
     </div>
     <div>
+      <label>Email (opcional)</label><br />
+      <input name="email" type="email" value="{{ u.email or '' }}" />
+    </div>
+    <div>
       <label>Rol</label><br />
       <select name="role" required>
         {% for r in roles %}

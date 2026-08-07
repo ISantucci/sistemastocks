@@ -1,0 +1,333 @@
+{% extends "base.html" %}
+{% block title %}Ingresos/Egresos · TNGStocks{% endblock %}
+{% block page_title %}Ingresos/Egresos{% endblock %}
+{% block content %}
+<style>
+  .io-line{display:grid;grid-template-columns:2fr 100px 40px 150px;gap:10px;align-items:end;margin-bottom:10px;}
+  .io-line button{height:36px;}
+  .io-sn-btn-wrap{display:none;}
+  .sn-row{display:flex;gap:8px;align-items:center;margin-bottom:6px;}
+  .sn-row .sn-idx{width:28px;color:var(--muted);}
+</style>
+
+<div class="page-header">
+  <div>
+    <h2>Ingresos / Egresos</h2>
+    <p>Ingreso: Proveedor &rarr; {{ jaula.name if jaula else 'Jaula' }}. Egreso: {{ jaula.name if jaula else 'Jaula' }} &rarr; Proveedor. Cada operación genera un remito automático.</p>
+  </div>
+</div>
+
+{% if not jaula or not proveedor_loc %}
+<div class="card"><span class="badge badge-danger">Atención</span> Faltan las ubicaciones requeridas (Jaula / Proveedor). Crealas antes de operar.</div>
+{% endif %}
+
+{% if can_edit %}
+<div class="card">
+  <form method="post" id="io-form" action="{{ url_for('in_out') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="form-grid">
+      <div class="field">
+        <label>Tipo</label>
+        <select name="tipo" id="io-tipo" required>
+          <option value="INGRESO">Ingreso (Proveedor &rarr; {{ jaula.name if jaula else 'Jaula' }})</option>
+          <option value="EGRESO">Egreso ({{ jaula.name if jaula else 'Jaula' }} &rarr; Proveedor)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Proveedor</label>
+        <select name="supplier_id" required>
+          <option value="" selected disabled>Seleccionar...</option>
+          {% for s in suppliers %}<option value="{{ s.id }}">{{ s.contact_name }}{% if s.business_name %} — {{ s.business_name }}{% endif %}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field" style="grid-column:1 / -1; max-width:700px;">
+        <label>Observación</label>
+        <input type="text" name="observation" style="width:100%;">
+      </div>
+    </div>
+
+    <div class="card-header" style="margin-top:8px;"><span class="card-title">Ítems</span></div>
+    <div id="io-lines"></div>
+
+    <div style="margin-top:12px; margin-bottom:20px;">
+      <button type="button" id="io-add-line" class="btn btn-secondary">+ Agregar ítem</button>
+    </div>
+
+    <button type="submit" class="btn btn-primary">Registrar</button>
+  </form>
+</div>
+
+<template id="io-line-template">
+  <div class="io-line">
+    <div class="field">
+      <label>Ítem</label>
+      <select name="item_id[]" class="io-item" required>
+        <option value="" selected disabled>Seleccionar ítem</option>
+        {% for i in items %}<option value="{{ i.id }}">{{ i.code }} - {{ i.name }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label>Cant.</label>
+      <input type="number" name="qty[]" class="io-qty" min="1" value="1" required>
+    </div>
+    <div class="field">
+      <label>&nbsp;</label>
+      <button type="button" class="io-remove btn btn-danger btn-sm">X</button>
+    </div>
+    <div class="io-sn-btn-wrap field">
+      <label>Seriales</label>
+      <button type="button" class="io-sn-btn btn btn-secondary">Elegir S/N</button>
+      <input type="hidden" name="line_serials[]" class="io-serials" value="">
+    </div>
+  </div>
+</template>
+
+<!-- Popup S/N (solo egreso serializado: elegir cuáles salen de la Jaula) -->
+<div class="modal-overlay" id="modal-sn">
+  <div class="modal">
+    <div class="modal-header"><span class="modal-title">Elegí los seriales a egresar (Jaula)</span><button type="button" class="modal-close" onclick="closeModal('modal-sn')">&times;</button></div>
+    <div class="modal-body" id="sn-body" style="max-height:60vh; overflow:auto;"></div>
+    <div class="modal-footer">
+      <button type="button" class="btn btn-secondary" onclick="closeModal('modal-sn')">Cancelar</button>
+      <button type="button" class="btn btn-primary" id="sn-confirm">Confirmar</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  var IO_SERIALIZED = new Set({{ serialized_item_ids|tojson }});
+  var IO_JAULA_UNITS = {{ jaula_units|tojson }};  // { item_id: [[unit_id, serial], ...] }
+  var IO_JAULA_STOCK = {{ jaula_stock|tojson }};  // { item_id: cantidad en Jaula }
+  var IO_ALL_ITEMS = [
+    {% for i in items %}{ value: "{{ i.id }}", text: "{{ (i.code ~ ' - ' ~ i.name)|e }}" },
+    {% endfor %}
+  ];
+  var snCurrentLine = null;
+
+  function isSerial(itemId){ return IO_SERIALIZED.has(parseInt(itemId, 10)); }
+  function currentTipo(){ return document.getElementById('io-tipo').value; }
+
+  // En EGRESO solo se pueden mover ítems que la Jaula tiene en stock.
+  function allowedItems(){
+    if(currentTipo() === 'EGRESO'){
+      return IO_ALL_ITEMS.filter(function(o){ return (IO_JAULA_STOCK[o.value] || 0) > 0; });
+    }
+    return IO_ALL_ITEMS;
+  }
+
+  function applyItemsToLine(line){
+    var sel = line.querySelector('.io-item');
+    var ts = sel.tomselect;
+    if(!ts) return;
+    var allowed = allowedItems();
+    var cur = ts.getValue();
+    ts.clearOptions();
+    allowed.forEach(function(o){ ts.addOption(o); });
+    ts.refreshOptions(false);
+    if(cur && !allowed.some(function(o){ return o.value === cur; })){
+      ts.clear(true);   // el ítem elegido ya no aplica al tipo actual
+    } else if(cur){
+      ts.setValue(cur, true);
+    }
+  }
+
+  // Tope de cantidad: en EGRESO, la cantidad no puede superar el stock de la Jaula.
+  function maxForLine(line){
+    if(currentTipo() !== 'EGRESO') return null;   // ingreso: sin tope
+    var id = line.querySelector('.io-item').value;
+    if(!id) return null;
+    var m = IO_JAULA_STOCK[id] || 0;
+    return m > 0 ? m : null;
+  }
+
+  function clampQty(line){
+    var qty = line.querySelector('.io-qty');
+    var mx = maxForLine(line);
+    if(mx == null){ qty.removeAttribute('max'); return; }
+    qty.setAttribute('max', mx);
+    var v = parseInt(qty.value, 10);
+    if(!isNaN(v) && v > mx){ qty.value = mx; }   // si tipeó de más, al máximo posible
+  }
+
+  function serialsOf(line){
+    return line.querySelector('.io-serials').value.split('\n').map(function(s){return s.trim();}).filter(Boolean);
+  }
+
+  function refreshLine(line){
+    var itemSel = line.querySelector('.io-item');
+    var snWrap = line.querySelector('.io-sn-btn-wrap');
+    // El botón "Elegir S/N" aparece solo en EGRESO de un serializado (opcional).
+    // La cantidad queda SIEMPRE editable: podés egresar por cantidad, o elegir
+    // seriales puntuales (en cuyo caso la cantidad se ajusta a lo elegido).
+    var needSn = isSerial(itemSel.value) && currentTipo() === 'EGRESO';
+    // OJO: usar 'block' y no '' — con '' vuelve a la regla CSS display:none.
+    snWrap.style.display = needSn ? 'block' : 'none';
+    if(!needSn){ line.querySelector('.io-serials').value = ''; }
+    line.querySelector('.io-qty').readOnly = false;
+    clampQty(line);
+    updateSnBtn(line);
+  }
+
+  function updateSnBtn(line){
+    var btn = line.querySelector('.io-sn-btn');
+    if(!btn) return;
+    var n = serialsOf(line).length;
+    btn.textContent = n > 0 ? ('S/N: ' + n + ' elegido' + (n>1?'s':'')) : 'Elegir S/N';
+  }
+
+  function snUpdateCounter(){
+    if(!snCurrentLine) return;
+    var body = document.getElementById('sn-body');
+    var declared = parseInt(snCurrentLine.querySelector('.io-qty').value, 10) || 0;
+    var n = body.querySelectorAll('.sn-check:checked').length;
+    var avail = body.querySelectorAll('.sn-check').length;
+    var counter = document.getElementById('sn-counter');
+    if(counter){ counter.textContent = 'Seleccionados ' + n + ' de ' + declared + ' · disponibles en Jaula: ' + avail; }
+    document.getElementById('sn-confirm').disabled = (declared < 1 || n !== declared);
+  }
+
+  function openSn(line){
+    snCurrentLine = line;
+    var itemId = line.querySelector('.io-item').value;
+    var body = document.getElementById('sn-body');
+    body.innerHTML = '';
+    if(!itemId){ alert('Elegí primero el ítem.'); return; }
+    var declared = parseInt(line.querySelector('.io-qty').value, 10) || 0;
+    if(declared < 1){ alert('Poné primero la cantidad a egresar.'); return; }
+
+    var counter = document.createElement('p');
+    counter.className = 'muted'; counter.id = 'sn-counter';
+    counter.style.marginTop = '0';
+    body.appendChild(counter);
+
+    var current = serialsOf(line);
+    var units = IO_JAULA_UNITS[itemId] || [];
+    if(units.length === 0){
+      var p = document.createElement('p'); p.className = 'muted';
+      p.textContent = 'No hay seriales de este ítem en la Jaula. Etiquetalos primero desde la ficha del ítem.';
+      body.appendChild(p);
+    } else {
+      units.forEach(function(u){
+        var lab = document.createElement('label'); lab.className='sn-row';
+        var cb = document.createElement('input'); cb.type='checkbox'; cb.className='sn-check'; cb.value = u[1];
+        if(current.indexOf(u[1]) !== -1) cb.checked = true;
+        cb.addEventListener('change', snUpdateCounter);
+        var span = document.createElement('span'); span.textContent = u[1];
+        lab.appendChild(cb); lab.appendChild(span); body.appendChild(lab);
+      });
+    }
+    snUpdateCounter();
+    openModal('modal-sn');
+  }
+
+  function confirmSn(){
+    if(!snCurrentLine) return;
+    var body = document.getElementById('sn-body');
+    var declared = parseInt(snCurrentLine.querySelector('.io-qty').value, 10) || 0;
+    var vals = [];
+    body.querySelectorAll('.sn-check:checked').forEach(function(cb){ vals.push(cb.value); });
+    if(declared < 1 || vals.length !== declared){
+      alert('Elegí exactamente ' + declared + ' serial(es), acorde a la cantidad declarada.');
+      return;
+    }
+    snCurrentLine.querySelector('.io-serials').value = vals.join('\n');
+    updateSnBtn(snCurrentLine);
+    closeModal('modal-sn');
+  }
+
+  function wireLine(line){
+    var sel = line.querySelector('.io-item');
+    if(window.TomSelect && !sel.tomselect){
+      new TomSelect(sel, { create:false, sortField:{field:'text',direction:'asc'}, maxOptions:null,
+                           placeholder:'Buscá un ítem...', onChange:function(){ refreshLine(line); } });
+    }
+    sel.addEventListener('change', function(){ refreshLine(line); });
+    // Si cambia la cantidad: se limpian los seriales elegidos y se aplica el tope.
+    line.querySelector('.io-qty').addEventListener('input', function(){
+      line.querySelector('.io-serials').value = '';
+      clampQty(line);
+      updateSnBtn(line);
+    });
+    line.querySelector('.io-sn-btn').addEventListener('click', function(){ openSn(line); });
+    line.querySelector('.io-remove').addEventListener('click', function(){ line.remove(); });
+    applyItemsToLine(line);   // filtra ítems según el tipo actual
+    refreshLine(line);
+  }
+
+  function addLine(){
+    var tpl = document.getElementById('io-line-template');
+    var cont = document.getElementById('io-lines');
+    cont.appendChild(tpl.content.cloneNode(true));
+    wireLine(cont.lastElementChild);
+  }
+
+  // Al enviar: si hay una fila de egreso serializado sin seriales (o que no
+  // coinciden con la cantidad), se frena y se avisa.
+  function validateBeforeSubmit(ev){
+    var tipo = currentTipo();
+    var msg = null;
+    document.querySelectorAll('.io-line').forEach(function(line){
+      var itemSel = line.querySelector('.io-item');
+      if(!itemSel.value || msg) return;
+      if(isSerial(itemSel.value) && tipo === 'EGRESO'){
+        var n = serialsOf(line).length;
+        var q = parseInt(line.querySelector('.io-qty').value, 10) || 0;
+        if(n === 0){ msg = 'Hay un ítem serializado sin seriales elegidos. Usá «Elegir S/N».'; }
+        else if(n !== q){ msg = 'Los seriales elegidos no coinciden con la cantidad. Revisá «Elegir S/N».'; }
+      }
+    });
+    if(msg){ ev.preventDefault(); alert(msg); }
+  }
+
+  document.addEventListener('DOMContentLoaded', function(){
+    document.getElementById('io-add-line').addEventListener('click', addLine);
+    document.getElementById('sn-confirm').addEventListener('click', confirmSn);
+    document.getElementById('io-form').addEventListener('submit', validateBeforeSubmit);
+    // Al cambiar ingreso/egreso: se re-filtran los ítems (egreso = solo Jaula) y
+    // se re-evalúan las filas (S/N + tope de cantidad).
+    document.getElementById('io-tipo').addEventListener('change', function(){
+      document.querySelectorAll('.io-line').forEach(function(l){
+        applyItemsToLine(l); refreshLine(l);
+      });
+    });
+    addLine(); addLine(); addLine();
+  });
+</script>
+{% endif %}
+
+<div class="table-card">
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr><th>Fecha</th><th>Tipo</th><th>Ítem</th><th class="num">Cant.</th><th>Proveedor</th><th>Remito</th></tr>
+      </thead>
+      <tbody>
+        {% for m in logs %}
+        {% set r = line_map.get(m.id) %}
+        <tr>
+          <td>{{ m.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+          <td>
+            {% if m.to_location and m.to_location.name == (jaula.name if jaula else '') %}
+              <span class="badge badge-ok">Ingreso</span>
+            {% else %}
+              <span class="badge badge-warn">Egreso</span>
+            {% endif %}
+          </td>
+          <td>{{ m.item.code }} — {{ m.item.name }}</td>
+          <td class="num">{{ fmt_qty(m.qty, m.item) }}</td>
+          <td>{{ m.supplier.contact_name if m.supplier else "" }}</td>
+          <td>
+            {% if r %}
+              <a href="{{ url_for('remito_detail', remito_id=r.id) }}">{{ r.number }}</a>
+              {% if r.print_pending %}<span class="badge badge-danger" title="Pendiente de imprimir">sin imprimir</span>{% endif %}
+            {% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="muted">Sin movimientos de ingreso/egreso.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

@@ -62,6 +62,7 @@
       <div class="modal-body">
         <div class="field"><label>Username</label><input name="username" required></div>
         <div class="field"><label>Nombre completo</label><input name="full_name" required></div>
+        <div class="field"><label>Email <span class="muted">(opcional)</span></label><input name="email" type="email" placeholder="ejemplo@dominio.com"></div>
         <div class="field"><label>Rol</label>
           <select name="role" required>
             <option value="" selected disabled>Seleccionar rol...</option>
@@ -89,6 +90,7 @@
       <div class="modal-body">
         <div class="field"><label>Username</label><input name="username" value="{{ u.username }}" required></div>
         <div class="field"><label>Nombre completo</label><input name="full_name" value="{{ u.full_name }}" required></div>
+        <div class="field"><label>Email <span class="muted">(opcional)</span></label><input name="email" type="email" value="{{ u.email or '' }}" placeholder="ejemplo@dominio.com"></div>
         <div class="field"><label>Rol</label>
           <select name="role" required>
             {% for r in roles %}<option value="{{ r }}" {% if u.role == r %}selected{% endif %}>{{ r }}</option>{% endfor %}

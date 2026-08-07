@@ -252,9 +252,27 @@ document.addEventListener("DOMContentLoaded", function () {
   }
   // Item dinamico segun "Desde": solo se ofrecen items con stock (>0) en esa ubicacion.
   var stockMap = {{ stock_map|tojson }};
+  var stockQtyMap = {{ stock_qty_map|tojson }};
   var externalLocIds = ({{ external_location_ids|tojson }} || []).map(String);
   var fromSel = document.getElementById("from_location_id");
   var itemEl = document.getElementById("item_id");
+  var qtyInputEl = document.getElementById("qty_input");
+
+  // Tope de cantidad: no se puede mover más de lo que hay en el origen.
+  // Origen externo (Proveedor/Baja) = sin tope. Si tipea de más, al máximo.
+  function clampMovQty() {
+    if (!qtyInputEl) return;
+    var loc = fromSel ? String(fromSel.value || "") : "";
+    var item = itemEl ? String(itemEl.value || "") : "";
+    var isExternal = externalLocIds.indexOf(loc) !== -1;
+    if (isExternal || !loc || !item) { qtyInputEl.removeAttribute("max"); return; }
+    var mx = (stockQtyMap[loc] || {})[item];
+    if (mx == null) { qtyInputEl.removeAttribute("max"); return; }
+    qtyInputEl.setAttribute("max", mx);
+    var v = parseInt(qtyInputEl.value, 10);
+    if (!isNaN(v) && v > mx) { qtyInputEl.value = mx; }
+  }
+  if (qtyInputEl) { qtyInputEl.addEventListener("input", clampMovQty); }
 
   // Selector de seriales (auto/elegir) compartido.
   var refreshSerialUI = initSerialPicker({
@@ -282,7 +300,7 @@ document.addEventListener("DOMContentLoaded", function () {
       placeholder: "Elegí la ubicación de origen primero...",
       closeAfterSelect: true,
       onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
-      onChange: function () { this.blur(); refreshSerialUI(); }
+      onChange: function () { this.blur(); refreshSerialUI(); clampMovQty(); }
     });
 
     var refreshItems = function () {
@@ -302,6 +320,7 @@ document.addEventListener("DOMContentLoaded", function () {
       tsItem.refreshOptions(false);
       if (!locId) { tsItem.disable(); } else { tsItem.enable(); }
       refreshSerialUI();
+      clampMovQty();
     };
 
     if (fromSel && fromSel.tagName === "SELECT") {
