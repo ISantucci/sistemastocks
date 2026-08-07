@@ -1062,6 +1062,57 @@ def ensure_sqlite_schema() -> None:
         def add_column(table: str, coldef: str) -> None:
             cur.execute(f"ALTER TABLE {table} ADD COLUMN {coldef}")
 
+        # ------------------------------------------------------------------
+        # SINCRONIZACION AUTOMATICA DE COLUMNAS (aditiva, generica).
+        # Recorre TODOS los modelos y agrega cualquier columna que exista en el
+        # modelo pero falte en la tabla real. No borra, no modifica, no renombra.
+        # Asi, agregar un campo a un modelo NO requiere tocar nada mas: al
+        # reiniciar el servicio la DB se pone al dia sola.
+        # ------------------------------------------------------------------
+        try:
+            from sqlalchemy.dialects import sqlite as _sqld
+            _dialect = _sqld.dialect()
+
+            def _scalar_default(col):
+                d = col.default
+                if d is not None and getattr(d, "is_scalar", False):
+                    val = d.arg
+                    if isinstance(val, bool):
+                        return "1" if val else "0"
+                    if isinstance(val, (int, float)):
+                        return str(val)
+                    if isinstance(val, str):
+                        return "'" + val.replace("'", "''") + "'"
+                return None
+
+            for _tbl in db.metadata.sorted_tables:
+                if not table_exists(_tbl.name):
+                    continue  # tabla nueva: la crea db.create_all()
+                _have = columns(_tbl.name)
+                for _col in _tbl.columns:
+                    if _col.name in _have:
+                        continue
+                    try:
+                        _type = _col.type.compile(dialect=_dialect)
+                    except Exception:
+                        _type = "TEXT"
+                    _default = _scalar_default(_col)
+                    _clause = f"{_col.name} {_type}"
+                    if _default is not None:
+                        if not _col.nullable:
+                            _clause += " NOT NULL"
+                        _clause += f" DEFAULT {_default}"
+                    # Sin default constante -> se agrega NULLABLE para que el
+                    # ALTER nunca falle (SQLite no permite ADD COLUMN NOT NULL
+                    # sin default constante). El ORM sigue exigiendo el valor.
+                    try:
+                        add_column(_tbl.name, _clause)
+                        print(f"[schema-sync] +columna {_tbl.name}.{_col.name}")
+                    except Exception as _e:
+                        print(f"[schema-sync][WARN] {_tbl.name}.{_col.name}: {_e}")
+        except Exception as _e:
+            print(f"[schema-sync][WARN] sync generico omitido: {_e}")
+
         if table_exists("locations"):
             c = columns("locations")
             if "description" not in c:
@@ -6196,6 +6247,25 @@ def inject_print_badge():
     except Exception:
         count = 0
     return {"print_badge_count": count}
+
+
+# ---------------------------------------------------------------------------
+# ARRANQUE: sincronizacion automatica del esquema. Corre al IMPORTAR la app,
+# asi aplica tanto con `python app.py` (local) como sirviendo por WSGI
+# (serve.py + nssm en AWS), que es donde antes NO se actualizaba la DB y el
+# server caia con "no such column". Best-effort: si algo falla, se loguea pero
+# no impide levantar la app.
+# ---------------------------------------------------------------------------
+def _startup_db_sync() -> None:
+    try:
+        with app.app_context():
+            ensure_sqlite_schema()   # agrega columnas faltantes (aditivo)
+            db.create_all()          # crea tablas nuevas
+    except Exception as exc:
+        print(f"[startup][WARN] no se pudo sincronizar el esquema: {exc}")
+
+
+_startup_db_sync()
 
 
 if __name__ == "__main__":
