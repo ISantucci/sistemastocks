@@ -3138,7 +3138,20 @@ def movements():
     filters = _movements_filters_from_request()
     limit = filters["limit"]
 
-    logs_q = _build_movements_query(filters).order_by(Movement.created_at.desc())
+    # Orden por columna (click en el header). Default: fecha descendente
+    # (comportamiento historico). _build_movements_query ya hace join a Item y User.
+    sort_by = (request.args.get("sort_by") or "date").strip()
+    sort_dir = (request.args.get("sort_dir") or "desc").strip().lower()
+    _mov_sortable = {
+        "date": Movement.created_at,
+        "qty": Movement.qty,
+        "item": Item.code,
+        "user": User.username,
+    }
+    _sort_col = _mov_sortable.get(sort_by, Movement.created_at)
+    _order = _sort_col.desc() if sort_dir == "desc" else _sort_col.asc()
+
+    logs_q = _build_movements_query(filters).order_by(_order)
     if is_tecnico and tech_location_ids:
         logs_q = logs_q.filter(Movement.from_location_id.in_(tech_location_ids))
     logs = logs_q.limit(limit).all()
@@ -3184,6 +3197,8 @@ def movements():
         selected_date_from=filters["date_from"],
         selected_date_to=filters["date_to"],
         selected_limit=limit,
+        selected_sort_by=sort_by,
+        selected_sort_dir=sort_dir,
         is_tecnico=is_tecnico,
         tech_locations=tech_locations,
         descartes_id=descartes_id,
