@@ -95,7 +95,7 @@
     </div>
     <div class="field">
       <label>Item</label>
-      <select name="item_filter" class="js-buscar">
+      <select name="item_id" class="js-buscar">
         <option value="">Todos</option>
         {% for it in items %}
           <option value="{{ it.id }}" {% if item_filter and (item_filter|string) == (it.id|string) %}selected{% endif %}>{{ it.code }} - {{ it.name }}</option>
@@ -104,7 +104,7 @@
     </div>
     <div class="field">
       <label>Responsable</label>
-      <select name="user_filter" class="js-buscar">
+      <select name="user_id" class="js-buscar">
         <option value="">Todos</option>
         {% for u in users %}
           <option value="{{ u.id }}" {% if user_filter and (user_filter|string) == (u.id|string) %}selected{% endif %}>{{ u.full_name or u.username }}</option>

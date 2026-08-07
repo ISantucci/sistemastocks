@@ -3587,8 +3587,8 @@ def item_usage():
     # Filtros del historial (admin: fecha/item/responsable/mostrar; tecnico: fecha/item)
     f_date_from = request.args.get("from_date", "").strip()
     f_date_to = request.args.get("to_date", "").strip()
-    f_item = request.args.get("item_filter", "").strip()
-    f_user = request.args.get("user_filter", "").strip()
+    f_item = (request.args.get("item_id") or request.args.get("item_filter") or "").strip()
+    f_user = (request.args.get("user_id") or request.args.get("user_filter") or "").strip()
     f_limit_raw = request.args.get("limit", "").strip()
     default_limit = 100 if is_tecnico else 200
     f_limit = int(f_limit_raw) if f_limit_raw.isdigit() else default_limit
@@ -3797,8 +3797,8 @@ def remito_movimientos():
     if from_id == to_id:
         return render_template("_remito_mov_rows.html", movements=None, same=True)
 
-    date_from = _parse_date_arg(request.args.get("date_from", ""))
-    date_to = _parse_date_arg(request.args.get("date_to", ""))
+    date_from = _parse_date_arg(request.args.get("from_date") or request.args.get("date_from", ""))
+    date_to = _parse_date_arg(request.args.get("to_date") or request.args.get("date_to", ""))
     movs = unremitted_movements(from_id, to_id, date_from, date_to)
     return render_template("_remito_mov_rows.html", movements=movs, same=False)
 
@@ -4621,8 +4621,8 @@ def scrap_report():
     reason_filter = request.args.get("reason", "").strip()
     f_date_from = request.args.get("from_date", "").strip()
     f_date_to = request.args.get("to_date", "").strip()
-    f_item = request.args.get("item_filter", "").strip()
-    f_user = request.args.get("user_filter", "").strip()
+    f_item = (request.args.get("item_id") or request.args.get("item_filter") or "").strip()
+    f_user = (request.args.get("user_id") or request.args.get("user_filter") or "").strip()
     f_limit_raw = request.args.get("limit", "").strip()
     f_limit = int(f_limit_raw) if f_limit_raw.isdigit() else 500
     f_limit = max(1, min(f_limit, 5000))
@@ -4804,8 +4804,8 @@ def reparaciones():
 
     f_date_from = request.args.get("from_date", "").strip()
     f_date_to = request.args.get("to_date", "").strip()
-    f_status = request.args.get("status_filter", "").strip()  # REPARADO / DESCARTADO
-    f_item = request.args.get("item_filter", "").strip()
+    f_status = (request.args.get("status") or request.args.get("status_filter") or "").strip()  # REPARADO / DESCARTADO
+    f_item = (request.args.get("item_id") or request.args.get("item_filter") or "").strip()
     f_limit_raw = request.args.get("limit", "").strip()
     f_limit = int(f_limit_raw) if f_limit_raw.isdigit() else 500
     f_limit = max(1, min(f_limit, 5000))
@@ -5243,8 +5243,8 @@ def _mx_period():
     """
     now = now_ar()
     today0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    desde_raw = (request.args.get("desde") or "").strip()
-    hasta_raw = (request.args.get("hasta") or "").strip()
+    desde_raw = (request.args.get("from_date") or request.args.get("desde") or "").strip()
+    hasta_raw = (request.args.get("to_date") or request.args.get("hasta") or "").strip()
     preset = (request.args.get("preset") or "").strip()
 
     dt_from = dt_to = None
