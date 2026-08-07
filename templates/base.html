@@ -44,6 +44,12 @@
           <span class="nav-icon">&#8648;</span><span class="nav-label">Carga multiple</span>
         </a>
         {% endif %}
+        {% if me.role in ["ADMIN", "SUPERVISOR", "LECTOR"] %}
+        <a href="{{ url_for('in_out') }}" class="nav-link {% if request.endpoint == 'in_out' %}active{% endif %}">
+          <span class="nav-icon">&#8693;</span><span class="nav-label">Ingresos/Egresos</span>
+          {% if print_badge_count and print_badge_count > 0 %}<span class="nav-badge" title="{{ print_badge_count }} remito(s) sin imprimir">{{ print_badge_count }}</span>{% endif %}
+        </a>
+        {% endif %}
         {% if me.role in ["ADMIN", "SUPERVISOR", "TECNICO"] %}
         <a href="{{ url_for('item_usage') }}" class="nav-link {% if request.endpoint == 'item_usage' %}active{% endif %}">
           <span class="nav-icon">&#10003;</span><span class="nav-label">Utilizados</span>
@@ -105,6 +111,9 @@
         </a>
         <a href="{{ url_for('locations') }}" class="nav-link {% if request.endpoint == 'locations' %}active{% endif %}">
           <span class="nav-icon">&#9672;</span><span class="nav-label">Ubicaciones</span>
+        </a>
+        <a href="{{ url_for('suppliers') }}" class="nav-link {% if request.endpoint in ['suppliers', 'supplier_edit', 'supplier_toggle'] %}active{% endif %}">
+          <span class="nav-icon">&#128230;</span><span class="nav-label">Proveedores</span>
         </a>
         {% endif %}
         {% if me.role == "ADMIN" %}

@@ -5,12 +5,20 @@
 <div class="page-header no-print">
   <div>
     <h2>Remito {{ remito.number }}</h2>
-    <p><span class="badge badge-ok">{{ remito.status }}</span></p>
+    <p><span class="badge badge-ok">{{ remito.status }}</span>
+      {% if remito.print_pending %}<span class="badge badge-danger" title="Auto-generado por Ingresos/Egresos, todavía sin imprimir">Sin imprimir</span>{% endif %}
+    </p>
   </div>
   <div style="display:flex; gap:10px;">
     <button type="button" class="btn btn-secondary" onclick="window.print()"
             title="Se abre el diálogo de impresión: elegí 'Guardar como PDF' como destino.">Guardar PDF</button>
     <button type="button" class="btn btn-primary" onclick="window.print()">Imprimir</button>
+    {% if remito.print_pending and me and me.role in ["ADMIN","SUPERVISOR"] %}
+    <form method="post" action="{{ url_for('remito_mark_printed', remito_id=remito.id) }}" style="display:inline;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button type="submit" class="btn btn-secondary" title="Sacar el aviso de 'sin imprimir'">Marcar impreso</button>
+    </form>
+    {% endif %}
     {% if not embed %}<a href="{{ url_for('remitos') }}" class="btn btn-secondary">Volver</a>{% endif %}
   </div>
 </div>

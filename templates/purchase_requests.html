@@ -85,6 +85,25 @@
             </table>
           </div>
           <div class="field" style="margin-top:12px;">
+            <label>Destinatarios del mail</label>
+            {% if recipient_users %}
+              <p class="muted" style="margin:2px 0 8px;">Marcá a quién se le manda. Se completa el mail automáticamente con su email.</p>
+              <div class="table-scroll" style="max-height:26vh; border:1px solid var(--border); border-radius:6px; padding:8px;">
+                {% for ru in recipient_users %}
+                <label style="display:flex; align-items:center; gap:8px; padding:3px 0;">
+                  <input type="checkbox" name="recipient_id" value="{{ ru.id }}">
+                  <span>{{ ru.full_name or ru.username }}
+                    {% if ru.role == 'PROVEEDOR' %}<span class="badge badge-neutral">Proveedor</span>{% endif %}
+                    <span class="muted">— {{ ru.email }}</span>
+                  </span>
+                </label>
+                {% endfor %}
+              </div>
+            {% else %}
+              <p class="muted">No hay usuarios con email cargado. Cargá el email en un usuario (ideal: tipo Proveedor) para poder seleccionarlo acá.</p>
+            {% endif %}
+          </div>
+          <div class="field" style="margin-top:12px;">
             <label>Observación (opcional)</label>
             <input name="observation" maxlength="255">
           </div>

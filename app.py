@@ -331,7 +331,11 @@ class User(db.Model):
     full_name = db.Column(db.String(120), nullable=False, default="")
     password_hash = db.Column(db.String(255), nullable=False)
 
-    role = db.Column(db.String(20), nullable=False)  # ADMIN/SUPERVISOR/...
+    role = db.Column(db.String(20), nullable=False)  # ADMIN/SUPERVISOR/TECNICO/LECTOR
+
+    # Email de contacto (aditivo, opcional). Se usa como destinatario de las
+    # solicitudes de compra (ver PurchaseRequestRecipient).
+    email = db.Column(db.String(255), nullable=True)
 
     # Flask-Login interface
     @property
@@ -354,6 +358,24 @@ class User(db.Model):
 
     def check_password(self, raw_password: str) -> bool:
         return check_password_hash(self.password_hash, raw_password)
+
+
+class Supplier(db.Model):
+    """Carta de proveedor. Entidad propia (separada de usuarios) para no ensuciar
+    la tabla de usuarios. Se usa en la seccion Ingresos/Egresos.
+    """
+    __tablename__ = "suppliers"
+    id = db.Column(db.Integer, primary_key=True)
+
+    contact_name = db.Column(db.String(120), nullable=False)          # Nombre (contacto)
+    business_name = db.Column(db.String(160), nullable=True)          # Comercio / nombre de fantasia
+    cuit = db.Column(db.String(20), nullable=True)                    # CUIT
+    legal_name = db.Column(db.String(160), nullable=True)            # Razon social
+    email = db.Column(db.String(255), nullable=True)
+    phone = db.Column(db.String(40), nullable=True)
+
+    is_active = db.Column(db.Boolean, default=True, nullable=False)   # baja logica
+    created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
 
 
 class LocationResponsible(db.Model):
@@ -483,7 +505,13 @@ class Movement(db.Model):
     seq = db.Column(db.Integer, nullable=True)
     number = db.Column(db.String(32), unique=True, nullable=True)
 
+    # Proveedor asociado (solo en movimientos generados por Ingresos/Egresos).
+    # NULL en los movimientos internos normales (jaula/camionetas). Sirve para
+    # separarlos del listado de Movimientos sin tocar el historico.
+    supplier_id = db.Column(db.Integer, db.ForeignKey("suppliers.id"), nullable=True)
+
     item = db.relationship("Item")
+    supplier = db.relationship("Supplier")
     from_location = db.relationship("Location", foreign_keys=[from_location_id])
     to_location = db.relationship("Location", foreign_keys=[to_location_id])
     user = db.relationship("User")
@@ -532,6 +560,11 @@ class Remito(db.Model):
     number = db.Column(db.String(32), unique=True, nullable=False)
 
     status = db.Column(db.String(16), nullable=False, default="BORRADOR")  # BORRADOR / CONFIRMADO
+
+    # Pendiente de impresion. Solo lo activan los remitos auto-generados por
+    # Ingresos/Egresos, para el badge de "no te olvides de imprimir". Los remitos
+    # normales quedan en False (default), asi no disparan alerta.
+    print_pending = db.Column(db.Boolean, default=False, nullable=False)
 
     from_location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), nullable=False)
     to_location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), nullable=False)
@@ -646,6 +679,14 @@ class PurchaseRequest(db.Model):
         cascade="all, delete-orphan",
         order_by="PurchaseRequestLine.id",
     )
+    # Destinatarios seleccionados al crear la solicitud (aditivo). El mail se
+    # resuelve en vivo desde el usuario; guardamos el vinculo para trazabilidad
+    # de a quien se le mando.
+    recipients = db.relationship(
+        "PurchaseRequestRecipient",
+        backref="request",
+        cascade="all, delete-orphan",
+    )
 
 
 class PurchaseRequestLine(db.Model):
@@ -660,6 +701,29 @@ class PurchaseRequestLine(db.Model):
     spec = db.Column(db.String(255), nullable=True)
 
     item = db.relationship("Item")
+
+
+class PurchaseRequestRecipient(db.Model):
+    """Destinatario de una solicitud de compra (usuario con email).
+
+    Aditivo: no toca stock ni la lógica existente. Reemplaza la lista de mails
+    hardcodeada por una selección de usuarios en el momento de crear la
+    solicitud. El email se lee del usuario vinculado, no se copia acá.
+    """
+    __tablename__ = "purchase_request_recipients"
+    id = db.Column(db.Integer, primary_key=True)
+    purchase_request_id = db.Column(
+        db.Integer, db.ForeignKey("purchase_requests.id"), nullable=False
+    )
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+
+    user = db.relationship("User")
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            "purchase_request_id", "user_id", name="uq_pr_recipient"
+        ),
+    )
 
 
 # ------------------ LOGIN MANAGER ------------------
@@ -947,8 +1011,13 @@ def _movements_filters_from_request() -> dict:
 
 
 def _build_movements_query(filters: dict):
-    """Devuelve query SQLAlchemy con los filtros aplicados."""
-    q = Movement.query.join(Item).join(User)
+    """Devuelve query SQLAlchemy con los filtros aplicados.
+
+    Excluye los movimientos de Ingresos/Egresos (los que tienen supplier_id):
+    esos se ven en su propia sección, no en el listado/exportación de Movimientos.
+    Los movimientos internos historicos (supplier_id NULL) no se tocan.
+    """
+    q = Movement.query.join(Item).join(User).filter(Movement.supplier_id.is_(None))
 
     if filters["item_filter"].isdigit():
         q = q.filter(Movement.item_id == int(filters["item_filter"]))
@@ -1020,6 +1089,8 @@ def ensure_sqlite_schema() -> None:
                 add_column("users", "role TEXT NOT NULL DEFAULT 'LECTOR'")
             if "password_hash" not in c:
                 add_column("users", "password_hash TEXT NOT NULL DEFAULT ''")
+            if "email" not in c:
+                add_column("users", "email TEXT")
 
         if table_exists("items"):
             c = columns("items")
@@ -1050,6 +1121,46 @@ def ensure_sqlite_schema() -> None:
                     notes VARCHAR(255),
                     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(item_id, serial)
+                )
+            """)
+
+        # Proveedores (aditivo). Tabla nueva: si no existe, se crea.
+        if not table_exists("suppliers"):
+            cur.execute("""
+                CREATE TABLE suppliers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    contact_name VARCHAR(120) NOT NULL,
+                    business_name VARCHAR(160),
+                    cuit VARCHAR(20),
+                    legal_name VARCHAR(160),
+                    email VARCHAR(255),
+                    phone VARCHAR(40),
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+        # Ingresos/Egresos: proveedor asociado en el movimiento (aditivo).
+        if table_exists("movements"):
+            c = columns("movements")
+            if "supplier_id" not in c:
+                add_column("movements", "supplier_id INTEGER REFERENCES suppliers(id)")
+
+        # Remito pendiente de impresion (aditivo).
+        if table_exists("remitos"):
+            c = columns("remitos")
+            if "print_pending" not in c:
+                add_column("remitos", "print_pending INTEGER NOT NULL DEFAULT 0")
+
+        # Destinatarios de solicitudes de compra (aditivo). Tabla nueva: si no
+        # existe, se crea. Reemplaza la lista de mails hardcodeada.
+        if not table_exists("purchase_request_recipients"):
+            cur.execute("""
+                CREATE TABLE purchase_request_recipients (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    purchase_request_id INTEGER NOT NULL REFERENCES purchase_requests(id),
+                    user_id INTEGER NOT NULL REFERENCES users(id),
+                    UNIQUE(purchase_request_id, user_id)
                 )
             """)
 
@@ -1860,6 +1971,7 @@ def users():
         full_name = request.form.get("full_name", "").strip()
         role = request.form.get("role", "").strip()
         password = request.form.get("password", "").strip()
+        email = request.form.get("email", "").strip() or None
 
         if not username:
             flash("Username requerido", "error")
@@ -1881,7 +1993,7 @@ def users():
             flash("Ese username ya existe", "error")
             return redirect(url_for("users"))
 
-        u = User(username=username, full_name=full_name, role=role)
+        u = User(username=username, full_name=full_name, role=role, email=email)
         u.set_password(password)
         db.session.add(u)
         db.session.commit()
@@ -2342,6 +2454,10 @@ def _units_context(it: "Item"):
             continue
         st = Stock.query.filter_by(item_id=it.id, location_id=loc.id).first()
         qty = (st.quantity if st else 0) or 0
+        # Solo ubicaciones que TIENEN stock de este ítem: no tiene sentido
+        # etiquetar un serial donde el ítem no está.
+        if qty <= 0:
+            continue
         labeled = labeled_by_loc.get(loc.id, 0)
         room = qty - labeled
         loc_rooms.append({"loc": loc, "qty": qty, "labeled": labeled, "room": room})
@@ -2696,7 +2812,12 @@ def movements():
         else:
             items_list = []
     else:
-        locations_list = Location.query.order_by(Location.name).all()
+        # Proveedor se saca del desplegable de Movimientos: los ingresos/egresos
+        # hacia/desde Proveedor se cargan en la sección Ingresos/Egresos.
+        locations_list = (
+            Location.query.filter(Location.name != LOCATION_PROVEEDOR)
+            .order_by(Location.name).all()
+        )
         items_list = Item.query.filter_by(is_active=True).order_by(Item.code).all()
 
     _descartes = Location.query.filter_by(name="Descartes").first()
@@ -2916,8 +3037,10 @@ def movements():
 
     # Mapa ubicacion -> items con stock (>0), para filtrar el selector "Item" segun "Desde"
     stock_map = {}
+    stock_qty_map = {}  # {loc_id(str): {item_id(str): qty}} para el tope de cantidad
     for s in Stock.query.filter(Stock.quantity > 0).all():
         stock_map.setdefault(s.location_id, []).append(s.item_id)
+        stock_qty_map.setdefault(str(s.location_id), {})[str(s.item_id)] = s.quantity
 
     # Ubicaciones externas (Proveedor/Baja): no tienen stock propio, por eso el
     # selector "Item" debe ofrecer TODOS los items al elegirlas como origen.
@@ -2936,6 +3059,7 @@ def movements():
         locations=locations_list,
         logs=logs,
         stock_map=stock_map,
+        stock_qty_map=stock_qty_map,
         external_location_ids=external_location_ids,
         units_map=units_map,
         serialized_item_ids=serialized_item_ids,
@@ -3135,8 +3259,10 @@ def movements_bulk():
 
     # Mapa ubicacion -> items con stock (>0), para filtrar el selector "Item" segun "Desde"
     stock_map = {}
+    stock_qty_map = {}  # {loc_id(str): {item_id(str): qty}} para el tope de cantidad
     for s in Stock.query.filter(Stock.quantity > 0).all():
         stock_map.setdefault(s.location_id, []).append(s.item_id)
+        stock_qty_map.setdefault(str(s.location_id), {})[str(s.item_id)] = s.quantity
 
     # Externas: ofrecer todos los items al elegirlas como origen (no tienen stock).
     external_location_ids = [l.id for l in locations_list if l.is_external]
@@ -3147,6 +3273,7 @@ def movements_bulk():
         locations=locations_list,
         descartes_id=_descartes_b.id if _descartes_b else None,
         stock_map=stock_map,
+        stock_qty_map=stock_qty_map,
         external_location_ids=external_location_ids,
     )
 
@@ -3833,6 +3960,7 @@ def user_edit(user_id):
         u.username = username
         u.full_name = full_name
         u.role = role
+        u.email = request.form.get("email", "").strip() or None
         db.session.commit()
         flash("Usuario actualizado", "ok")
         return redirect(url_for("users"))
@@ -4705,11 +4833,18 @@ def stock_alerts():
 
 # Destinatarios precargados del mail de solicitud de compra.
 # Por ahora el envio es MANUAL (se copia/pega). A futuro se automatiza.
-PURCHASE_REQUEST_RECIPIENTS = [
-    "admtngvial@tngroup.com.ar",
-    "mcorti@tngroup.com.ar",
-    "altamiranon@tngroup.com.ar",
-]
+def selectable_recipient_users():
+    """Usuarios que pueden elegirse como destinatarios de una solicitud de compra.
+
+    Criterio: usuarios con email cargado. Se ordenan poniendo primero a los de
+    tipo PROVEEDOR y despues por nombre. Reemplaza la lista de mails hardcodeada.
+    """
+    return (
+        User.query
+        .filter(User.email.isnot(None), User.email != "")
+        .order_by((User.role != "PROVEEDOR"), User.full_name, User.username)
+        .all()
+    )
 
 
 def alert_items_distinct():
@@ -4831,8 +4966,15 @@ def build_purchase_request_email(pr: PurchaseRequest) -> dict:
         "Saludos,\n"
         f"{firma}.\n"
     )
+    # Destinatarios: mails de los usuarios seleccionados al crear la solicitud.
+    # Si no se selecciono ninguno, "to" queda vacio (envio manual).
+    to_list = [
+        r.user.email
+        for r in pr.recipients
+        if r.user and (r.user.email or "").strip()
+    ]
     return {
-        "to": ", ".join(PURCHASE_REQUEST_RECIPIENTS),
+        "to": ", ".join(to_list),
         "subject": subject,
         "body": body,
     }
@@ -4852,6 +4994,7 @@ def purchase_requests():
         "purchase_requests.html",
         requests=reqs,
         alert_items=alert_items,
+        recipient_users=selectable_recipient_users(),
     )
 
 
@@ -4905,6 +5048,22 @@ def purchase_request_new():
                     qty=qty,
                 )
             )
+
+        # Destinatarios seleccionados (usuarios con email). Solo se guardan los
+        # validos y con mail; se ignoran duplicados y ausentes.
+        valid_recipient_ids = {u.id for u in selectable_recipient_users()}
+        seen_recipients = set()
+        for rid in request.form.getlist("recipient_id"):
+            if not rid.isdigit():
+                continue
+            uid = int(rid)
+            if uid in seen_recipients or uid not in valid_recipient_ids:
+                continue
+            db.session.add(
+                PurchaseRequestRecipient(purchase_request_id=pr.id, user_id=uid)
+            )
+            seen_recipients.add(uid)
+
         db.session.commit()
         flash(f"Solicitud de compra creada: {number}", "ok")
         return redirect(url_for("purchase_request_detail", pr_id=pr.id))
@@ -5712,6 +5871,331 @@ def metricas_reparaciones():
 #  FIN MÉTRICAS
 # ================================================================
 
+
+# ================================================================
+#  PROVEEDORES + INGRESOS/EGRESOS
+# ================================================================
+
+SUPPLIER_ROLES = ("ADMIN", "SUPERVISOR")
+INOUT_VIEW_ROLES = ("ADMIN", "SUPERVISOR", "LECTOR")
+INOUT_EDIT_ROLES = ("ADMIN", "SUPERVISOR")
+
+
+def get_jaula_location():
+    return Location.query.filter_by(name=LOCATION_JAULA_TNG).first()
+
+
+def get_proveedor_location():
+    return Location.query.filter_by(name=LOCATION_PROVEEDOR).first()
+
+
+# ---------------- Carta de Proveedores (ABM) ----------------
+
+@app.route("/proveedores", methods=["GET", "POST"])
+@login_required
+@role_required(*SUPPLIER_ROLES)
+def suppliers():
+    if request.method == "POST":
+        contact_name = request.form.get("contact_name", "").strip()
+        if not contact_name:
+            flash("El nombre del contacto es obligatorio.", "error")
+            return redirect(url_for("suppliers"))
+        s = Supplier(
+            contact_name=contact_name,
+            business_name=request.form.get("business_name", "").strip() or None,
+            cuit=request.form.get("cuit", "").strip() or None,
+            legal_name=request.form.get("legal_name", "").strip() or None,
+            email=request.form.get("email", "").strip() or None,
+            phone=request.form.get("phone", "").strip() or None,
+        )
+        db.session.add(s)
+        db.session.commit()
+        flash("Proveedor creado.", "ok")
+        return redirect(url_for("suppliers"))
+
+    show_inactive = request.args.get("inactivos") == "1"
+    q = Supplier.query
+    if not show_inactive:
+        q = q.filter_by(is_active=True)
+    suppliers_list = q.order_by(Supplier.contact_name).all()
+    return render_template(
+        "suppliers.html", suppliers=suppliers_list, show_inactive=show_inactive
+    )
+
+
+@app.route("/proveedores/<int:supplier_id>/edit", methods=["POST"])
+@login_required
+@role_required(*SUPPLIER_ROLES)
+def supplier_edit(supplier_id):
+    s = Supplier.query.get_or_404(supplier_id)
+    contact_name = request.form.get("contact_name", "").strip()
+    if not contact_name:
+        flash("El nombre del contacto es obligatorio.", "error")
+        return redirect(url_for("suppliers"))
+    s.contact_name = contact_name
+    s.business_name = request.form.get("business_name", "").strip() or None
+    s.cuit = request.form.get("cuit", "").strip() or None
+    s.legal_name = request.form.get("legal_name", "").strip() or None
+    s.email = request.form.get("email", "").strip() or None
+    s.phone = request.form.get("phone", "").strip() or None
+    db.session.commit()
+    flash("Proveedor actualizado.", "ok")
+    return redirect(url_for("suppliers"))
+
+
+@app.route("/proveedores/<int:supplier_id>/baja", methods=["POST"])
+@login_required
+@role_required(*SUPPLIER_ROLES)
+def supplier_toggle(supplier_id):
+    s = Supplier.query.get_or_404(supplier_id)
+    s.is_active = not s.is_active
+    db.session.commit()
+    flash("Proveedor " + ("reactivado." if s.is_active else "dado de baja."), "ok")
+    return redirect(url_for("suppliers"))
+
+
+# ---------------- Ingresos / Egresos ----------------
+
+@app.route("/ingresos-egresos", methods=["GET", "POST"])
+@login_required
+@role_required(*INOUT_VIEW_ROLES)
+def in_out():
+    jaula = get_jaula_location()
+    proveedor_loc = get_proveedor_location()
+
+    if request.method == "POST":
+        if current_user.role not in INOUT_EDIT_ROLES:
+            flash("No tenés permisos para registrar ingresos/egresos.", "error")
+            return redirect(url_for("in_out"))
+        if not jaula or not proveedor_loc:
+            flash(
+                f"Faltan ubicaciones requeridas: '{LOCATION_JAULA_TNG}' y/o "
+                f"'{LOCATION_PROVEEDOR}'. Crealas antes de operar.", "error"
+            )
+            return redirect(url_for("in_out"))
+
+        tipo = request.form.get("tipo", "").strip().upper()  # INGRESO / EGRESO
+        supplier_raw = request.form.get("supplier_id", "").strip()
+        observation = (request.form.get("observation", "") or "").strip() or None
+
+        if tipo not in ("INGRESO", "EGRESO"):
+            flash("Elegí si es ingreso o egreso.", "error")
+            return redirect(url_for("in_out"))
+        if not supplier_raw.isdigit():
+            flash("Elegí un proveedor.", "error")
+            return redirect(url_for("in_out"))
+        supplier = Supplier.query.get(int(supplier_raw))
+        if not supplier or not supplier.is_active:
+            flash("El proveedor no existe o está dado de baja.", "error")
+            return redirect(url_for("in_out"))
+
+        # Ingreso: Proveedor -> Jaula. Egreso: Jaula -> Proveedor.
+        if tipo == "INGRESO":
+            from_id, to_id = proveedor_loc.id, jaula.id
+        else:
+            from_id, to_id = jaula.id, proveedor_loc.id
+        from_ext = location_is_external(from_id)
+        to_ext = location_is_external(to_id)
+
+        # Filas multi-ítem (posicionales y alineadas). line_serials[] trae los
+        # seriales de esa fila (uno por línea), o vacío si el ítem no es serializado.
+        item_ids = request.form.getlist("item_id[]")
+        qtys = request.form.getlist("qty[]")
+        serials_list = request.form.getlist("line_serials[]")
+
+        # Se valida TODO antes de tocar nada (operación todo-o-nada).
+        planned = []  # {it, qty, new_serials, out_units}
+        seen_serials = set()  # evita repetir un serial entre filas
+        for idx in range(len(item_ids)):
+            item_raw = (item_ids[idx] or "").strip()
+            qty_raw = (qtys[idx] or "").strip() if idx < len(qtys) else ""
+            serials_raw = (serials_list[idx] or "") if idx < len(serials_list) else ""
+
+            if not item_raw:
+                continue  # fila vacía
+            if not item_raw.isdigit():
+                flash("Ítem inválido en una de las filas.", "error")
+                return redirect(url_for("in_out"))
+            it = Item.query.get(int(item_raw))
+            if not it or not it.is_active:
+                flash("Hay una fila con un ítem inexistente o dado de baja.", "error")
+                return redirect(url_for("in_out"))
+
+            out_units = []
+            if it.serialized and tipo == "EGRESO":
+                # Egreso serializado: OBLIGATORIO elegir los seriales (botón
+                # «Elegir S/N»). Deben estar EN_STOCK en la Jaula. La cantidad del
+                # egreso la definen los seriales elegidos.
+                txt = serials_raw
+                for sep in (",", ";"):
+                    txt = txt.replace(sep, "\n")
+                serials = [s.strip() for s in txt.splitlines() if s.strip()]
+                if not serials:
+                    flash(f"«{it.code} - {it.name}» es serializado: elegí los seriales a egresar con «Elegir S/N».", "error")
+                    return redirect(url_for("in_out"))
+                low = [s.lower() for s in serials]
+                if len(set(low)) != len(low):
+                    flash(f"«{it.code} - {it.name}»: hay seriales repetidos en la fila.", "error")
+                    return redirect(url_for("in_out"))
+                for s in low:
+                    key = (it.id, s)
+                    if key in seen_serials:
+                        flash(f"«{it.code} - {it.name}»: serial repetido entre filas.", "error")
+                        return redirect(url_for("in_out"))
+                    seen_serials.add(key)
+                for s in serials:
+                    u = (ItemUnit.query
+                         .filter(ItemUnit.item_id == it.id,
+                                 func.lower(ItemUnit.serial) == s.lower(),
+                                 ItemUnit.status == UNIT_EN_STOCK,
+                                 ItemUnit.location_id == jaula.id)
+                         .first())
+                    if not u:
+                        flash(f"«{it.code} - {it.name}»: el serial «{s}» no está disponible en la Jaula.", "error")
+                        return redirect(url_for("in_out"))
+                    out_units.append(u)
+                qty = len(out_units)
+            else:
+                # Ingreso (serializado o no) y egreso no serializado: por cantidad.
+                # En un ingreso serializado los seriales se etiquetan DESPUÉS, desde
+                # la ficha del ítem (acá solo entra el cupo/stock).
+                try:
+                    qty = int(qty_raw)
+                    if qty <= 0:
+                        raise ValueError()
+                except Exception:
+                    flash(f"«{it.code} - {it.name}»: cantidad inválida.", "error")
+                    return redirect(url_for("in_out"))
+
+            planned.append({"it": it, "qty": qty, "out_units": out_units})
+
+        if not planned:
+            flash("Cargá al menos un ítem.", "error")
+            return redirect(url_for("in_out"))
+
+        tipo_label = "Ingreso" if tipo == "INGRESO" else "Egreso"
+        try:
+            # Un solo remito agrupa toda la operación.
+            ry, rseq, rnumber = next_remito_number()
+            r_obs = f"{tipo_label} · {supplier.contact_name}"
+            if observation:
+                r_obs = f"{r_obs} · {observation}"
+            r = Remito(
+                year=ry, seq=rseq, number=rnumber,
+                status="CONFIRMADO", print_pending=True,
+                from_location_id=from_id, to_location_id=to_id,
+                created_by_user_id=current_user.id,
+                observation=r_obs[:255],
+                responsible_from_id=None, responsible_to_id=None,
+            )
+            db.session.add(r)
+            db.session.flush()
+
+            for p in planned:
+                it, qty = p["it"], p["qty"]
+                if not from_ext:
+                    upsert_stock(it.id, from_id, -qty)
+                if not to_ext:
+                    upsert_stock(it.id, to_id, qty)
+
+                obs_final = observation
+                if p["out_units"]:
+                    obs_final = serial_obs(observation, [u.serial for u in p["out_units"]])
+
+                y, seq, number = next_movement_number()
+                m = Movement(
+                    item_id=it.id, qty=qty,
+                    from_location_id=from_id, to_location_id=to_id,
+                    user_id=current_user.id, observation=obs_final,
+                    year=y, seq=seq, number=number,
+                    supplier_id=supplier.id,
+                )
+                db.session.add(m)
+                db.session.flush()
+
+                # Egreso serializado: marcar las unidades elegidas como salidas.
+                if p["out_units"]:
+                    apply_serial_units_out(p["out_units"], to_id)
+
+                db.session.add(RemitoLine(remito_id=r.id, movement_id=m.id))
+
+            db.session.commit()
+            flash(
+                f"{tipo_label} registrado ({len(planned)} ítem/s). "
+                f"Remito {rnumber} generado — acordate de imprimirlo.", "ok",
+            )
+        except Exception as e:
+            db.session.rollback()
+            flash(f"No se pudo registrar: {e}", "error")
+        return redirect(url_for("in_out"))
+
+    # ---- GET ----
+    suppliers_list = Supplier.query.filter_by(is_active=True).order_by(Supplier.contact_name).all()
+    items_list = Item.query.filter_by(is_active=True).order_by(Item.code).all()
+
+    logs = (
+        Movement.query.filter(Movement.supplier_id.isnot(None))
+        .order_by(Movement.created_at.desc()).limit(300).all()
+    )
+    # Remito por movimiento (para el link/estado de impresion).
+    line_map = {ln.movement_id: ln.remito for ln in RemitoLine.query.all()}
+
+    # Seriales disponibles en Jaula (para egreso de serializados).
+    jaula_units = {}
+    if jaula:
+        for u in (ItemUnit.query
+                  .filter_by(status=UNIT_EN_STOCK, location_id=jaula.id)
+                  .order_by(ItemUnit.item_id, ItemUnit.serial).all()):
+            jaula_units.setdefault(u.item_id, []).append([u.id, u.serial])
+    serialized_item_ids = [it.id for it in items_list if it.serialized]
+
+    # Stock de la Jaula por ítem (para egreso: qué ítems mostrar y el tope de
+    # cantidad). {item_id: cantidad}.
+    jaula_stock = {}
+    if jaula:
+        for s in Stock.query.filter(Stock.location_id == jaula.id, Stock.quantity > 0).all():
+            jaula_stock[s.item_id] = s.quantity
+
+    return render_template(
+        "ingresos_egresos.html",
+        suppliers=suppliers_list,
+        items=items_list,
+        jaula_stock=jaula_stock,
+        logs=logs,
+        line_map=line_map,
+        jaula_units=jaula_units,
+        serialized_item_ids=serialized_item_ids,
+        jaula=jaula,
+        proveedor_loc=proveedor_loc,
+        can_edit=(current_user.role in INOUT_EDIT_ROLES),
+    )
+
+
+@app.route("/remitos/<int:remito_id>/impreso", methods=["POST"])
+@login_required
+@role_required(*REMITO_EDIT_ROLES)
+def remito_mark_printed(remito_id):
+    r = Remito.query.get_or_404(remito_id)
+    r.print_pending = False
+    db.session.commit()
+    flash(f"Remito {r.number} marcado como impreso.", "ok")
+    return redirect(request.referrer or url_for("remitos"))
+
+
+@app.context_processor
+def inject_print_badge():
+    """Badge de remitos pendientes de imprimir (auto-generados por Ingresos/Egresos).
+
+    Solo cuenta remitos con print_pending=True. Los remitos normales quedan en
+    False, asi que no disparan alerta. Visible para ADMIN/SUPERVISOR.
+    """
+    count = 0
+    try:
+        if current_user.is_authenticated and current_user.role in ("ADMIN", "SUPERVISOR"):
+            count = Remito.query.filter_by(print_pending=True).count()
+    except Exception:
+        count = 0
+    return {"print_badge_count": count}
 
 
 if __name__ == "__main__":

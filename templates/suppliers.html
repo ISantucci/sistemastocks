@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}Proveedores · TNGStocks{% endblock %}
+{% block page_title %}Proveedores{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div><h2>Proveedores</h2><p>Carta de proveedores para Ingresos/Egresos.</p></div>
+  <button type="button" class="btn btn-primary" onclick="openModal('modal-sup-new')">+ Nuevo proveedor</button>
+</div>
+
+<div class="card">
+  <form method="get" class="filters-grid">
+    <label style="display:flex; align-items:center; gap:8px;">
+      <input type="checkbox" name="inactivos" value="1" {% if show_inactive %}checked{% endif %} onchange="this.form.submit()">
+      Mostrar dados de baja
+    </label>
+  </form>
+</div>
+
+<div class="table-card">
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr><th>Contacto</th><th>Comercio</th><th>Razón social</th><th>CUIT</th><th>Mail</th><th>Teléfono</th><th>Estado</th><th>Acciones</th></tr>
+      </thead>
+      <tbody>
+        {% for s in suppliers %}
+        <tr>
+          <td>{{ s.contact_name }}</td>
+          <td>{{ s.business_name or "" }}</td>
+          <td>{{ s.legal_name or "" }}</td>
+          <td>{{ s.cuit or "" }}</td>
+          <td>{{ s.email or "" }}</td>
+          <td>{{ s.phone or "" }}</td>
+          <td>{% if s.is_active %}<span class="badge badge-ok">Activo</span>{% else %}<span class="badge badge-neutral">Baja</span>{% endif %}</td>
+          <td class="actions-cell">
+            <button type="button" class="btn btn-secondary btn-sm" onclick="openModal('modal-sup-{{ s.id }}')">Editar</button>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="8" class="muted">Sin proveedores.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Modal: nuevo proveedor -->
+<div class="modal-overlay" id="modal-sup-new">
+  <div class="modal">
+    <div class="modal-header"><span class="modal-title">Nuevo proveedor</span><button type="button" class="modal-close" onclick="closeModal('modal-sup-new')">&times;</button></div>
+    <form method="post" action="{{ url_for('suppliers') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <div class="modal-body">
+        <div class="field"><label>Nombre (contacto)</label><input name="contact_name" required></div>
+        <div class="field"><label>Comercio / nombre de fantasía</label><input name="business_name"></div>
+        <div class="field"><label>Razón social</label><input name="legal_name"></div>
+        <div class="field"><label>CUIT</label><input name="cuit"></div>
+        <div class="field"><label>Mail</label><input name="email" type="email"></div>
+        <div class="field"><label>Teléfono</label><input name="phone"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-sup-new')">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+{% for s in suppliers %}
+<div class="modal-overlay" id="modal-sup-{{ s.id }}">
+  <div class="modal">
+    <div class="modal-header"><span class="modal-title">Editar proveedor</span><button type="button" class="modal-close" onclick="closeModal('modal-sup-{{ s.id }}')">&times;</button></div>
+    <form method="post" action="{{ url_for('supplier_edit', supplier_id=s.id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <div class="modal-body">
+        <div class="field"><label>Nombre (contacto)</label><input name="contact_name" value="{{ s.contact_name }}" required></div>
+        <div class="field"><label>Comercio / nombre de fantasía</label><input name="business_name" value="{{ s.business_name or '' }}"></div>
+        <div class="field"><label>Razón social</label><input name="legal_name" value="{{ s.legal_name or '' }}"></div>
+        <div class="field"><label>CUIT</label><input name="cuit" value="{{ s.cuit or '' }}"></div>
+        <div class="field"><label>Mail</label><input name="email" type="email" value="{{ s.email or '' }}"></div>
+        <div class="field"><label>Teléfono</label><input name="phone" value="{{ s.phone or '' }}"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="submit" class="btn btn-primary">Guardar cambios</button>
+      </div>
+    </form>
+    <form method="post" action="{{ url_for('supplier_toggle', supplier_id=s.id) }}"
+          onsubmit="return confirm('¿Confirmás cambiar el estado de este proveedor?');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <div class="modal-body" style="border-top:1px solid var(--border); padding-top:14px;">
+        <button type="submit" class="btn btn-secondary">{% if s.is_active %}Dar de baja{% else %}Reactivar{% endif %}</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endfor %}
+{% endblock %}

@@ -47,6 +47,7 @@
   <div class="field">
     <label>Para</label>
     <input id="sc-to" value="{{ email.to }}" readonly onclick="this.select();">
+    {% if not email.to %}<p class="muted" style="margin:4px 0 0;">No se seleccionaron destinatarios al crear esta solicitud.</p>{% endif %}
   </div>
   <div class="field">
     <label>Asunto</label>

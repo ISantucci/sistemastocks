@@ -99,7 +99,29 @@
 <script>
   var descartes_id = "{{ descartes_id or '' }}";
   var stockMap = {{ stock_map|tojson }};
+  var stockQtyMap = {{ stock_qty_map|tojson }};
   var externalLocIds = ({{ external_location_ids|tojson }} || []).map(String);
+
+  // Tope de cantidad por fila: no se puede mover más de lo que hay en el origen.
+  function clampBulkQty(line) {
+    if (!line) return;
+    var fromSel = document.getElementById("bulk_from_location_id");
+    var loc = fromSel ? String(fromSel.value || "") : "";
+    var itemSel = line.querySelector(".bulk-item");
+    var item = itemSel ? String(itemSel.value || "") : "";
+    var qty = line.querySelector('input[name="qty[]"]');
+    if (!qty) return;
+    var isExternal = externalLocIds.indexOf(loc) !== -1;
+    if (isExternal || !loc || !item) { qty.removeAttribute("max"); return; }
+    var mx = (stockQtyMap[loc] || {})[item];
+    if (mx == null) { qty.removeAttribute("max"); return; }
+    qty.setAttribute("max", mx);
+    var v = parseInt(qty.value, 10);
+    if (!isNaN(v) && v > mx) { qty.value = mx; }
+  }
+  function clampBulkAll() {
+    document.querySelectorAll(".bulk-line").forEach(clampBulkQty);
+  }
 
   // Lista completa de items (para reconstruir opciones por ubicacion)
   var allBulkItems = [
@@ -142,7 +164,7 @@
       placeholder: "Elegí la ubicación de origen primero...",
       closeAfterSelect: true,
       onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
-      onChange: function () { this.blur(); }
+      onChange: function () { this.blur(); clampBulkQty(el.closest(".bulk-line")); }
     });
     applyStockFilterToLine(el);
   }
@@ -160,6 +182,9 @@
     var removeBtn = line.querySelector(".remove-line-btn");
 
     initTomSelectFor(itemSelect);
+
+    var qtyEl = line.querySelector('input[name="qty[]"]');
+    if (qtyEl) { qtyEl.addEventListener("input", function () { clampBulkQty(line); }); }
 
     function togglePendingComment() {
       if (pendingFlag.value === "1") {
@@ -197,7 +222,9 @@
     });
     var bulkFromSel = document.getElementById("bulk_from_location_id");
     if (bulkFromSel) {
-      bulkFromSel.addEventListener("change", applyStockFilterAllLines);
+      bulkFromSel.addEventListener("change", function () {
+        applyStockFilterAllLines(); clampBulkAll();
+      });
     }
   });
 </script>
