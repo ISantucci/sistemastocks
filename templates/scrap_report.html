@@ -19,47 +19,58 @@
         </select>
       </div>
       <div class="field">
-        <label>Item <span class="muted" style="font-weight:400;">(según la ubicación)</span></label>
-        <select name="item_id" id="item_id" required>
-          <option value="" selected disabled>Elegí la ubicación primero...</option>
-          {% for it in items %}
-            <option value="{{ it.id }}">{{ it.code }} - {{ it.name }}</option>
-          {% endfor %}
-        </select>
-      </div>
-      <div class="field">
-        <label>Cantidad</label>
-        <input type="number" name="qty" id="qty_input" min="1" value="1" required />
-      </div>
-      <div class="field" id="serial_auto_hint" style="display:none;">
-        <label>Seriales</label>
-        <div class="muted" id="serial_auto_text">Se usan automáticamente los seriales disponibles.</div>
-      </div>
-      <div class="field" id="serial_pick_box" style="display:none;">
-        <label>¿Cuál/es se descartan? <span class="muted" id="serial_pick_status" style="font-weight:400;"></span></label>
-        <div id="serial_pick_list" class="serial-pick-list"></div>
-      </div>
-      <div class="field">
-        <label>Motivo de descarte</label>
-        <select name="scrap_reason" required>
-          <option value="" selected disabled>Seleccionar motivo...</option>
-          <option value="Irrecuperable">Irrecuperable</option>
-          <option value="Roto">Roto</option>
-          <option value="Vencido">Vencido</option>
-          <option value="Obsoleto">Obsoleto</option>
-          <option value="Otro">Otro</option>
-        </select>
-      </div>
-      <div class="field">
         <label>Observación (opcional)</label>
         <input name="observation" placeholder="Ej: SD dañada / cámara quemada" />
       </div>
     </div>
-    <div style="margin-top:16px;">
-      <button type="submit" class="btn btn-danger">Registrar descarte</button>
+
+    <p class="muted" style="margin:10px 0 4px;">
+      Los ítems serializados se cargan desde <b>Movimientos</b> (Hacia: Descartes) para elegir los seriales.
+    </p>
+
+    <div class="card-header" style="margin-top:8px;"><span class="card-title">Ítems</span></div>
+    <div id="scrap-lines"></div>
+
+    <div style="margin-top:12px; margin-bottom:16px;">
+      <button type="button" id="add-line-btn" class="btn btn-secondary">+ Agregar ítem</button>
     </div>
+
+    <button type="submit" class="btn btn-danger">Registrar descarte</button>
   </form>
 </div>
+
+<template id="scrap-line-template">
+  <div class="scrap-line" style="display:flex; gap:12px; align-items:flex-end; margin-bottom:10px; flex-wrap:wrap;">
+    <div class="scrap-item-select field" style="flex:1; min-width:240px;">
+      <label>Item</label>
+      <select name="item_id[]" class="scrap-item" required>
+        <option value="">Seleccionar item</option>
+        {% for it in items %}
+          <option value="{{ it.id }}">{{ it.code }} - {{ it.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field" style="width:110px;">
+      <label>Cant.</label>
+      <input type="number" name="qty[]" min="1" value="1" required>
+    </div>
+    <div class="field" style="width:180px;">
+      <label>Motivo</label>
+      <select name="scrap_reason[]" required>
+        <option value="" selected disabled>Seleccionar...</option>
+        <option value="Irrecuperable">Irrecuperable</option>
+        <option value="Roto">Roto</option>
+        <option value="Vencido">Vencido</option>
+        <option value="Obsoleto">Obsoleto</option>
+        <option value="Otro">Otro</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>&nbsp;</label>
+      <button type="button" class="remove-line-btn btn btn-danger btn-sm">X</button>
+    </div>
+  </div>
+</template>
 
 <div class="page-header" style="margin-top:8px;"><div><h2 style="font-size:16px;">Historial de descartes</h2></div></div>
 
@@ -182,55 +193,88 @@ document.addEventListener("DOMContentLoaded", function () {
     window.addEventListener("resize", syncScrapFilters);
   }
   var stockMap = {{ stock_map|tojson }};
+  var stockQtyMap = {{ stock_qty_map|tojson }};
   var fromSel = document.getElementById("from_location_id");
-  var itemEl = document.getElementById("item_id");
-  if (!itemEl) return;
 
-  // Selector de seriales (auto/elegir) compartido.
-  var refreshSerialUI = initSerialPicker({
-    unitsMap: {{ units_map|tojson }},
-    serializedItems: {{ serialized_item_ids|tojson }},
-    itemEl: itemEl,
-    fromSel: fromSel,
-    qtyInput: document.getElementById("qty_input"),
-    pickBox: document.getElementById("serial_pick_box"),
-    pickList: document.getElementById("serial_pick_list"),
-    pickStatus: document.getElementById("serial_pick_status"),
-    autoHint: document.getElementById("serial_auto_hint"),
-    autoText: document.getElementById("serial_auto_text")
-  });
+  // Lista de ítems seleccionables (excluye serializados: van por Movimientos).
+  var allScrapItems = [
+    {% for it in items %}{% if not it.serialized %}{ value: "{{ it.id }}", text: "{{ (it.code ~ ' - ' ~ it.name)|e }}" },
+    {% endif %}{% endfor %}
+  ];
 
-  var allItems = [];
-  Array.from(itemEl.options).forEach(function (o) {
-    if (o.value) allItems.push({ value: o.value, text: o.text });
-  });
-
-  var ts = new TomSelect(itemEl, {
-    create: false,
-    sortField: { field: "text", direction: "asc" },
-    placeholder: "Buscar item por codigo o nombre...",
-    closeAfterSelect: true,
-    onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
-    onChange: function () { this.blur(); refreshSerialUI(); }
-  });
-
-  function refreshItems() {
+  function allowedForCurrentFrom() {
     var locId = fromSel ? String(fromSel.value || "") : "";
     var allowed = stockMap[locId] || [];
-    var allowedSet = {};
-    allowed.forEach(function (id) { allowedSet[String(id)] = true; });
-    ts.clear(true);
-    ts.clearOptions();
-    allItems.forEach(function (o) { if (allowedSet[o.value]) ts.addOption(o); });
-    ts.refreshOptions(false);
-    if (!locId) { ts.disable(); } else { ts.enable(); }
-    refreshSerialUI();
+    var set = {};
+    allowed.forEach(function (id) { set[String(id)] = true; });
+    return { locId: locId, set: set };
   }
 
-  if (fromSel && fromSel.tagName === "SELECT") {
-    fromSel.addEventListener("change", refreshItems);
+  function clampScrapQty(line) {
+    if (!line) return;
+    var loc = fromSel ? String(fromSel.value || "") : "";
+    var itemSel = line.querySelector(".scrap-item");
+    var item = itemSel ? String(itemSel.value || "") : "";
+    var qty = line.querySelector('input[name="qty[]"]');
+    if (!qty) return;
+    if (!loc || !item) { qty.removeAttribute("max"); return; }
+    var mx = (stockQtyMap[loc] || {})[item];
+    if (mx == null) { qty.removeAttribute("max"); return; }
+    qty.setAttribute("max", mx);
+    var v = parseInt(qty.value, 10);
+    if (!isNaN(v) && v > mx) { qty.value = mx; }
   }
-  refreshItems();
+
+  function applyStockFilterToLine(el) {
+    if (!el || !el.tomselect) return;
+    var ts = el.tomselect;
+    var info = allowedForCurrentFrom();
+    ts.clear(true);
+    ts.clearOptions();
+    allScrapItems.forEach(function (o) { if (info.set[o.value]) ts.addOption(o); });
+    ts.refreshOptions(false);
+    if (!info.locId) { ts.disable(); } else { ts.enable(); }
+  }
+
+  function applyStockFilterAllLines() {
+    document.querySelectorAll(".scrap-item").forEach(applyStockFilterToLine);
+  }
+
+  function initTomSelectFor(el) {
+    if (!el || el.tomselect) return;
+    new TomSelect(el, {
+      create: false,
+      sortField: { field: "text", direction: "asc" },
+      placeholder: "Elegí la ubicación de origen primero...",
+      closeAfterSelect: true,
+      onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
+      onChange: function () { this.blur(); clampScrapQty(el.closest(".scrap-line")); }
+    });
+    applyStockFilterToLine(el);
+  }
+
+  function wireScrapLine(line) {
+    var itemSelect = line.querySelector(".scrap-item");
+    var removeBtn = line.querySelector(".remove-line-btn");
+    initTomSelectFor(itemSelect);
+    var qtyEl = line.querySelector('input[name="qty[]"]');
+    if (qtyEl) { qtyEl.addEventListener("input", function () { clampScrapQty(line); }); }
+    if (removeBtn) { removeBtn.addEventListener("click", function () { line.remove(); }); }
+  }
+
+  function addScrapLine() {
+    var tpl = document.getElementById("scrap-line-template");
+    var container = document.getElementById("scrap-lines");
+    container.appendChild(tpl.content.cloneNode(true));
+    wireScrapLine(container.lastElementChild);
+  }
+
+  document.getElementById("add-line-btn").addEventListener("click", addScrapLine);
+  addScrapLine();
+
+  if (fromSel && fromSel.tagName === "SELECT") {
+    fromSel.addEventListener("change", function () { applyStockFilterAllLines(); });
+  }
 });
 </script>
 {% endblock %}

@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}Solicitud {{ rr.number }} · TNGStocks{% endblock %}
+{% block page_title %}Solicitud {{ rr.number }}{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <h2>Solicitud {{ rr.number }}</h2>
+    <p>
+      Creada {{ rr.created_at.strftime("%Y-%m-%d %H:%M") }} por {{ rr.created_by.full_name or rr.created_by.username }}.
+      Destino: <b>{{ rr.dest_location.name if rr.dest_location else "-" }}</b>.
+      Estado:
+      {% if rr.status == "CERRADA" %}
+        <span class="badge badge-ok">CERRADA</span>
+      {% elif rr.status == "CERRADA_PARCIAL" %}
+        <span class="badge badge-warn">CERRADA PARCIAL</span>
+      {% else %}
+        <span class="badge badge-neutral">PENDIENTE</span>
+      {% endif %}
+      {% if rr.closed_at %}
+        · Cerrada {{ rr.closed_at.strftime("%Y-%m-%d %H:%M") }}{% if rr.closed_by %} por {{ rr.closed_by.full_name or rr.closed_by.username }}{% endif %}.
+      {% endif %}
+    </p>
+  </div>
+  <a href="{{ url_for('repair_requests') }}" class="btn btn-secondary">Volver</a>
+</div>
+
+<div class="table-card">
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr><th>Código</th><th>Repuesto</th><th class="num">Pedido</th><th class="num">Entregado</th></tr>
+      </thead>
+      <tbody>
+        {% for ln in rr.lines %}
+        <tr>
+          <td>{{ ln.item.code }}</td>
+          <td>{{ ln.item.name }}{% if ln.item.serialized %} <span class="badge badge-neutral">serial</span>{% endif %}</td>
+          <td class="num">{{ fmt_qty(ln.qty, ln.item) }}</td>
+          <td class="num">{% if rr.status == "PENDIENTE" %}<span class="muted">—</span>{% else %}{{ fmt_qty(ln.qty_entregada, ln.item) }}{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% if rr.observation %}
+<div class="card"><strong>Observación:</strong> {{ rr.observation }}</div>
+{% endif %}
+
+{% if can_close %}
+<div class="card">
+  <div class="card-header"><span class="card-title">Cerrar y entregar</span></div>
+  <p class="muted">
+    Elegí qué entregás de cada repuesto. Para los serializados marcá los seriales; para el resto poné la cantidad.
+    Podés entregar menos de lo pedido (cierre parcial). Se genera el movimiento Jaula → {{ rr.dest_location.name if rr.dest_location else "camioneta" }}.
+  </p>
+  <form method="post" action="{{ url_for('repair_request_close', rr_id=rr.id) }}"
+        onsubmit="return confirm('¿Cerrar la solicitud {{ rr.number }} y generar los movimientos de entrega?');">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+    {% for ln in rr.lines %}
+    <div class="card" style="margin:10px 0;">
+      <strong>{{ ln.item.code }} - {{ ln.item.name }}</strong>
+      <span class="muted"> · pedido: {{ ln.qty }}</span>
+
+      {% if ln.item.serialized %}
+        {% set units = jaula_units.get(ln.item.id, []) %}
+        {% if units %}
+          <p class="muted" style="margin:8px 0 4px;">Seriales disponibles en Jaula (elegí hasta {{ ln.qty }}):</p>
+          <div class="serial-pick-list" style="display:flex; flex-wrap:wrap; gap:8px;">
+            {% for u in units %}
+              <label style="display:inline-flex; align-items:center; gap:6px; border:1px solid var(--border,#d0d5dd); border-radius:8px; padding:6px 10px; font-size:14px; cursor:pointer;">
+                <input type="checkbox" name="unit_ids_{{ ln.id }}" value="{{ u[0] }}" data-line="{{ ln.id }}" data-max="{{ ln.qty }}">
+                {{ u[1] }}
+              </label>
+            {% endfor %}
+          </div>
+        {% else %}
+          <p class="muted" style="margin:8px 0 0;">No hay seriales disponibles en la Jaula. Se entrega 0 (cierre parcial).</p>
+        {% endif %}
+      {% else %}
+        {% set avail = jaula_stock.get(ln.item.id, 0) %}
+        {% set maxd = ln.qty if ln.qty < avail else avail %}
+        <div class="field" style="max-width:220px; margin-top:8px;">
+          <label>Cantidad a entregar <span class="muted">(en Jaula: {{ avail }})</span></label>
+          <input type="number" name="qty_entregada_{{ ln.id }}" min="0" max="{{ maxd }}" value="{{ maxd }}">
+        </div>
+      {% endif %}
+    </div>
+    {% endfor %}
+
+    <button type="submit" class="btn btn-primary">Cerrar y entregar</button>
+  </form>
+</div>
+
+<script>
+// Limita la selección de seriales por línea a la cantidad pedida.
+document.addEventListener("DOMContentLoaded", function () {
+  document.querySelectorAll('input[type="checkbox"][data-line]').forEach(function (cb) {
+    cb.addEventListener("change", function () {
+      var line = cb.getAttribute("data-line");
+      var max = parseInt(cb.getAttribute("data-max"), 10) || 0;
+      var checked = document.querySelectorAll('input[data-line="' + line + '"]:checked');
+      if (checked.length > max) { cb.checked = false; }
+    });
+  });
+});
+</script>
+{% endif %}
+{% endblock %}

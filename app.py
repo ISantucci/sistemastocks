@@ -784,6 +784,57 @@ class PurchaseRequestRecipient(db.Model):
     )
 
 
+class RepairRequest(db.Model):
+    """Cabecera de una solicitud de repuestos hecha por un técnico.
+
+    Aditivo (mismo patrón que PurchaseRequest): tablas nuevas, no toca stock ni
+    modelos existentes. El impacto sobre stock ocurre SOLO al cerrarla, cuando
+    admin/supervisor generan los movimientos Jaula -> camioneta del técnico.
+    """
+    __tablename__ = "repair_requests"
+    id = db.Column(db.Integer, primary_key=True)
+    created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
+
+    year = db.Column(db.Integer, nullable=False)
+    seq = db.Column(db.Integer, nullable=False)
+    number = db.Column(db.String(32), unique=True, nullable=False)  # SR-2026-0001
+
+    # PENDIENTE (recién creada) / CERRADA (entregada completa) /
+    # CERRADA_PARCIAL (se entregó menos de lo pedido por falta de stock).
+    status = db.Column(db.String(20), nullable=False, default="PENDIENTE")
+
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    # Camioneta destino elegida por el técnico al crear (una de sus asignadas).
+    dest_location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), nullable=False)
+    observation = db.Column(db.String(255), nullable=True)
+
+    closed_at = db.Column(db.DateTime, nullable=True)
+    closed_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+
+    created_by = db.relationship("User", foreign_keys=[created_by_user_id])
+    closed_by = db.relationship("User", foreign_keys=[closed_by_user_id])
+    dest_location = db.relationship("Location", foreign_keys=[dest_location_id])
+    lines = db.relationship(
+        "RepairRequestLine",
+        backref="request",
+        cascade="all, delete-orphan",
+        order_by="RepairRequestLine.id",
+    )
+
+
+class RepairRequestLine(db.Model):
+    __tablename__ = "repair_request_lines"
+    id = db.Column(db.Integer, primary_key=True)
+    repair_request_id = db.Column(
+        db.Integer, db.ForeignKey("repair_requests.id"), nullable=False
+    )
+    item_id = db.Column(db.Integer, db.ForeignKey("items.id"), nullable=False)
+    qty = db.Column(db.Integer, nullable=False)          # cantidad pedida
+    qty_entregada = db.Column(db.Integer, nullable=False, default=0)  # entregada al cerrar
+
+    item = db.relationship("Item")
+
+
 # ------------------ LOGIN MANAGER ------------------
 
 @login_manager.user_loader
@@ -1013,6 +1064,17 @@ def next_purchase_request_number():
     )
     seq = (last.seq or 0) + 1 if last else 1
     return y, seq, f"SC-{y}-{seq:04d}"
+
+
+def next_repair_request_number():
+    y = now_ar().year
+    last = (
+        RepairRequest.query.filter_by(year=y)
+        .order_by(RepairRequest.seq.desc())
+        .first()
+    )
+    seq = (last.seq or 0) + 1 if last else 1
+    return y, seq, f"SR-{y}-{seq:04d}"
 
 
 _BOOL_TRUE = {"1", "true", "verdadero", "yes", "y", "si", "sí", "s"}
@@ -2933,6 +2995,12 @@ def movements():
     _descartes = Location.query.filter_by(name="Descartes").first()
     descartes_id = _descartes.id if _descartes else None
 
+    # Origen de un movimiento: no se puede mover DESDE ubicaciones "de consumo".
+    # Descartes y Utilizado son destinos finales (tienen su propia sección), no
+    # orígenes válidos. Se excluyen del selector "Desde" (no del "Hacia").
+    ORIGIN_EXCLUDE_NAMES = {LOCATION_DESCARTES, "Utilizado"}
+    from_locations = [l for l in locations_list if l.name not in ORIGIN_EXCLUDE_NAMES]
+
     if request.method == "POST":
         # LECTOR: solo lectura. No puede registrar movimientos.
         if current_user.role == "LECTOR":
@@ -2970,6 +3038,14 @@ def movements():
         # TECNICO solo puede mover desde sus ubicaciones asignadas
         if is_tecnico and from_id not in tech_location_ids:
             flash("Solo podés mover desde tus ubicaciones asignadas.", "error")
+            return redirect(url_for("movements"))
+
+        # Guard backend: Descartes/Utilizado no pueden ser ORIGEN de un movimiento
+        # (son destinos finales, con su propia sección). No alcanza con ocultarlos
+        # en el selector: se valida también acá.
+        _from_loc = Location.query.get(from_id)
+        if _from_loc and _from_loc.name in (LOCATION_DESCARTES, "Utilizado"):
+            flash("No se puede mover desde Descartes ni Utilizado.", "error")
             return redirect(url_for("movements"))
 
         it = Item.query.get(item_id)
@@ -3180,6 +3256,7 @@ def movements():
         "movements.html",
         items=items_list,
         locations=locations_list,
+        from_locations=from_locations,
         logs=logs,
         stock_map=stock_map,
         stock_qty_map=stock_qty_map,
@@ -3494,8 +3571,10 @@ def item_usage():
             return render_template(
                 "item_usage.html",
                 items=[], is_tecnico=True, locations=[], movements=[],
-                stock_map={}, users=[], from_date="", to_date="",
+                stock_map={}, stock_qty_map={}, serialized_item_ids=[],
+                users=[], from_date="", to_date="",
                 item_filter="", user_filter="", limit="100",
+                selected_sort_by="date", selected_sort_dir="desc",
             )
         tech_location_ids = {l.id for l in tech_locations}
     else:
@@ -3503,28 +3582,16 @@ def item_usage():
         tech_location_ids = set()
 
     if request.method == "POST":
-        item_id = request.form.get("item_id", "").strip()
-        qty_raw = request.form.get("qty", "").strip()
+        # Multi-fila: un solo origen + observación, y N filas (item_id[]/qty[]).
+        # Mismo criterio que Carga múltiple: los ítems SERIALIZADOS se bloquean
+        # (se hacen por Movimientos → Utilizado para elegir seriales).
         observation = request.form.get("observation", "").strip() or None
         from_id_raw = request.form.get("from_location_id", "").strip()
-
-        if not item_id.isdigit():
-            flash("Item obligatorio.", "error")
-            return redirect(url_for("item_usage"))
-
-        try:
-            qty = int(qty_raw)
-            if qty <= 0:
-                raise ValueError()
-        except Exception:
-            flash("Cantidad inválida.", "error")
-            return redirect(url_for("item_usage"))
 
         if not from_id_raw.isdigit():
             flash("Ubicación origen obligatoria.", "error")
             return redirect(url_for("item_usage"))
 
-        item_id = int(item_id)
         from_location_id = int(from_id_raw)
 
         if is_tecnico and from_location_id not in tech_location_ids:
@@ -3535,45 +3602,75 @@ def item_usage():
             flash("Ubicación 'Utilizado' no existe.", "error")
             return redirect(url_for("item_usage"))
 
-        try:
-            item = Item.query.get(item_id)
-            if not item or not item.is_active:
-                flash("Item no existe o está dado de baja.", "error")
+        item_ids = request.form.getlist("item_id[]")
+        qtys = request.form.getlist("qty[]")
+
+        # Limpieza de filas vacías + validación todo-o-nada (nada se toca hasta el try).
+        parsed_lines = []
+        for idx in range(len(item_ids)):
+            item_raw = (item_ids[idx] or "").strip()
+            qty_raw = (qtys[idx] or "").strip() if idx < len(qtys) else ""
+
+            if not item_raw and not qty_raw:
+                continue  # fila vacía
+
+            if not item_raw.isdigit():
+                flash(f"Línea {len(parsed_lines) + 1}: item inválido.", "error")
                 return redirect(url_for("item_usage"))
 
-            # Serializado: resolver qué seriales se consumen (auto/elegir).
-            serial_units = []
-            if item.serialized:
-                serial_units, err = resolve_serial_units_out(item_id, from_location_id, qty, request.form)
-                if err:
-                    flash(err, "error")
-                    return redirect(url_for("item_usage"))
+            try:
+                qty = int(qty_raw)
+                if qty <= 0:
+                    raise ValueError()
+            except Exception:
+                flash(f"Línea {len(parsed_lines) + 1}: cantidad inválida.", "error")
+                return redirect(url_for("item_usage"))
 
-            upsert_stock(item_id, from_location_id, -qty)
+            item = Item.query.get(int(item_raw))
+            if not item or not item.is_active:
+                flash(f"Línea {len(parsed_lines) + 1}: el item no existe o está dado de baja.", "error")
+                return redirect(url_for("item_usage"))
 
-            base_obs = observation or "Utilizado"
             if item.serialized:
-                base_obs = serial_obs(base_obs, [u.serial for u in serial_units])
+                flash(
+                    f"«{item.code} - {item.name}» es serializado. "
+                    "Cargalo desde Movimientos (Hacia: Utilizado) para elegir los seriales.",
+                    "error",
+                )
+                return redirect(url_for("item_usage"))
 
-            y, seq, number = next_movement_number()
-            m = Movement(
-                item_id=item_id,
-                qty=qty,
-                from_location_id=from_location_id,
-                to_location_id=utilizados_loc.id,
-                user_id=current_user.id,
-                observation=base_obs,
-                year=y,
-                seq=seq,
-                number=number,
-            )
-            db.session.add(m)
-            db.session.flush()
-            if item.serialized:
-                # "Utilizado" es externa -> las unidades quedan ENTREGADO (consumidas).
-                apply_serial_units_out(serial_units, utilizados_loc.id)
+            parsed_lines.append({"item": item, "qty": qty})
+
+        if not parsed_lines:
+            flash("Cargá al menos un ítem.", "error")
+            return redirect(url_for("item_usage"))
+
+        try:
+            created = 0
+            for line in parsed_lines:
+                item = line["item"]
+                qty = line["qty"]
+
+                upsert_stock(item.id, from_location_id, -qty)
+
+                y, seq, number = next_movement_number()
+                m = Movement(
+                    item_id=item.id,
+                    qty=qty,
+                    from_location_id=from_location_id,
+                    to_location_id=utilizados_loc.id,
+                    user_id=current_user.id,
+                    observation=(observation or "Utilizado"),
+                    year=y,
+                    seq=seq,
+                    number=number,
+                )
+                db.session.add(m)
+                db.session.flush()
+                created += 1
+
             db.session.commit()
-            flash(f"Item marcado como utilizado. Movimiento {number} registrado.", "ok")
+            flash(f"Utilizados registrados. Movimientos creados: {created}", "ok")
             return redirect(url_for("item_usage"))
 
         except ValueError as e:
@@ -3656,12 +3753,12 @@ def item_usage():
     users_list = User.query.order_by(User.username).all()
 
     stock_map = {}
+    stock_qty_map = {}  # {loc_id(str): {item_id(str): qty}} para el tope de cantidad
     for s in Stock.query.filter(Stock.quantity > 0).all():
         stock_map.setdefault(s.location_id, []).append(s.item_id)
+        stock_qty_map.setdefault(str(s.location_id), {})[str(s.item_id)] = s.quantity
 
-    units_map, serialized_item_ids = build_units_map(
-        location_ids=tech_location_ids if is_tecnico else None
-    )
+    serialized_item_ids = [it.id for it in items if it.serialized]
 
     return render_template(
         "item_usage.html",
@@ -3670,7 +3767,7 @@ def item_usage():
         movements=movements_list,
         is_tecnico=is_tecnico,
         stock_map=stock_map,
-        units_map=units_map,
+        stock_qty_map=stock_qty_map,
         serialized_item_ids=serialized_item_ids,
         users=users_list,
         from_date=f_date_from,
@@ -4038,6 +4135,24 @@ def inject_pending_badge():
     except Exception:
         count = 0
     return {"pending_badge_count": count}
+
+
+@app.context_processor
+def inject_repair_request_badge():
+    """Badge de 'Solicitud de repuestos' (persistente, no session).
+
+    - ADMIN/SUPERVISOR: solicitudes PENDIENTE (para cerrar/entregar).
+    - TECNICO / LECTOR: sin badge (la alerta es solo para quien entrega).
+    """
+    count = 0
+    try:
+        if current_user.is_authenticated and current_user.role in ("ADMIN", "SUPERVISOR"):
+            # La alerta de solicitudes de repuestos es solo para quienes las
+            # cierran/entregan. Los técnicos no reciben badge.
+            count = RepairRequest.query.filter_by(status="PENDIENTE").count()
+    except Exception:
+        count = 0
+    return {"repair_badge_count": count}
 # ------------------ ADMIN: EDICIÓN (solo ADMIN) ------------------
 
 @app.route("/locations/<int:loc_id>/edit", methods=["GET", "POST"])
@@ -4581,83 +4696,105 @@ def scrap_report():
     descartes_loc = Location.query.filter_by(name=LOCATION_DESCARTES).first()
 
     if request.method == "POST":
-        item_id = request.form.get("item_id", "").strip()
-        qty_raw = request.form.get("qty", "").strip()
+        # Multi-fila: un solo origen + observación, y N filas (item_id[]/qty[]/
+        # scrap_reason[]). Motivo obligatorio por fila. Los ítems SERIALIZADOS se
+        # bloquean (se hacen por Movimientos → Descartes para elegir seriales).
         from_id_raw = request.form.get("from_location_id", "").strip()
-        reason = request.form.get("scrap_reason", "").strip()
         observation = request.form.get("observation", "").strip() or None
 
-        if not item_id.isdigit():
-            flash("Item obligatorio.", "error")
-            return redirect(url_for("scrap_report"))
-        try:
-            qty = int(qty_raw)
-            if qty <= 0:
-                raise ValueError()
-        except Exception:
-            flash("Cantidad inválida.", "error")
-            return redirect(url_for("scrap_report"))
         if not from_id_raw.isdigit():
             flash("Ubicación origen obligatoria.", "error")
-            return redirect(url_for("scrap_report"))
-        if not reason:
-            flash("Motivo de descarte obligatorio.", "error")
             return redirect(url_for("scrap_report"))
         if not descartes_loc:
             flash("Ubicación 'Descartes' no existe.", "error")
             return redirect(url_for("scrap_report"))
 
-        item_id = int(item_id)
         from_location_id = int(from_id_raw)
 
-        try:
-            item = Item.query.get(item_id)
-            if not item or not item.is_active:
-                flash("Item no existe o está dado de baja.", "error")
+        item_ids = request.form.getlist("item_id[]")
+        qtys = request.form.getlist("qty[]")
+        reasons = request.form.getlist("scrap_reason[]")
+
+        # Validación todo-o-nada (nada se toca hasta el try).
+        parsed_lines = []
+        for idx in range(len(item_ids)):
+            item_raw = (item_ids[idx] or "").strip()
+            qty_raw = (qtys[idx] or "").strip() if idx < len(qtys) else ""
+            reason_raw = (reasons[idx] or "").strip() if idx < len(reasons) else ""
+
+            if not item_raw and not qty_raw:
+                continue  # fila vacía
+
+            n = len(parsed_lines) + 1
+            if not item_raw.isdigit():
+                flash(f"Línea {n}: item inválido.", "error")
+                return redirect(url_for("scrap_report"))
+            try:
+                qty = int(qty_raw)
+                if qty <= 0:
+                    raise ValueError()
+            except Exception:
+                flash(f"Línea {n}: cantidad inválida.", "error")
+                return redirect(url_for("scrap_report"))
+            if not reason_raw:
+                flash(f"Línea {n}: motivo de descarte obligatorio.", "error")
                 return redirect(url_for("scrap_report"))
 
-            # Serializado: resolver qué seriales se descartan (auto/elegir).
-            serial_units = []
+            item = Item.query.get(int(item_raw))
+            if not item or not item.is_active:
+                flash(f"Línea {n}: el item no existe o está dado de baja.", "error")
+                return redirect(url_for("scrap_report"))
             if item.serialized:
-                serial_units, err = resolve_serial_units_out(item_id, from_location_id, qty, request.form)
-                if err:
-                    flash(err, "error")
-                    return redirect(url_for("scrap_report"))
+                flash(
+                    f"«{item.code} - {item.name}» es serializado. "
+                    "Cargalo desde Movimientos (Hacia: Descartes) para elegir los seriales.",
+                    "error",
+                )
+                return redirect(url_for("scrap_report"))
 
-            if not location_is_external(from_location_id):
-                upsert_stock(item_id, from_location_id, -qty)
-            if not location_is_external(descartes_loc.id):
-                upsert_stock(item_id, descartes_loc.id, qty)
+            parsed_lines.append({"item": item, "qty": qty, "reason": reason_raw})
 
-            base_obs = observation or ("Descarte: " + reason)
-            if item.serialized:
-                base_obs = serial_obs(base_obs, [u.serial for u in serial_units])
+        if not parsed_lines:
+            flash("Cargá al menos un ítem.", "error")
+            return redirect(url_for("scrap_report"))
 
-            y, seq, number = next_movement_number()
-            m = Movement(
-                item_id=item_id,
-                qty=qty,
-                from_location_id=from_location_id,
-                to_location_id=descartes_loc.id,
-                user_id=current_user.id,
-                observation=base_obs,
-                year=y,
-                seq=seq,
-                number=number,
-            )
-            db.session.add(m)
-            db.session.flush()
-            if item.serialized:
-                apply_serial_units_out(serial_units, descartes_loc.id)
-            db.session.add(Scrap(
-                item_id=item_id,
-                location_id=from_location_id,
-                quantity=qty,
-                reason=reason,
-                user_id=current_user.id,
-            ))
+        try:
+            created = 0
+            for line in parsed_lines:
+                item = line["item"]
+                qty = line["qty"]
+                reason = line["reason"]
+
+                if not location_is_external(from_location_id):
+                    upsert_stock(item.id, from_location_id, -qty)
+                if not location_is_external(descartes_loc.id):
+                    upsert_stock(item.id, descartes_loc.id, qty)
+
+                y, seq, number = next_movement_number()
+                m = Movement(
+                    item_id=item.id,
+                    qty=qty,
+                    from_location_id=from_location_id,
+                    to_location_id=descartes_loc.id,
+                    user_id=current_user.id,
+                    observation=(observation or ("Descarte: " + reason)),
+                    year=y,
+                    seq=seq,
+                    number=number,
+                )
+                db.session.add(m)
+                db.session.flush()
+                db.session.add(Scrap(
+                    item_id=item.id,
+                    location_id=from_location_id,
+                    quantity=qty,
+                    reason=reason,
+                    user_id=current_user.id,
+                ))
+                created += 1
+
             db.session.commit()
-            flash(f"Descarte registrado. Movimiento {number}.", "ok")
+            flash(f"Descartes registrados. Movimientos creados: {created}", "ok")
             return redirect(url_for("scrap_report"))
         except ValueError as e:
             db.session.rollback()
@@ -4717,10 +4854,12 @@ def scrap_report():
     items_all = Item.query.filter_by(is_active=True).order_by(Item.code).all()
     users_list = User.query.order_by(User.username).all()
     stock_map = {}
+    stock_qty_map = {}  # {loc_id(str): {item_id(str): qty}} para el tope de cantidad
     for s in Stock.query.filter(Stock.quantity > 0).all():
         stock_map.setdefault(s.location_id, []).append(s.item_id)
+        stock_qty_map.setdefault(str(s.location_id), {})[str(s.item_id)] = s.quantity
 
-    units_map, serialized_item_ids = build_units_map()
+    serialized_item_ids = [it.id for it in items_all if it.serialized]
 
     return render_template(
         "scrap_report.html",
@@ -4729,7 +4868,7 @@ def scrap_report():
         form_locations=form_locations,
         items=items_all,
         stock_map=stock_map,
-        units_map=units_map,
+        stock_qty_map=stock_qty_map,
         serialized_item_ids=serialized_item_ids,
         users=users_list,
         from_date=f_date_from,
@@ -5289,6 +5428,271 @@ def purchase_request_mark_done(pr_id: int):
         db.session.commit()
         flash(f"Solicitud {pr.number} marcada como realizada.", "ok")
     return redirect(url_for("purchase_request_detail", pr_id=pr.id))
+
+
+# ================================================================
+#  SOLICITUD DE REPUESTOS
+#  Aditivo. El técnico pide repuestos (ítems con stock en Jaula). Queda
+#  PENDIENTE con alerta para admin/supervisor. Al cerrar, admin/supervisor
+#  eligen los seriales (si aplica) y se generan los movimientos Jaula ->
+#  camioneta del técnico. Permite cierre parcial (entrega lo que haya).
+# ================================================================
+
+def _tech_trucks(user_id):
+    """Camionetas de las que el usuario es responsable."""
+    return (
+        Location.query.join(LocationResponsible, LocationResponsible.location_id == Location.id)
+        .filter(LocationResponsible.user_id == user_id, Location.is_truck == True)
+        .order_by(Location.name)
+        .all()
+    )
+
+
+def _jaula_stock_map():
+    """{item_id: qty} de ítems con stock (>0) en la Jaula central."""
+    jaula = get_jaula_location()
+    out = {}
+    if jaula:
+        for s in Stock.query.filter(Stock.location_id == jaula.id, Stock.quantity > 0).all():
+            out[s.item_id] = s.quantity
+    return out
+
+
+@app.route("/solicitudes-repuestos", methods=["GET"])
+@login_required
+@role_required("ADMIN", "SUPERVISOR", "TECNICO")
+def repair_requests():
+    q = RepairRequest.query
+    if current_user.role == "TECNICO":
+        q = q.filter(RepairRequest.created_by_user_id == current_user.id)
+    reqs = q.order_by(RepairRequest.created_at.desc()).limit(500).all()
+
+    # Datos para el form de nueva solicitud (solo técnicos crean).
+    trucks = _tech_trucks(current_user.id) if current_user.role == "TECNICO" else []
+    jaula_stock = _jaula_stock_map()
+    items_jaula = (
+        Item.query.filter(Item.is_active == True, Item.id.in_(list(jaula_stock.keys())))
+        .order_by(Item.code).all()
+    ) if jaula_stock else []
+
+    return render_template(
+        "repair_requests.html",
+        requests=reqs,
+        trucks=trucks,
+        items=items_jaula,
+        jaula_stock=jaula_stock,
+    )
+
+
+@app.route("/solicitudes-repuestos/new", methods=["POST"])
+@login_required
+@role_required("TECNICO")
+def repair_request_new():
+    jaula = get_jaula_location()
+    if not jaula:
+        flash(f"Falta la ubicación '{LOCATION_JAULA_TNG}'. Avisá a un administrador.", "error")
+        return redirect(url_for("repair_requests"))
+
+    trucks = _tech_trucks(current_user.id)
+    truck_ids = {t.id for t in trucks}
+    if not trucks:
+        flash("No tenés una camioneta asignada. Pedile a un supervisor que te asigne una.", "error")
+        return redirect(url_for("repair_requests"))
+
+    dest_raw = request.form.get("dest_location_id", "").strip()
+    if len(trucks) == 1:
+        dest_id = trucks[0].id
+    else:
+        if not (dest_raw.isdigit() and int(dest_raw) in truck_ids):
+            flash("Elegí a qué camioneta querés que te entreguen.", "error")
+            return redirect(url_for("repair_requests"))
+        dest_id = int(dest_raw)
+
+    observation = (request.form.get("observation", "") or "").strip() or None
+    jaula_stock = _jaula_stock_map()
+
+    item_ids = request.form.getlist("item_id[]")
+    qtys = request.form.getlist("qty[]")
+
+    parsed = []
+    for idx in range(len(item_ids)):
+        item_raw = (item_ids[idx] or "").strip()
+        qty_raw = (qtys[idx] or "").strip() if idx < len(qtys) else ""
+        if not item_raw and not qty_raw:
+            continue
+        n = len(parsed) + 1
+        if not item_raw.isdigit():
+            flash(f"Línea {n}: ítem inválido.", "error")
+            return redirect(url_for("repair_requests"))
+        try:
+            qty = int(qty_raw)
+            if qty <= 0:
+                raise ValueError()
+        except Exception:
+            flash(f"Línea {n}: cantidad inválida.", "error")
+            return redirect(url_for("repair_requests"))
+        item = Item.query.get(int(item_raw))
+        if not item or not item.is_active:
+            flash(f"Línea {n}: el ítem no existe o está dado de baja.", "error")
+            return redirect(url_for("repair_requests"))
+        if jaula_stock.get(item.id, 0) <= 0:
+            flash(f"«{item.code} - {item.name}» no tiene stock en la Jaula, no se puede solicitar.", "error")
+            return redirect(url_for("repair_requests"))
+        parsed.append((item.id, qty))
+
+    if not parsed:
+        flash("Cargá al menos un repuesto.", "error")
+        return redirect(url_for("repair_requests"))
+
+    try:
+        y, seq, number = next_repair_request_number()
+        pr = RepairRequest(
+            year=y, seq=seq, number=number,
+            status="PENDIENTE",
+            created_by_user_id=current_user.id,
+            dest_location_id=dest_id,
+            observation=observation,
+        )
+        db.session.add(pr)
+        db.session.flush()
+        for iid, qty in parsed:
+            db.session.add(RepairRequestLine(repair_request_id=pr.id, item_id=iid, qty=qty))
+        db.session.commit()
+        flash(f"Solicitud de repuestos creada: {number}", "ok")
+        return redirect(url_for("repair_request_detail", rr_id=pr.id))
+    except Exception as e:
+        db.session.rollback()
+        flash(f"No se pudo crear la solicitud: {e}", "error")
+        return redirect(url_for("repair_requests"))
+
+
+@app.route("/solicitudes-repuestos/<int:rr_id>", methods=["GET"])
+@login_required
+@role_required("ADMIN", "SUPERVISOR", "TECNICO")
+def repair_request_detail(rr_id: int):
+    rr = RepairRequest.query.get_or_404(rr_id)
+    # TECNICO solo puede ver las suyas.
+    if current_user.role == "TECNICO" and rr.created_by_user_id != current_user.id:
+        flash("No tenés acceso a esa solicitud.", "error")
+        return redirect(url_for("repair_requests"))
+
+    can_close = current_user.role in ("ADMIN", "SUPERVISOR") and rr.status == "PENDIENTE"
+
+    # Seriales disponibles (EN_STOCK) en la Jaula por ítem, para el cierre.
+    jaula = get_jaula_location()
+    jaula_units = {}
+    if jaula:
+        for u in (ItemUnit.query
+                  .filter_by(status=UNIT_EN_STOCK, location_id=jaula.id)
+                  .order_by(ItemUnit.item_id, ItemUnit.serial).all()):
+            jaula_units.setdefault(u.item_id, []).append([u.id, u.serial])
+
+    # Stock actual en Jaula por ítem (para el tope de entrega de no-serializados).
+    jaula_stock = _jaula_stock_map()
+
+    return render_template(
+        "repair_request_detail.html",
+        rr=rr,
+        can_close=can_close,
+        jaula_units=jaula_units,
+        jaula_stock=jaula_stock,
+    )
+
+
+@app.route("/solicitudes-repuestos/<int:rr_id>/cerrar", methods=["POST"])
+@login_required
+@role_required("ADMIN", "SUPERVISOR")
+def repair_request_close(rr_id: int):
+    rr = RepairRequest.query.get_or_404(rr_id)
+    if rr.status != "PENDIENTE":
+        flash("La solicitud ya fue cerrada.", "error")
+        return redirect(url_for("repair_request_detail", rr_id=rr.id))
+
+    jaula = get_jaula_location()
+    if not jaula:
+        flash(f"Falta la ubicación '{LOCATION_JAULA_TNG}'.", "error")
+        return redirect(url_for("repair_request_detail", rr_id=rr.id))
+
+    dest_id = rr.dest_location_id
+
+    # --- Validación todo-o-nada: se arma el plan sin tocar nada. ---
+    plan = []          # {line, item, delivered, units}
+    seen_units = set()
+    for ln in rr.lines:
+        item = ln.item
+        if item.serialized:
+            raw = request.form.getlist(f"unit_ids_{ln.id}")
+            unit_ids = [int(x) for x in raw if x.isdigit()]
+            if len(unit_ids) > ln.qty:
+                flash(f"«{item.code} - {item.name}»: elegiste más seriales que lo pedido ({ln.qty}).", "error")
+                return redirect(url_for("repair_request_detail", rr_id=rr.id))
+            units = []
+            for uid in unit_ids:
+                if uid in seen_units:
+                    flash("Hay un serial repetido entre líneas.", "error")
+                    return redirect(url_for("repair_request_detail", rr_id=rr.id))
+                seen_units.add(uid)
+                u = ItemUnit.query.filter_by(
+                    id=uid, item_id=item.id, status=UNIT_EN_STOCK, location_id=jaula.id
+                ).first()
+                if not u:
+                    flash(f"«{item.code} - {item.name}»: un serial elegido ya no está disponible en la Jaula.", "error")
+                    return redirect(url_for("repair_request_detail", rr_id=rr.id))
+                units.append(u)
+            plan.append({"line": ln, "item": item, "delivered": len(units), "units": units})
+        else:
+            raw = (request.form.get(f"qty_entregada_{ln.id}", "") or "").strip()
+            delivered = int(raw) if raw.isdigit() else 0
+            if delivered < 0 or delivered > ln.qty:
+                flash(f"«{item.code} - {item.name}»: cantidad a entregar inválida (0 a {ln.qty}).", "error")
+                return redirect(url_for("repair_request_detail", rr_id=rr.id))
+            st = Stock.query.filter_by(item_id=item.id, location_id=jaula.id).first()
+            avail = st.quantity if st else 0
+            if delivered > avail:
+                flash(f"«{item.code} - {item.name}»: no hay tanto en Jaula (disponible {avail}).", "error")
+                return redirect(url_for("repair_request_detail", rr_id=rr.id))
+            plan.append({"line": ln, "item": item, "delivered": delivered, "units": []})
+
+    try:
+        created = 0
+        full = True
+        for p in plan:
+            item = p["item"]
+            d = p["delivered"]
+            if d != p["line"].qty:
+                full = False
+            if d > 0:
+                upsert_stock(item.id, jaula.id, -d)
+                upsert_stock(item.id, dest_id, d)
+                obs = f"Solicitud repuestos {rr.number}"
+                if p["units"]:
+                    obs = serial_obs(obs, [u.serial for u in p["units"]])
+                y, seq, number = next_movement_number()
+                m = Movement(
+                    item_id=item.id, qty=d,
+                    from_location_id=jaula.id, to_location_id=dest_id,
+                    user_id=current_user.id, observation=obs,
+                    year=y, seq=seq, number=number,
+                )
+                db.session.add(m)
+                db.session.flush()
+                if p["units"]:
+                    apply_serial_units_out(p["units"], dest_id)
+                created += 1
+            p["line"].qty_entregada = d
+
+        rr.status = "CERRADA" if full else "CERRADA_PARCIAL"
+        rr.closed_at = now_ar()
+        rr.closed_by_user_id = current_user.id
+        db.session.commit()
+        flash(
+            f"Solicitud {rr.number} cerrada ({'completa' if full else 'parcial'}). "
+            f"Movimientos generados: {created}.", "ok",
+        )
+    except Exception as e:
+        db.session.rollback()
+        flash(f"No se pudo cerrar la solicitud: {e}", "error")
+    return redirect(url_for("repair_request_detail", rr_id=rr.id))
 
 
 # ================================================================
