@@ -1529,7 +1529,10 @@ def home():
             ).distinct().count()
             movs_hoy = Movement.query.filter(
                 Movement.created_at >= hoy,
-                Movement.from_location_id.in_(tech_location_ids),
+                db.or_(
+                    Movement.from_location_id.in_(tech_location_ids),
+                    Movement.to_location_id.in_(tech_location_ids),
+                ),
             ).count()
         else:
             mi_stock, mis_items, movs_hoy = 0, 0, 0
@@ -1541,7 +1544,10 @@ def home():
         ]
 
         ultimos_movimientos = (
-            Movement.query.filter(Movement.from_location_id.in_(tech_location_ids))
+            Movement.query.filter(db.or_(
+                Movement.from_location_id.in_(tech_location_ids),
+                Movement.to_location_id.in_(tech_location_ids),
+            ))
             .order_by(Movement.created_at.desc()).limit(8).all()
         ) if tech_location_ids else []
 
@@ -3229,7 +3235,10 @@ def movements():
 
     logs_q = _build_movements_query(filters).order_by(_order)
     if is_tecnico and tech_location_ids:
-        logs_q = logs_q.filter(Movement.from_location_id.in_(tech_location_ids))
+        logs_q = logs_q.filter(db.or_(
+            Movement.from_location_id.in_(tech_location_ids),
+            Movement.to_location_id.in_(tech_location_ids),
+        ))
     logs = logs_q.limit(limit).all()
 
     users_list = User.query.order_by(User.username).all()
@@ -3497,8 +3506,8 @@ def movements_export_csv():
 
     q = _build_movements_query(filters)
 
-    # Mismo scope por ubicacion que la pantalla /movements: el TECNICO solo ve
-    # movimientos originados en sus ubicaciones asignadas.
+    # Mismo scope por ubicacion que la pantalla /movements: el TECNICO ve
+    # movimientos que salen DESDE o entran HACIA sus ubicaciones asignadas.
     if current_user.role == "TECNICO":
         tech_location_ids = [
             l.id for l in Location.query.join(LocationResponsible).filter(
@@ -3506,7 +3515,10 @@ def movements_export_csv():
             ).all()
         ]
         if tech_location_ids:
-            q = q.filter(Movement.from_location_id.in_(tech_location_ids))
+            q = q.filter(db.or_(
+                Movement.from_location_id.in_(tech_location_ids),
+                Movement.to_location_id.in_(tech_location_ids),
+            ))
         else:
             q = q.filter(Movement.from_location_id == -1)
 
