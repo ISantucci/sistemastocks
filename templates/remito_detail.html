@@ -71,7 +71,7 @@
         <td class="rem-c-cant">{{ fmt_qty(ln.movement.qty, ln.movement.item) }}</td>
         <td class="rem-c-det">{{ ln.movement.item.name }}</td>
         <td class="rem-c-cod">{{ ln.movement.item.code }}</td>
-        <td class="rem-c-obs">{{ ln.movement.observation or "" }}</td>
+        <td class="rem-c-obs">{{ line_obs[ln.id] if line_obs is defined else (ln.movement.observation or "") }}</td>
       </tr>
       {% endfor %}
       {# Filas vacías para completar visualmente el cuerpo del remito #}

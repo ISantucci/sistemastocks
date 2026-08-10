@@ -1130,14 +1130,18 @@ def _movements_filters_from_request() -> dict:
     }
 
 
-def _build_movements_query(filters: dict):
+def _build_movements_query(filters: dict, include_supplier: bool = False):
     """Devuelve query SQLAlchemy con los filtros aplicados.
 
-    Excluye los movimientos de Ingresos/Egresos (los que tienen supplier_id):
-    esos se ven en su propia sección, no en el listado/exportación de Movimientos.
+    Por defecto excluye los movimientos de Ingresos/Egresos (los que tienen
+    supplier_id): comportamiento historico, usado por la EXPORTACION CSV.
+    Con include_supplier=True se incluyen tambien esos movimientos, para que el
+    LISTADO de /movements muestre ingresos/egresos junto a los internos.
     Los movimientos internos historicos (supplier_id NULL) no se tocan.
     """
-    q = Movement.query.join(Item).join(User).filter(Movement.supplier_id.is_(None))
+    q = Movement.query.join(Item).join(User)
+    if not include_supplier:
+        q = q.filter(Movement.supplier_id.is_(None))
 
     if filters["item_filter"].isdigit():
         q = q.filter(Movement.item_id == int(filters["item_filter"]))
@@ -3208,6 +3212,24 @@ def movements():
                     user_id=current_user.id,
                 ))
 
+            # Movimiento manual hacia "En reparación": además de mover el stock,
+            # se genera el registro Repair (EN_REPARACION) para que el ítem aparezca
+            # en la mesa de /reparaciones, aunque no venga de un pendiente.
+            # Serializados quedan afuera: la reparación por serial aún no está modelada.
+            if (
+                to_location
+                and to_location.name == LOCATION_EN_REPARACION
+                and not it.serialized
+            ):
+                db.session.add(Repair(
+                    item_id=item_id,
+                    quantity=qty,
+                    status="EN_REPARACION",
+                    source_location_id=from_id,
+                    pending_id=None,
+                    created_by_user_id=current_user.id,
+                ))
+
             db.session.commit()
             flash(f"Movimiento {number} registrado", "ok")
 
@@ -3233,7 +3255,7 @@ def movements():
     _sort_col = _mov_sortable.get(sort_by, Movement.created_at)
     _order = _sort_col.desc() if sort_dir == "desc" else _sort_col.asc()
 
-    logs_q = _build_movements_query(filters).order_by(_order)
+    logs_q = _build_movements_query(filters, include_supplier=True).order_by(_order)
     if is_tecnico and tech_location_ids:
         logs_q = logs_q.filter(db.or_(
             Movement.from_location_id.in_(tech_location_ids),
@@ -4061,10 +4083,17 @@ def remito_detail(remito_id: int):
         .order_by(Movement.created_at.desc())
         .all()
     )
+    # Observación por línea para el remito: se oculta la nota interna de
+    # reparación-proveedor (queda solo en Movimientos, no en el remito).
+    line_obs = {
+        ln.id: ("" if _is_repair_prov_note(ln.movement.observation)
+                else (ln.movement.observation or ""))
+        for ln in lines
+    }
     # Filas vacías para que el remito impreso mantenga un cuerpo prolijo.
     fill_rows = max(0, 16 - len(lines))
     embed = request.args.get("embed") == "1"
-    return render_template("remito_detail.html", remito=r, lines=lines, fill_rows=fill_rows, embed=embed)
+    return render_template("remito_detail.html", remito=r, lines=lines, line_obs=line_obs, fill_rows=fill_rows, embed=embed)
 
 
 def fmt_qty(qty, item=None):
@@ -4893,6 +4922,63 @@ def scrap_report():
     )
 
 
+# Prefijos de la nota que el flujo de reparación-proveedor deja en la OBSERVACIÓN
+# del movimiento (visible en Movimientos). remito_detail las oculta por prefijo
+# para que NO aparezcan en el remito.
+REPAIR_PROV_OUT_NOTE = "A reparación de proveedor"
+REPAIR_PROV_IN_NOTE = "Reparado por proveedor"
+
+
+def _is_repair_prov_note(obs) -> bool:
+    o = (obs or "").lstrip()
+    return o.startswith(REPAIR_PROV_OUT_NOTE) or o.startswith(REPAIR_PROV_IN_NOTE)
+
+
+def _repair_transfer_with_remito(item_id, qty, from_id, to_id, supplier, observation, user):
+    """Egreso/ingreso de una reparación enviada a un proveedor externo.
+
+    Crea Movement + Remito (print_pending) + RemitoLine, moviendo stock con el
+    mismo criterio que Ingresos/Egresos (no toca ubicaciones externas). Se usa
+    para 'Enviar a reparación de proveedor' (egreso) y 'Marcar reparada por
+    proveedor' (ingreso). Devuelve (movement, remito).
+    """
+    from_ext = location_is_external(from_id)
+    to_ext = location_is_external(to_id)
+    if not from_ext:
+        upsert_stock(item_id, from_id, -qty)
+    if not to_ext:
+        upsert_stock(item_id, to_id, qty)
+
+    # Observación del REMITO: limpia, estilo Ingresos/Egresos (sin la nota de
+    # reparación). El detalle de reparación va en la observación del MOVIMIENTO.
+    tipo_label = "Egreso" if to_ext else "Ingreso"
+    ry, rseq, rnumber = next_remito_number()
+    r_obs = f"{tipo_label} · {supplier.contact_name}"
+    rem = Remito(
+        year=ry, seq=rseq, number=rnumber,
+        status="CONFIRMADO", print_pending=True,
+        from_location_id=from_id, to_location_id=to_id,
+        created_by_user_id=user.id,
+        observation=r_obs[:255],
+        responsible_from_id=None, responsible_to_id=None,
+    )
+    db.session.add(rem)
+    db.session.flush()
+
+    y, seq, number = next_movement_number()
+    m = Movement(
+        item_id=item_id, qty=qty,
+        from_location_id=from_id, to_location_id=to_id,
+        user_id=user.id, observation=observation,
+        year=y, seq=seq, number=number,
+        supplier_id=supplier.id,
+    )
+    db.session.add(m)
+    db.session.flush()
+    db.session.add(RemitoLine(remito_id=rem.id, movement_id=m.id))
+    return m, rem
+
+
 @app.route("/reparaciones", methods=["GET", "POST"])
 @login_required
 @role_required("ADMIN", "SUPERVISOR", "LECTOR")
@@ -4923,16 +5009,12 @@ def reparaciones():
         if not r:
             flash("Reparación no encontrada.", "error")
             return redirect(url_for("reparaciones"))
-        if r.status != "EN_REPARACION":
-            flash("Esa reparación ya fue resuelta.", "ok")
-            return redirect(url_for("reparaciones"))
         if not repair_loc:
             flash("Ubicación 'En reparación' no existe.", "error")
             return redirect(url_for("reparaciones"))
 
         item_id = r.item_id
         qty = r.quantity
-        from_id = repair_loc.id
 
         # Guarda serializados: la reparación por serial aún no está modelada.
         _rep_item = Item.query.get(item_id)
@@ -4943,6 +5025,93 @@ def reparaciones():
                 "error",
             )
             return redirect(url_for("reparaciones"))
+
+        # --- Enviar a reparación de proveedor: egreso En reparación -> Proveedor + remito ---
+        if action == "enviar_proveedor":
+            if r.status != "EN_REPARACION":
+                flash("Esa reparación no está disponible para enviar a proveedor.", "error")
+                return redirect(url_for("reparaciones"))
+            supplier_raw = request.form.get("supplier_id", "").strip()
+            if not supplier_raw.isdigit():
+                flash("Elegí un proveedor para enviar la reparación.", "error")
+                return redirect(url_for("reparaciones"))
+            supplier = Supplier.query.get(int(supplier_raw))
+            if not supplier or not supplier.is_active:
+                flash("El proveedor no existe o está dado de baja.", "error")
+                return redirect(url_for("reparaciones"))
+            proveedor_loc = get_proveedor_location()
+            if not proveedor_loc:
+                flash("Ubicación 'Proveedor' no existe.", "error")
+                return redirect(url_for("reparaciones"))
+            try:
+                # La nota de reparación va en el MOVIMIENTO (se ve en Movimientos),
+                # pero NO en el remito: remito_detail la oculta por prefijo.
+                note = f"{REPAIR_PROV_OUT_NOTE} (rep #{r.id})"
+                mov_obs = f"{note} · {observation}" if observation else note
+                m, rem = _repair_transfer_with_remito(
+                    item_id, qty, repair_loc.id, proveedor_loc.id, supplier, mov_obs, current_user
+                )
+                r.status = "EN_PROVEEDOR"
+                db.session.commit()
+                flash(
+                    f"Enviado a proveedor ({supplier.contact_name}). "
+                    f"Remito {rem.number} generado — acordate de imprimirlo.", "ok",
+                )
+            except ValueError as e:
+                db.session.rollback()
+                flash(f"Error de stock: {e}", "error")
+            except Exception as e:
+                db.session.rollback()
+                flash(f"Error: {e}", "error")
+            return redirect(url_for("reparaciones"))
+
+        # --- Marcar reparada por proveedor: ingreso Proveedor -> Jaula + remito ---
+        if action == "reparado_proveedor":
+            if r.status != "EN_PROVEEDOR":
+                flash("Esa reparación no está en proveedor.", "error")
+                return redirect(url_for("reparaciones"))
+            supplier_raw = request.form.get("supplier_id", "").strip()
+            if not supplier_raw.isdigit():
+                flash("Elegí el proveedor que devuelve la reparación.", "error")
+                return redirect(url_for("reparaciones"))
+            supplier = Supplier.query.get(int(supplier_raw))
+            if not supplier or not supplier.is_active:
+                flash("El proveedor no existe o está dado de baja.", "error")
+                return redirect(url_for("reparaciones"))
+            jaula = get_jaula_location()
+            proveedor_loc = get_proveedor_location()
+            if not jaula or not proveedor_loc:
+                flash("Faltan ubicaciones 'Jaula TNG' y/o 'Proveedor'.", "error")
+                return redirect(url_for("reparaciones"))
+            try:
+                # La nota de reparación va en el MOVIMIENTO, no en el remito.
+                note = f"{REPAIR_PROV_IN_NOTE} (rep #{r.id}) -> {LOCATION_JAULA_TNG}"
+                mov_obs = f"{note} · {observation}" if observation else note
+                m, rem = _repair_transfer_with_remito(
+                    item_id, qty, proveedor_loc.id, jaula.id, supplier, mov_obs, current_user
+                )
+                r.status = "REPARADO"
+                r.resolved_at = now_ar()
+                r.resolved_by_user_id = current_user.id
+                db.session.commit()
+                flash(
+                    f"Reparación cerrada (reparada por proveedor). "
+                    f"Remito {rem.number} generado — acordate de imprimirlo.", "ok",
+                )
+            except ValueError as e:
+                db.session.rollback()
+                flash(f"Error de stock: {e}", "error")
+            except Exception as e:
+                db.session.rollback()
+                flash(f"Error: {e}", "error")
+            return redirect(url_for("reparaciones"))
+
+        # --- Resolución directa en la mesa (sin proveedor): reparado / descartado ---
+        if r.status != "EN_REPARACION":
+            flash("Esa reparación ya fue resuelta.", "ok")
+            return redirect(url_for("reparaciones"))
+
+        from_id = repair_loc.id
 
         if action == "reparado":
             dest = Location.query.filter_by(name=LOCATION_JAULA_TNG).first()
@@ -5013,12 +5182,44 @@ def reparaciones():
             flash(f"Error: {e}", "error")
         return redirect(url_for("reparaciones"))
 
-    # GET: en reparacion (pendientes) + historial resuelto con filtros
+    # GET: en reparacion (pendientes) + en proveedor + historial resuelto
     pendientes = (
         Repair.query.filter_by(status="EN_REPARACION")
         .order_by(Repair.created_at.asc())
         .all()
     )
+    en_proveedor = (
+        Repair.query.filter_by(status="EN_PROVEEDOR")
+        .order_by(Repair.created_at.asc())
+        .all()
+    )
+    suppliers_list = (
+        Supplier.query.filter_by(is_active=True)
+        .order_by(Supplier.contact_name)
+        .all()
+    )
+
+    # Fase 2: trackeo de ítems serializados físicamente en "En reparación".
+    # Derivado de ItemUnit (status EN_STOCK, ubicación = mesa de reparación),
+    # agrupado por ítem: [{item, serials:[...], qty}]. Solo lectura.
+    serial_en_reparacion = []
+    if repair_loc:
+        _units = (
+            ItemUnit.query.filter(
+                ItemUnit.status == UNIT_EN_STOCK,
+                ItemUnit.location_id == repair_loc.id,
+            )
+            .order_by(ItemUnit.item_id, ItemUnit.serial)
+            .all()
+        )
+        _grouped = {}
+        for u in _units:
+            g = _grouped.setdefault(u.item_id, {"item": u.item, "serials": []})
+            g["serials"].append(u.serial)
+        serial_en_reparacion = [
+            {"item": g["item"], "serials": g["serials"], "qty": len(g["serials"])}
+            for g in _grouped.values()
+        ]
 
     f_date_from = request.args.get("from_date", "").strip()
     f_date_to = request.args.get("to_date", "").strip()
@@ -5065,6 +5266,9 @@ def reparaciones():
     return render_template(
         "reparaciones.html",
         pendientes=pendientes,
+        en_proveedor=en_proveedor,
+        suppliers=suppliers_list,
+        serial_en_reparacion=serial_en_reparacion,
         historial=historial,
         items=items_all,
         reparados_mes=reparados_mes,

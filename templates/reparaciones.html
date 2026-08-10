@@ -5,7 +5,7 @@
 <div class="page-header">
   <div>
     <h2>Reparaciones</h2>
-    <p>Items en reparación. Al resolver: <b>Reparado</b> vuelve a stock (Jaula TNG) o <b>Descartado</b> va a Descartes.</p>
+    <p>Items en reparación. Al resolver: <b>Reparado</b> vuelve a stock (Jaula TNG), <b>Descartado</b> va a Descartes, o <b>Enviar a proveedor</b> genera el egreso con remito y queda a la espera de la devolución.</p>
   </div>
   <div class="page-header-actions">
     <span class="badge badge-ok">Reparados este mes: {{ reparados_mes }}</span>
@@ -37,9 +37,10 @@
             <form method="post" class="pending-action">
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <input type="hidden" name="repair_id" value="{{ r.id }}">
-              <div class="check-inline" style="gap:14px;">
+              <div class="check-inline" style="gap:14px; flex-wrap:wrap;">
                 <label class="check-inline"><input type="radio" name="repair_action" value="reparado" checked> Reparado</label>
                 <label class="check-inline"><input type="radio" name="repair_action" value="descartado" id="disc_radio_{{ r.id }}"> Descartado</label>
+                <label class="check-inline"><input type="radio" name="repair_action" value="enviar_proveedor" id="prov_radio_{{ r.id }}"> Enviar a proveedor</label>
               </div>
               <div id="disc_opts_{{ r.id }}" style="display:none; margin-top:6px;">
                 <select name="scrap_reason">
@@ -51,14 +52,27 @@
                   <option value="Otro">Otro</option>
                 </select>
               </div>
+              <div id="prov_opts_{{ r.id }}" style="display:none; margin-top:6px;">
+                <select name="supplier_id">
+                  <option value="">Proveedor...</option>
+                  {% for s in suppliers %}
+                  <option value="{{ s.id }}">{{ s.contact_name }}{% if s.business_name %} · {{ s.business_name }}{% endif %}</option>
+                  {% endfor %}
+                </select>
+              </div>
               <input type="text" name="observation" placeholder="Observación (opcional)" style="margin-top:6px;">
               <div style="margin-top:6px;"><button class="btn btn-primary btn-sm">Confirmar</button></div>
               <script>
               (function(){
-                var radio = document.getElementById("disc_radio_{{ r.id }}");
-                var opts  = document.getElementById("disc_opts_{{ r.id }}");
-                radio.closest("form").querySelectorAll("input[name=repair_action]").forEach(function(x){
-                  x.addEventListener("change", function(){ opts.style.display = radio.checked ? "block" : "none"; });
+                var form = document.currentScript.closest("form");
+                var disc = document.getElementById("disc_opts_{{ r.id }}");
+                var prov = document.getElementById("prov_opts_{{ r.id }}");
+                form.querySelectorAll("input[name=repair_action]").forEach(function(x){
+                  x.addEventListener("change", function(){
+                    var v = form.querySelector("input[name=repair_action]:checked").value;
+                    disc.style.display = (v === "descartado") ? "block" : "none";
+                    prov.style.display = (v === "enviar_proveedor") ? "block" : "none";
+                  });
                 });
               })();
               </script>
@@ -68,6 +82,80 @@
         </tr>
         {% else %}
         <tr><td colspan="6" class="muted">Nada en reparación.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="table-card" style="margin-top:18px;">
+  <div class="card-title" style="padding:12px 14px;"><b>En proveedor</b> <span class="muted">— enviadas a reparar afuera, esperando devolución</span></div>
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Enviado</th><th>ID Item</th><th>Nombre item</th><th>Cant.</th><th>Acción</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in en_proveedor %}
+        <tr>
+          <td>{{ r.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+          <td>{{ r.item.code }}</td>
+          <td>{{ r.item.name }}</td>
+          <td>{{ fmt_qty(r.quantity, r.item) }}</td>
+          <td class="actions-cell">
+            {% if me.role == "LECTOR" %}
+            <span class="muted">Solo lectura</span>
+            {% else %}
+            <form method="post" class="pending-action">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <input type="hidden" name="repair_id" value="{{ r.id }}">
+              <input type="hidden" name="repair_action" value="reparado_proveedor">
+              <select name="supplier_id">
+                <option value="">Proveedor que devuelve...</option>
+                {% for s in suppliers %}
+                <option value="{{ s.id }}">{{ s.contact_name }}{% if s.business_name %} · {{ s.business_name }}{% endif %}</option>
+                {% endfor %}
+              </select>
+              <input type="text" name="observation" placeholder="Observación (opcional)" style="margin-top:6px;">
+              <div style="margin-top:6px;"><button class="btn btn-primary btn-sm">Marcar reparada (ingreso + remito)</button></div>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="muted">Nada en proveedor.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="table-card" style="margin-top:18px;">
+  <div class="card-title" style="padding:12px 14px;"><b>Serializados en reparación</b> <span class="muted">— trackeo por serial (solo lectura)</span></div>
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr><th>ID Item</th><th>Nombre item</th><th>Cant.</th><th>Seriales</th></tr>
+      </thead>
+      <tbody>
+        {% for g in serial_en_reparacion %}
+        <tr>
+          <td>{{ g.item.code }}</td>
+          <td>{{ g.item.name }}</td>
+          <td>{{ g.qty }}</td>
+          <td>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('serials_{{ g.item.id }}').style.display = (document.getElementById('serials_{{ g.item.id }}').style.display === 'none' ? 'block' : 'none');">Ver seriales ({{ g.qty }})</button>
+            <div id="serials_{{ g.item.id }}" style="display:none; margin-top:6px;">
+              <ul style="margin:0; padding-left:18px;">
+                {% for sn in g.serials %}<li>{{ sn }}</li>{% endfor %}
+              </ul>
+            </div>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4" class="muted">No hay serializados en reparación.</td></tr>
         {% endfor %}
       </tbody>
     </table>
