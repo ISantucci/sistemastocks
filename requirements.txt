@@ -2,3 +2,5 @@ flask
 flask_sqlalchemy
 flask-login
 flask-wtf
+waitress
+flask-limiter

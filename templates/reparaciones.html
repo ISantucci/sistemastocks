@@ -80,21 +80,27 @@
     <label>Desde<br><input type="date" name="from_date" value="{{ from_date }}"></label>
     <label>Hasta<br><input type="date" name="to_date" value="{{ to_date }}"></label>
     <label>Resultado<br>
-      <select name="status_filter">
+      <select name="status">
         <option value="">Todos</option>
         <option value="REPARADO" {% if status_filter == "REPARADO" %}selected{% endif %}>Reparado</option>
         <option value="DESCARTADO" {% if status_filter == "DESCARTADO" %}selected{% endif %}>Descartado</option>
       </select>
     </label>
-    <label>Item (ID)<br><input type="text" name="item_filter" value="{{ item_filter }}"></label>
+    <label>Item (ID)<br><input type="text" name="item_id" value="{{ item_filter }}"></label>
     <label>Mostrar<br><input type="number" name="limit" value="{{ limit }}" min="1" max="5000" style="width:90px;"></label>
+    <input type="hidden" name="sort_by" value="{{ selected_sort_by or 'date' }}">
+    <input type="hidden" name="sort_dir" value="{{ selected_sort_dir or 'desc' }}">
     <button class="btn btn-secondary btn-sm">Filtrar</button>
   </form>
   <div class="table-scroll">
     <table class="data-table">
       <thead>
         <tr>
-          <th>Resuelto</th><th>ID Item</th><th>Nombre item</th><th>Cant.</th><th>Resultado</th><th>Motivo</th><th>Usuario</th>
+          <th><a href="{{ url_for('reparaciones', from_date=from_date, to_date=to_date, status=status_filter, item_id=item_filter, limit=limit, sort_by='date', sort_dir='asc' if selected_sort_by == 'date' and selected_sort_dir == 'desc' else 'desc') }}">Resuelto{% if selected_sort_by == 'date' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th><a href="{{ url_for('reparaciones', from_date=from_date, to_date=to_date, status=status_filter, item_id=item_filter, limit=limit, sort_by='item', sort_dir='desc' if selected_sort_by == 'item' and selected_sort_dir == 'asc' else 'asc') }}">ID Item{% if selected_sort_by == 'item' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th>Nombre item</th><th>Cant.</th>
+          <th><a href="{{ url_for('reparaciones', from_date=from_date, to_date=to_date, status=status_filter, item_id=item_filter, limit=limit, sort_by='status', sort_dir='desc' if selected_sort_by == 'status' and selected_sort_dir == 'asc' else 'asc') }}">Resultado{% if selected_sort_by == 'status' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th>Motivo</th><th>Usuario</th>
         </tr>
       </thead>
       <tbody>

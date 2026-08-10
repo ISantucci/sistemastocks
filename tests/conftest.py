@@ -16,6 +16,7 @@ os.environ["FLASK_SECRET_KEY"] = "testing-key-fixed"
 os.environ["BOOTSTRAP_ADMIN_USERNAME"] = "admin"
 os.environ["BOOTSTRAP_ADMIN_PASSWORD"] = "admin123"
 os.environ["APP_DEBUG"] = "false"
+os.environ["RATELIMIT_ENABLED"] = "false"  # el rate limiting no debe interferir en tests
 os.environ.pop("ENABLE_RESET_DB", None)
 
 # app.py está un nivel arriba de tests/

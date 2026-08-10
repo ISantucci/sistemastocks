@@ -89,6 +89,64 @@ def handle_csrf_error(e):
     )
 
 
+# ------------------ SEGURIDAD: cookies de sesion + headers ------------------
+# Endurecimiento de la cookie de sesion. SESSION_COOKIE_SECURE es opt-in por
+# entorno para NO romper el acceso por HTTP en la EC2 si todavia no hay TLS
+# delante (default false = comportamiento actual). Poner en "true" cuando la
+# app quede detras de HTTPS.
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=(
+        os.environ.get("SESSION_COOKIE_SECURE", "false").strip().lower() == "true"
+    ),
+)
+
+
+@app.after_request
+def _security_headers(resp):
+    # Cabeceras de seguridad basicas. No se agrega CSP estricta a proposito:
+    # los templates usan estilos/scripts inline y una CSP estricta los romperia.
+    # X-Frame-Options=SAMEORIGIN (no DENY) para no romper las vistas embebidas
+    # del mismo dominio (parametro ?embed=1).
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    return resp
+
+
+# ------------------ RATE LIMITING (flask-limiter) ------------------
+# Limite por usuario autenticado (o por IP si es anonimo). Storage en memoria:
+# alcanza porque produccion corre 1 solo proceso (waitress). Se puede desactivar
+# por entorno con RATELIMIT_ENABLED=false (los tests lo desactivan).
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+
+
+def _rate_key():
+    try:
+        if current_user.is_authenticated:
+            return f"user:{current_user.id}"
+    except Exception:
+        pass
+    return get_remote_address()
+
+
+limiter = Limiter(
+    key_func=_rate_key,
+    default_limits=["120 per minute"],
+    storage_uri="memory://",
+    enabled=(os.environ.get("RATELIMIT_ENABLED", "true").strip().lower() == "true"),
+)
+limiter.init_app(app)
+
+
+@limiter.request_filter
+def _rate_exempt_static():
+    # No limitar los assets estaticos (una sola pagina pide varios archivos).
+    return request.endpoint == "static"
+
+
 # Concurrencia SQLite: WAL permite lecturas concurrentes con una escritura,
 # y busy_timeout hace que una escritura espere (en ms) en vez de fallar con
 # "database is locked" cuando hay varios usuarios a la vez.
@@ -1501,6 +1559,7 @@ def home():
 # ---- AUTH ----
 
 @app.route("/login", methods=["GET", "POST"])
+@limiter.limit("5 per minute", methods=["POST"], error_message="Demasiados intentos de acceso. Espera un minuto e intenta de nuevo.")
 def login():
     if request.method == "POST":
         username = request.form.get("username", "").strip()
@@ -3079,7 +3138,20 @@ def movements():
     filters = _movements_filters_from_request()
     limit = filters["limit"]
 
-    logs_q = _build_movements_query(filters).order_by(Movement.created_at.desc())
+    # Orden por columna (click en el header). Default: fecha descendente
+    # (comportamiento historico). _build_movements_query ya hace join a Item y User.
+    sort_by = (request.args.get("sort_by") or "date").strip()
+    sort_dir = (request.args.get("sort_dir") or "desc").strip().lower()
+    _mov_sortable = {
+        "date": Movement.created_at,
+        "qty": Movement.qty,
+        "item": Item.code,
+        "user": User.username,
+    }
+    _sort_col = _mov_sortable.get(sort_by, Movement.created_at)
+    _order = _sort_col.desc() if sort_dir == "desc" else _sort_col.asc()
+
+    logs_q = _build_movements_query(filters).order_by(_order)
     if is_tecnico and tech_location_ids:
         logs_q = logs_q.filter(Movement.from_location_id.in_(tech_location_ids))
     logs = logs_q.limit(limit).all()
@@ -3125,6 +3197,8 @@ def movements():
         selected_date_from=filters["date_from"],
         selected_date_to=filters["date_to"],
         selected_limit=limit,
+        selected_sort_by=sort_by,
+        selected_sort_dir=sort_dir,
         is_tecnico=is_tecnico,
         tech_locations=tech_locations,
         descartes_id=descartes_id,
@@ -3528,12 +3602,15 @@ def item_usage():
     # Filtros del historial (admin: fecha/item/responsable/mostrar; tecnico: fecha/item)
     f_date_from = request.args.get("from_date", "").strip()
     f_date_to = request.args.get("to_date", "").strip()
-    f_item = request.args.get("item_filter", "").strip()
-    f_user = request.args.get("user_filter", "").strip()
+    f_item = (request.args.get("item_id") or request.args.get("item_filter") or "").strip()
+    f_user = (request.args.get("user_id") or request.args.get("user_filter") or "").strip()
     f_limit_raw = request.args.get("limit", "").strip()
     default_limit = 100 if is_tecnico else 200
     f_limit = int(f_limit_raw) if f_limit_raw.isdigit() else default_limit
     f_limit = max(1, min(f_limit, 5000))
+
+    sort_by = (request.args.get("sort_by") or "date").strip()
+    sort_dir = (request.args.get("sort_dir") or "desc").strip().lower()
 
     if utilizados_id and (not is_tecnico or tech_location_ids):
         hq = Movement.query.filter(Movement.to_location_id == utilizados_id)
@@ -3547,7 +3624,19 @@ def item_usage():
             hq = hq.filter(Movement.item_id == int(f_item))
         if (not is_tecnico) and f_user.isdigit():
             hq = hq.filter(Movement.user_id == int(f_user))
-        movements_list = hq.order_by(Movement.created_at.desc()).limit(f_limit).all()
+        if sort_by == "item":
+            hq = hq.join(Item)
+            _col = Item.code
+        elif sort_by == "user":
+            hq = hq.join(User)
+            _col = User.username
+        elif sort_by == "qty":
+            _col = Movement.qty
+        else:
+            sort_by = "date"
+            _col = Movement.created_at
+        hq = hq.order_by(_col.desc() if sort_dir == "desc" else _col.asc())
+        movements_list = hq.limit(f_limit).all()
     else:
         movements_list = []
 
@@ -3589,6 +3678,8 @@ def item_usage():
         item_filter=f_item,
         user_filter=f_user,
         limit=str(f_limit),
+        selected_sort_by=sort_by,
+        selected_sort_dir=sort_dir,
     )
 
 
@@ -3684,7 +3775,14 @@ def remitos():
             )
         )
 
-    remitos_list = query.order_by(Remito.created_at.desc()).limit(500).all()
+    sort_by = (request.args.get("sort_by") or "date").strip()
+    sort_dir = (request.args.get("sort_dir") or "desc").strip().lower()
+    if sort_by == "number":
+        _col = Remito.number
+    else:
+        sort_by = "date"
+        _col = Remito.created_at
+    remitos_list = query.order_by(_col.desc() if sort_dir == "desc" else _col.asc()).limit(500).all()
     locations_list = Location.query.order_by(Location.name).all()
 
     # Usuarios que son responsables de alguna ubicación, para el filtro.
@@ -3702,6 +3800,8 @@ def remitos():
         locations=locations_list,
         responsible_users=responsible_users,
         responsible_id=resp_id,
+        selected_sort_by=sort_by,
+        selected_sort_dir=sort_dir,
         today=now_ar().date().isoformat(),
     )
 
@@ -3738,8 +3838,8 @@ def remito_movimientos():
     if from_id == to_id:
         return render_template("_remito_mov_rows.html", movements=None, same=True)
 
-    date_from = _parse_date_arg(request.args.get("date_from", ""))
-    date_to = _parse_date_arg(request.args.get("date_to", ""))
+    date_from = _parse_date_arg(request.args.get("from_date") or request.args.get("date_from", ""))
+    date_to = _parse_date_arg(request.args.get("to_date") or request.args.get("date_to", ""))
     movs = unremitted_movements(from_id, to_id, date_from, date_to)
     return render_template("_remito_mov_rows.html", movements=movs, same=False)
 
@@ -4193,11 +4293,21 @@ def pending_deliveries():
         pendings_q = pendings_q.filter(
             PendingDelivery.responsible_to_id == current_user.id
         )
-    pendings = pendings_q.order_by(PendingDelivery.created_at.desc()).all()
+    sort_by = (request.args.get("sort_by") or "date").strip()
+    sort_dir = (request.args.get("sort_dir") or "desc").strip().lower()
+    if sort_by == "item":
+        pendings_q = pendings_q.join(Item, Item.id == PendingDelivery.item_id)
+        _col = Item.code
+    else:
+        sort_by = "date"
+        _col = PendingDelivery.created_at
+    pendings = pendings_q.order_by(_col.desc() if sort_dir == "desc" else _col.asc()).all()
 
     return render_template(
         "pending_deliveries.html",
-        pendings=pendings
+        pendings=pendings,
+        selected_sort_by=sort_by,
+        selected_sort_dir=sort_dir,
     )
 
 @app.route("/import/items", methods=["GET", "POST"])
@@ -4562,11 +4672,14 @@ def scrap_report():
     reason_filter = request.args.get("reason", "").strip()
     f_date_from = request.args.get("from_date", "").strip()
     f_date_to = request.args.get("to_date", "").strip()
-    f_item = request.args.get("item_filter", "").strip()
-    f_user = request.args.get("user_filter", "").strip()
+    f_item = (request.args.get("item_id") or request.args.get("item_filter") or "").strip()
+    f_user = (request.args.get("user_id") or request.args.get("user_filter") or "").strip()
     f_limit_raw = request.args.get("limit", "").strip()
     f_limit = int(f_limit_raw) if f_limit_raw.isdigit() else 500
     f_limit = max(1, min(f_limit, 5000))
+
+    sort_by = (request.args.get("sort_by") or "date").strip()
+    sort_dir = (request.args.get("sort_dir") or "desc").strip().lower()
 
     q = Scrap.query
     if reason_filter:
@@ -4579,7 +4692,18 @@ def scrap_report():
         q = q.filter(Scrap.item_id == int(f_item))
     if f_user.isdigit():
         q = q.filter(Scrap.user_id == int(f_user))
-    scraps = q.order_by(Scrap.created_at.desc()).limit(f_limit).all()
+    if sort_by == "item":
+        q = q.join(Item)
+        _col = Item.code
+    elif sort_by == "user":
+        q = q.join(User)
+        _col = User.username
+    elif sort_by == "qty":
+        _col = Scrap.quantity
+    else:
+        sort_by = "date"
+        _col = Scrap.created_at
+    scraps = q.order_by(_col.desc() if sort_dir == "desc" else _col.asc()).limit(f_limit).all()
 
     # Datos para el formulario de descarte + filtrado dinámico por ubicación
     # Origen: camionetas + la Jaula central (se descartan items desde ahi tambien).
@@ -4613,6 +4737,8 @@ def scrap_report():
         item_filter=f_item,
         user_filter=f_user,
         limit=str(f_limit),
+        selected_sort_by=sort_by,
+        selected_sort_dir=sort_dir,
     )
 
 
@@ -4745,11 +4871,14 @@ def reparaciones():
 
     f_date_from = request.args.get("from_date", "").strip()
     f_date_to = request.args.get("to_date", "").strip()
-    f_status = request.args.get("status_filter", "").strip()  # REPARADO / DESCARTADO
-    f_item = request.args.get("item_filter", "").strip()
+    f_status = (request.args.get("status") or request.args.get("status_filter") or "").strip()  # REPARADO / DESCARTADO
+    f_item = (request.args.get("item_id") or request.args.get("item_filter") or "").strip()
     f_limit_raw = request.args.get("limit", "").strip()
     f_limit = int(f_limit_raw) if f_limit_raw.isdigit() else 500
     f_limit = max(1, min(f_limit, 5000))
+
+    sort_by = (request.args.get("sort_by") or "date").strip()
+    sort_dir = (request.args.get("sort_dir") or "desc").strip().lower()
 
     q = Repair.query.filter(Repair.status != "EN_REPARACION")
     if f_status in ("REPARADO", "DESCARTADO"):
@@ -4760,7 +4889,15 @@ def reparaciones():
         q = q.filter(Repair.resolved_at <= datetime.fromisoformat(f_date_to + "T23:59:59"))
     if f_item.isdigit():
         q = q.filter(Repair.item_id == int(f_item))
-    historial = q.order_by(Repair.resolved_at.desc()).limit(f_limit).all()
+    if sort_by == "item":
+        q = q.join(Item)
+        _col = Item.code
+    elif sort_by == "status":
+        _col = Repair.status
+    else:
+        sort_by = "date"
+        _col = Repair.resolved_at
+    historial = q.order_by(_col.desc() if sort_dir == "desc" else _col.asc()).limit(f_limit).all()
 
     # Resumen del mes en curso
     now = now_ar()
@@ -4786,6 +4923,8 @@ def reparaciones():
         status_filter=f_status,
         item_filter=f_item,
         limit=str(f_limit),
+        selected_sort_by=sort_by,
+        selected_sort_dir=sort_dir,
     )
 
 
@@ -5184,8 +5323,8 @@ def _mx_period():
     """
     now = now_ar()
     today0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    desde_raw = (request.args.get("desde") or "").strip()
-    hasta_raw = (request.args.get("hasta") or "").strip()
+    desde_raw = (request.args.get("from_date") or request.args.get("desde") or "").strip()
+    hasta_raw = (request.args.get("to_date") or request.args.get("hasta") or "").strip()
     preset = (request.args.get("preset") or "").strip()
 
     dt_from = dt_to = None

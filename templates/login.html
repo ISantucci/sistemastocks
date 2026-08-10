@@ -7,7 +7,7 @@
   <p class="muted" style="margin:0 0 16px;">Accedé con tu usuario y contraseña.</p>
   <form method="post">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-    <div class="field"><label>Usuario</label><input name="username" required autofocus></div>
+    <div class="field"><label>Usuario</label><input type="text" name="username" required autofocus></div>
     <div class="field"><label>Contraseña</label><input name="password" type="password" required></div>
     <div style="margin-top:16px;"><button type="submit" class="btn btn-primary" style="width:100%;">Entrar</button></div>
   </form>

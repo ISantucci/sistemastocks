@@ -9,7 +9,10 @@
     <table class="data-table">
       <thead>
         <tr>
-          <th>Fecha</th><th>Entrega</th><th>Recibe</th><th>ID Item</th><th>Nombre item</th><th>Debe devolver</th><th>Comentario</th><th>Devuelto</th><th>Acción</th>
+          <th><a href="{{ url_for('pending_deliveries', sort_by='date', sort_dir='asc' if selected_sort_by == 'date' and selected_sort_dir == 'desc' else 'desc') }}">Fecha{% if selected_sort_by == 'date' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th>Entrega</th><th>Recibe</th>
+          <th><a href="{{ url_for('pending_deliveries', sort_by='item', sort_dir='desc' if selected_sort_by == 'item' and selected_sort_dir == 'asc' else 'asc') }}">ID Item{% if selected_sort_by == 'item' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th>Nombre item</th><th>Debe devolver</th><th>Comentario</th><th>Devuelto</th><th>Acción</th>
         </tr>
       </thead>
       <tbody>

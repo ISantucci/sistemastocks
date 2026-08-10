@@ -24,6 +24,8 @@
         {% endfor %}
       </select>
     </div>
+    <input type="hidden" name="sort_by" value="{{ selected_sort_by or 'date' }}">
+    <input type="hidden" name="sort_dir" value="{{ selected_sort_dir or 'desc' }}">
     <div class="field-actions">
       <button type="submit" class="btn btn-primary">Filtrar</button>
       <a href="{{ url_for('remitos') }}" class="btn btn-secondary">Limpiar</a>
@@ -37,7 +39,9 @@
     <table class="data-table">
       <thead>
         <tr>
-          <th>Número</th><th>Fecha</th><th>Entrega (responsable)</th><th>Recibe (responsable)</th><th class="num">Ítems</th><th>Creador</th>
+          <th><a href="{{ url_for('remitos', responsible_id=responsible_id, sort_by='number', sort_dir='desc' if selected_sort_by == 'number' and selected_sort_dir == 'asc' else 'asc') }}">Número{% if selected_sort_by == 'number' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th><a href="{{ url_for('remitos', responsible_id=responsible_id, sort_by='date', sort_dir='asc' if selected_sort_by == 'date' and selected_sort_dir == 'desc' else 'desc') }}">Fecha{% if selected_sort_by == 'date' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th>Entrega (responsable)</th><th>Recibe (responsable)</th><th class="num">Ítems</th><th>Creador</th>
         </tr>
       </thead>
       <tbody>
