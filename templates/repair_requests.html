@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% block title %}Solicitud de repuestos · TNGStocks{% endblock %}
+{% block page_title %}Solicitud de repuestos{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <h2>Solicitud de repuestos</h2>
+    <p>
+      {% if me and me.role == "TECNICO" %}
+        Pedí los repuestos que necesitás. Un supervisor o admin cierra la entrega y te llegan a tu camioneta.
+      {% else %}
+        Pedidos de repuestos de los técnicos. Al cerrarlos elegís los seriales (si aplica) y se genera el movimiento Jaula → camioneta.
+      {% endif %}
+    </p>
+  </div>
+</div>
+
+{% if me and me.role == "TECNICO" %}
+<div class="card">
+  <div class="card-header"><span class="card-title">Nueva solicitud</span></div>
+  {% if not trucks %}
+    <p class="muted">No tenés una camioneta asignada. Pedile a un supervisor que te asigne una para poder solicitar repuestos.</p>
+  {% elif not items %}
+    <p class="muted">No hay repuestos con stock en la Jaula en este momento.</p>
+  {% else %}
+  <form method="post" action="{{ url_for('repair_request_new') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="form-grid">
+      <div class="field">
+        <label>Camioneta destino</label>
+        {% if trucks|length == 1 %}
+          <input type="text" value="{{ trucks[0].name }}" readonly disabled />
+          <input type="hidden" name="dest_location_id" value="{{ trucks[0].id }}" />
+        {% else %}
+          <select name="dest_location_id" required>
+            <option value="" selected disabled>Elegí tu camioneta...</option>
+            {% for t in trucks %}
+              <option value="{{ t.id }}">{{ t.name }}</option>
+            {% endfor %}
+          </select>
+        {% endif %}
+      </div>
+      <div class="field">
+        <label>Observación (opcional)</label>
+        <input name="observation" maxlength="255" placeholder="Ej: para instalación en obra X" />
+      </div>
+    </div>
+
+    <div class="card-header" style="margin-top:8px;"><span class="card-title">Repuestos</span></div>
+    <div id="rr-lines"></div>
+    <div style="margin-top:12px; margin-bottom:16px;">
+      <button type="button" id="add-line-btn" class="btn btn-secondary">+ Agregar repuesto</button>
+    </div>
+
+    <button type="submit" class="btn btn-primary">Enviar solicitud</button>
+  </form>
+
+  <template id="rr-line-template">
+    <div class="rr-line" style="display:flex; gap:12px; align-items:flex-end; margin-bottom:10px; flex-wrap:wrap;">
+      <div class="field" style="flex:1; min-width:240px;">
+        <label>Repuesto</label>
+        <select name="item_id[]" required>
+          <option value="" selected disabled>Seleccionar repuesto...</option>
+          {% for it in items %}
+            <option value="{{ it.id }}">{{ it.code }} - {{ it.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field" style="width:120px;">
+        <label>Cant.</label>
+        <input type="number" name="qty[]" min="1" value="1" required>
+      </div>
+      <div class="field">
+        <label>&nbsp;</label>
+        <button type="button" class="remove-line-btn btn btn-danger btn-sm">X</button>
+      </div>
+    </div>
+  </template>
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="table-card">
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Código</th><th>Fecha</th><th>Estado</th><th>Destino</th>
+          <th class="num">Ítems</th><th>Solicitante</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in requests %}
+        <tr>
+          <td><a href="{{ url_for('repair_request_detail', rr_id=r.id) }}">{{ r.number }}</a></td>
+          <td>{{ r.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+          <td>
+            {% if r.status == "CERRADA" %}
+              <span class="badge badge-ok">CERRADA</span>
+            {% elif r.status == "CERRADA_PARCIAL" %}
+              <span class="badge badge-warn">CERRADA PARCIAL</span>
+            {% else %}
+              <span class="badge badge-neutral">PENDIENTE</span>
+            {% endif %}
+          </td>
+          <td>{{ r.dest_location.name if r.dest_location else "-" }}</td>
+          <td class="num">{{ r.lines|length }}</td>
+          <td>{{ r.created_by.full_name or r.created_by.username }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="muted">Sin solicitudes.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% if me and me.role == "TECNICO" and trucks and items %}
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  function wireLine(line) {
+    var rm = line.querySelector(".remove-line-btn");
+    if (rm) rm.addEventListener("click", function () { line.remove(); });
+  }
+  function addLine() {
+    var tpl = document.getElementById("rr-line-template");
+    var cont = document.getElementById("rr-lines");
+    cont.appendChild(tpl.content.cloneNode(true));
+    wireLine(cont.lastElementChild);
+  }
+  document.getElementById("add-line-btn").addEventListener("click", addLine);
+  addLine();
+});
+</script>
+{% endif %}
+{% endblock %}

@@ -94,6 +94,12 @@
           <span class="nav-icon">&#9662;</span><span class="nav-label">Solicitudes de Compra</span>
         </a>
         {% endif %}
+        {% if me.role in ["ADMIN", "SUPERVISOR", "TECNICO"] %}
+        <a href="{{ url_for('repair_requests') }}" class="nav-link {% if request.endpoint in ['repair_requests', 'repair_request_new', 'repair_request_detail'] %}active{% endif %}">
+          <span class="nav-icon">&#9881;</span><span class="nav-label">Solicitud de repuestos</span>
+          {% if repair_badge_count and repair_badge_count > 0 %}<span class="nav-badge" title="{{ repair_badge_count }} solicitud(es) de repuestos pendiente(s)">{{ repair_badge_count }}</span>{% endif %}
+        </a>
+        {% endif %}
         <a href="{{ url_for('remitos') }}" class="nav-link {% if request.endpoint in ['remitos', 'remito_new', 'remito_detail'] %}active{% endif %}">
           <span class="nav-icon">&#9639;</span><span class="nav-label">Remitos</span>
         </a>

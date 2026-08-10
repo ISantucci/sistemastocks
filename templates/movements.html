@@ -32,7 +32,7 @@
         {% else %}
           <select name="from_location_id" id="from_location_id" required>
             <option value="" selected disabled>Seleccionar ubicación...</option>
-            {% for loc in locations %}
+            {% for loc in from_locations %}
               <option value="{{ loc.id }}">{{ loc.name }}</option>
             {% endfor %}
           </select>
