@@ -2,7 +2,8 @@
 {% block content %}
   <h2>Ajuste de stock</h2>
   <p class="muted">
-    Esto sirve para corregir cantidades sin tocar SQL. Queda registrado como movimiento <b>AJUSTE</b>.
+    Corrige cantidades sin tocar SQL. <b>No genera movimiento ni queda en el historial</b>
+    (para ajustes trazables usá Conteo). Modifica el stock de la ubicación directamente.
   </p>
 
   <form method="post" style="max-width:720px;">
@@ -10,7 +11,7 @@
     <div class="filters-grid" style="--cols: 3;">
       <div class="filter-item">
         <label>Item</label>
-        <select name="item_id" required>
+        <select name="item_id" class="js-buscar" required>
           <option value="" selected disabled>Seleccionar item...</option>
           {% for it in items %}
             <option value="{{ it.id }}">{{ it.code }} - {{ it.name }}</option>
@@ -56,7 +57,8 @@
   <hr />
   <p class="muted">
     Reglas:
-    <br>• <b>SUMAR</b> se registra como <code>Proveedor → tu ubicación</code> (Proveedor es externa).
-    <br>• <b>RESTAR</b> se registra como <code>tu ubicación → Baja/Descarte</code>.
+    <br>• <b>SUMAR</b> incrementa el stock de la ubicación elegida.
+    <br>• <b>RESTAR</b> descuenta el stock de la ubicación elegida.
+    <br>• El ajuste <b>no deja traza</b> (no aparece en Movimientos, métricas ni Descartes).
   </p>
 {% endblock %}

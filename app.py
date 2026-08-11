@@ -1835,45 +1835,20 @@ def admin_adjust_stock():
             return redirect(url_for("admin_adjust_stock"))
         location_id = int(location_id)
 
-        if proveedor is None or baja is None:
-            flash(
-                f"Faltan ubicaciones requeridas: '{LOCATION_PROVEEDOR}' y/o '{LOCATION_DESCARTES}'. "
-                "Revisá Ubicaciones.",
-                "error",
-            )
-            return redirect(url_for("admin_adjust_stock"))
-
-        # Para mantener coherencia del modelo (from/to obligatorios) registramos el ajuste como movimiento:
-        # - SUMAR: Proveedor -> ubicación (Proveedor es externa: no se descuenta stock allí)
-        # - RESTAR: ubicación -> Baja/Descarte (Baja es externa: sí acumulamos para ver descartes)
+        # AJUSTE SIN TRAZA (decisión del owner, punto 5B):
+        # Esta herramienta es para corregir errores sin dejar registro. Solo
+        # modifica el stock de la ubicación elegida; NO genera Movement, NO toca
+        # Descartes y NO alimenta métricas. Para ajustes trazables se usa Conteo.
+        # El 'reason' se mantiene obligatorio solo como recordatorio operativo,
+        # pero no se persiste en ningún lado.
         try:
             if action == "SUMAR":
-                from_id = proveedor.id
-                to_id = location_id
-
-                # Solo incrementamos destino (origen externo no se descuenta)
-                upsert_stock(item_id, to_id, qty)
-
-                obs = f"AJUSTE +{qty}: {reason}"
+                upsert_stock(item_id, location_id, qty)
             else:  # RESTAR
-                from_id = location_id
-                to_id = baja.id
+                upsert_stock(item_id, location_id, -qty)
 
-                upsert_stock(item_id, from_id, -qty)
-                upsert_stock(item_id, to_id, qty)
-
-                obs = f"AJUSTE -{qty}: {reason}"
-
-            db.session.add(Movement(
-                item_id=item_id,
-                qty=qty,
-                from_location_id=from_id,
-                to_location_id=to_id,
-                user_id=current_user.id,
-                observation=obs
-            ))
             db.session.commit()
-            flash("Ajuste registrado.", "ok")
+            flash("Ajuste aplicado (sin registro).", "ok")
         except Exception as e:
             db.session.rollback()
             flash(f"No se pudo ajustar: {e}", "error")
@@ -3328,6 +3303,8 @@ def movements_bulk():
         qtys = request.form.getlist("qty[]")
         pending_flags = request.form.getlist("generate_pending[]")
         pending_comments = request.form.getlist("pending_comment[]")
+        pending_return_items = request.form.getlist("pending_return_item_id[]")
+        pending_return_qtys = request.form.getlist("pending_return_qty[]")
         scrap_reasons = request.form.getlist("scrap_reason[]")
 
         if not (from_id_raw.isdigit() and to_id_raw.isdigit()):
@@ -3351,6 +3328,8 @@ def movements_bulk():
             qty_raw = (qtys[idx] or "").strip()
             pending_raw = (pending_flags[idx] or "").strip() if idx < len(pending_flags) else ""
             comment_raw = (pending_comments[idx] or "").strip() if idx < len(pending_comments) else ""
+            return_item_raw = (pending_return_items[idx] or "").strip() if idx < len(pending_return_items) else ""
+            return_qty_raw = (pending_return_qtys[idx] or "").strip() if idx < len(pending_return_qtys) else ""
             scrap_reason_raw = (scrap_reasons[idx] or "").strip() if idx < len(scrap_reasons) else ""
 
             if not item_raw and not qty_raw:
@@ -3361,6 +3340,8 @@ def movements_bulk():
                 "qty_raw": qty_raw,
                 "generate_pending": pending_raw == "1",
                 "pending_comment": comment_raw or None,
+                "pending_return_item_raw": return_item_raw,
+                "pending_return_qty_raw": return_qty_raw,
                 "scrap_reason": scrap_reason_raw,
             })
 
@@ -3422,11 +3403,37 @@ def movements_bulk():
                 )
                 return redirect(url_for("movements_bulk"))
 
+            # Devolución esperada del pendiente (opcional, misma flexibilidad que
+            # Movimientos): qué ítem debe volver y cuántas unidades.
+            #   return_item None -> vuelve el mismo item entregado
+            #   return_qty  None -> vuelve la misma cantidad entregada
+            pending_return_item_id = None
+            pending_return_qty = None
+            if line["generate_pending"]:
+                ret_raw = line["pending_return_item_raw"]
+                if ret_raw.isdigit() and int(ret_raw) != item_id:
+                    ret_it = Item.query.get(int(ret_raw))
+                    if not ret_it or not ret_it.is_active:
+                        flash(f"Linea {idx}: el ítem a devolver no existe o está dado de baja.", "error")
+                        return redirect(url_for("movements_bulk"))
+                    pending_return_item_id = ret_it.id
+                rq_raw = line["pending_return_qty_raw"]
+                if rq_raw.isdigit():
+                    if int(rq_raw) <= 0:
+                        flash(f"Linea {idx}: la cantidad a devolver debe ser mayor a 0.", "error")
+                        return redirect(url_for("movements_bulk"))
+                    if int(rq_raw) > qty:
+                        flash(f"Linea {idx}: la cantidad a devolver no puede superar la entregada.", "error")
+                        return redirect(url_for("movements_bulk"))
+                    pending_return_qty = int(rq_raw)
+
             parsed_lines.append({
                 "item_id": item_id,
                 "qty": qty,
                 "generate_pending": line["generate_pending"],
                 "pending_comment": line["pending_comment"],
+                "pending_return_item_id": pending_return_item_id,
+                "pending_return_qty": pending_return_qty,
                 "scrap_reason": line["scrap_reason"],
             })
 
@@ -3458,15 +3465,22 @@ def movements_bulk():
                 db.session.flush()
 
                 if line["generate_pending"]:
-                    pd = PendingDelivery(
-                        movement_id=m.id,
-                        responsible_from_id=current_user.id,
-                        responsible_to_id=pending_responsible_id,
-                        item_id=item_id,
-                        comment=line["pending_comment"],
-                        returned=False
-                    )
-                    db.session.add(pd)
+                    # Un pendiente por unidad que debe volver (cada uno qty 1),
+                    # igual criterio que Movimientos: cada unidad se cierra por
+                    # separado. 'cantidad a devolver' = cuántos pendientes de 1
+                    # se generan (default = cantidad entregada).
+                    n_pendientes = line["pending_return_qty"] or qty
+                    for _ in range(n_pendientes):
+                        db.session.add(PendingDelivery(
+                            movement_id=m.id,
+                            responsible_from_id=current_user.id,
+                            responsible_to_id=pending_responsible_id,
+                            item_id=item_id,
+                            return_item_id=line["pending_return_item_id"],
+                            return_qty=1,
+                            comment=line["pending_comment"],
+                            returned=False,
+                        ))
 
                 if is_to_descartes:
                     db.session.add(Scrap(
@@ -5806,12 +5820,16 @@ def repair_request_detail(rr_id: int):
     # Stock actual en Jaula por ítem (para el tope de entrega de no-serializados).
     jaula_stock = _jaula_stock_map()
 
+    # Ítems activos para el selector "qué deben devolver" de un pendiente.
+    items_list = Item.query.filter_by(is_active=True).order_by(Item.code).all()
+
     return render_template(
         "repair_request_detail.html",
         rr=rr,
         can_close=can_close,
         jaula_units=jaula_units,
         jaula_stock=jaula_stock,
+        items=items_list,
     )
 
 
@@ -5869,6 +5887,47 @@ def repair_request_close(rr_id: int):
                 return redirect(url_for("repair_request_detail", rr_id=rr.id))
             plan.append({"line": ln, "item": item, "delivered": delivered, "units": []})
 
+    # --- Pendientes de entrega (opcional, por línea, misma flexibilidad que
+    #     Movimientos: qué ítem y cuánto deben devolver). Se valida acá, todo o
+    #     nada, antes de tocar stock. Solo aplica a líneas con entrega > 0. ---
+    pending_responsible_id = None
+    any_pending = False
+    for p in plan:
+        ln = p["line"]
+        d = p["delivered"]
+        p["pending"] = False
+        p["pending_comment"] = None
+        p["pending_return_item_id"] = None
+        p["pending_return_qty"] = None
+        if request.form.get(f"pending_{ln.id}") != "1" or d <= 0:
+            continue
+        p["pending"] = True
+        any_pending = True
+        p["pending_comment"] = (request.form.get(f"pending_comment_{ln.id}", "") or "").strip() or None
+        ret_raw = (request.form.get(f"pending_return_item_id_{ln.id}", "") or "").strip()
+        if ret_raw.isdigit() and int(ret_raw) != p["item"].id:
+            ret_it = Item.query.get(int(ret_raw))
+            if not ret_it or not ret_it.is_active:
+                flash(f"«{p['item'].code} - {p['item'].name}»: el ítem a devolver no existe o está dado de baja.", "error")
+                return redirect(url_for("repair_request_detail", rr_id=rr.id))
+            p["pending_return_item_id"] = ret_it.id
+        rq_raw = (request.form.get(f"pending_return_qty_{ln.id}", "") or "").strip()
+        if rq_raw.isdigit():
+            if int(rq_raw) <= 0:
+                flash(f"«{p['item'].code} - {p['item'].name}»: la cantidad a devolver debe ser mayor a 0.", "error")
+                return redirect(url_for("repair_request_detail", rr_id=rr.id))
+            if int(rq_raw) > d:
+                flash(f"«{p['item'].code} - {p['item'].name}»: la cantidad a devolver no puede superar la entregada ({d}).", "error")
+                return redirect(url_for("repair_request_detail", rr_id=rr.id))
+            p["pending_return_qty"] = int(rq_raw)
+
+    if any_pending:
+        first_resp = LocationResponsible.query.filter_by(location_id=dest_id).first()
+        if not first_resp:
+            flash("El destino no tiene responsable asignado. Editá la ubicación antes de generar un pendiente.", "error")
+            return redirect(url_for("repair_request_detail", rr_id=rr.id))
+        pending_responsible_id = first_resp.user_id
+
     try:
         created = 0
         full = True
@@ -5894,6 +5953,21 @@ def repair_request_close(rr_id: int):
                 db.session.flush()
                 if p["units"]:
                     apply_serial_units_out(p["units"], dest_id)
+                if p.get("pending"):
+                    # Un pendiente por unidad a devolver (cada uno qty 1), mismo
+                    # criterio que Movimientos y Carga múltiple.
+                    n_pendientes = p["pending_return_qty"] or d
+                    for _ in range(n_pendientes):
+                        db.session.add(PendingDelivery(
+                            movement_id=m.id,
+                            responsible_from_id=current_user.id,
+                            responsible_to_id=pending_responsible_id,
+                            item_id=item.id,
+                            return_item_id=p["pending_return_item_id"],
+                            return_qty=1,
+                            comment=p["pending_comment"],
+                            returned=False,
+                        ))
                 created += 1
             p["line"].qty_entregada = d
 
