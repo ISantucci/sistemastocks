@@ -86,8 +86,15 @@
       </select>
     </div>
     <div class="pending-comment-wrap field">
-      <label>Comentario pendiente</label>
-      <input type="text" name="pending_comment[]" placeholder="Comentario del pendiente" style="width:100%;">
+      <label>Pendiente: devolución</label>
+      <input type="text" name="pending_comment[]" placeholder="Comentario del pendiente" style="width:100%; margin-bottom:6px;">
+      <select name="pending_return_item_id[]" class="pending-return-item" style="width:100%; margin-bottom:6px;">
+        <option value="">Devuelve el mismo ítem</option>
+        {% for i in items %}
+          <option value="{{ i.id }}">{{ i.code }} - {{ i.name }}</option>
+        {% endfor %}
+      </select>
+      <input type="number" name="pending_return_qty[]" min="1" placeholder="Cant. a devolver (igual a la entregada)" style="width:100%;">
     </div>
     <div class="field">
       <label>&nbsp;</label>
@@ -183,16 +190,36 @@
 
     initTomSelectFor(itemSelect);
 
+    // Selector "qué deben devolver" buscable (no se filtra por stock de origen:
+    // puede volver cualquier ítem, ej. entregás domo y deben traer Onvif).
+    var returnItemSel = line.querySelector(".pending-return-item");
+    if (returnItemSel && window.TomSelect && !returnItemSel.tomselect) {
+      new TomSelect(returnItemSel, window.TS_SINGLE_OPTS);
+    }
+
     var qtyEl = line.querySelector('input[name="qty[]"]');
     if (qtyEl) { qtyEl.addEventListener("input", function () { clampBulkQty(line); }); }
 
     function togglePendingComment() {
       if (pendingFlag.value === "1") {
         commentWrap.style.display = "block";
+        // Autorellenar la devolución con el mismo ítem y cantidad seleccionados
+        // en la línea (el usuario puede cambiarlos después).
+        var itemVal = itemSelect ? String(itemSelect.value || "") : "";
+        if (itemVal) {
+          if (returnItemSel && returnItemSel.tomselect) { returnItemSel.tomselect.setValue(itemVal, true); }
+          else if (returnItemSel) { returnItemSel.value = itemVal; }
+        }
+        var rqty = commentWrap.querySelector('input[name="pending_return_qty[]"]');
+        if (rqty && !rqty.value && qtyEl) { rqty.value = qtyEl.value; }
       } else {
         commentWrap.style.display = "none";
-        var input = commentWrap.querySelector("input");
+        var input = commentWrap.querySelector('input[name="pending_comment[]"]');
         if (input) input.value = "";
+        var rqty = commentWrap.querySelector('input[name="pending_return_qty[]"]');
+        if (rqty) rqty.value = "";
+        if (returnItemSel && returnItemSel.tomselect) { returnItemSel.tomselect.clear(true); }
+        else if (returnItemSel) { returnItemSel.value = ""; }
       }
     }
     pendingFlag.addEventListener("change", togglePendingComment);

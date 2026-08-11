@@ -87,6 +87,32 @@
           <input type="number" name="qty_entregada_{{ ln.id }}" min="0" max="{{ maxd }}" value="{{ maxd }}">
         </div>
       {% endif %}
+
+      <div class="rr-pending" style="margin-top:10px; border-top:1px dashed var(--border,#d0d5dd); padding-top:8px;">
+        <label style="display:inline-flex; align-items:center; gap:6px; cursor:pointer;">
+          <input type="checkbox" name="pending_{{ ln.id }}" value="1" class="rr-pending-flag" data-line="{{ ln.id }}">
+          Generar pendiente de entrega (deben devolver algo)
+        </label>
+        <div class="rr-pending-box" data-line="{{ ln.id }}" style="display:none; margin-top:8px; max-width:520px;">
+          <div class="field" style="margin-bottom:6px;">
+            <label>Comentario</label>
+            <input type="text" name="pending_comment_{{ ln.id }}" style="width:100%;">
+          </div>
+          <div class="field" style="margin-bottom:6px;">
+            <label>¿Qué deben devolver?</label>
+            <select name="pending_return_item_id_{{ ln.id }}" class="js-buscar" style="width:100%;">
+              <option value="">Devuelve el mismo ítem</option>
+              {% for i in items %}
+                <option value="{{ i.id }}">{{ i.code }} - {{ i.name }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="field">
+            <label>Cantidad a devolver</label>
+            <input type="number" name="pending_return_qty_{{ ln.id }}" min="1" placeholder="Igual a la entregada" style="width:100%;">
+          </div>
+        </div>
+      </div>
     </div>
     {% endfor %}
 
@@ -97,12 +123,20 @@
 <script>
 // Limita la selección de seriales por línea a la cantidad pedida.
 document.addEventListener("DOMContentLoaded", function () {
-  document.querySelectorAll('input[type="checkbox"][data-line]').forEach(function (cb) {
+  document.querySelectorAll('input[type="checkbox"][data-line]:not(.rr-pending-flag)').forEach(function (cb) {
     cb.addEventListener("change", function () {
       var line = cb.getAttribute("data-line");
       var max = parseInt(cb.getAttribute("data-max"), 10) || 0;
-      var checked = document.querySelectorAll('input[data-line="' + line + '"]:checked');
+      var checked = document.querySelectorAll('input[data-line="' + line + '"]:not(.rr-pending-flag):checked');
       if (checked.length > max) { cb.checked = false; }
+    });
+  });
+  // Mostrar/ocultar el detalle del pendiente por línea.
+  document.querySelectorAll(".rr-pending-flag").forEach(function (flag) {
+    flag.addEventListener("change", function () {
+      var line = flag.getAttribute("data-line");
+      var box = document.querySelector('.rr-pending-box[data-line="' + line + '"]');
+      if (box) box.style.display = flag.checked ? "block" : "none";
     });
   });
 });

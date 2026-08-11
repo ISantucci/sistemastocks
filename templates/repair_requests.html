@@ -59,7 +59,7 @@
     <div class="rr-line" style="display:flex; gap:12px; align-items:flex-end; margin-bottom:10px; flex-wrap:wrap;">
       <div class="field" style="flex:1; min-width:240px;">
         <label>Repuesto</label>
-        <select name="item_id[]" required>
+        <select name="item_id[]" class="js-buscar" required>
           <option value="" selected disabled>Seleccionar repuesto...</option>
           {% for it in items %}
             <option value="{{ it.id }}">{{ it.code }} - {{ it.name }}</option>
@@ -121,6 +121,12 @@ document.addEventListener("DOMContentLoaded", function () {
   function wireLine(line) {
     var rm = line.querySelector(".remove-line-btn");
     if (rm) rm.addEventListener("click", function () { line.remove(); });
+    // Selector de repuesto buscable/tipeable (las lineas se clonan, el init
+    // global de TomSelect no las alcanza, asi que lo inicializamos por linea).
+    var sel = line.querySelector('select[name="item_id[]"]');
+    if (sel && window.TomSelect && !sel.tomselect) {
+      new TomSelect(sel, window.TS_SINGLE_OPTS);
+    }
   }
   function addLine() {
     var tpl = document.getElementById("rr-line-template");
