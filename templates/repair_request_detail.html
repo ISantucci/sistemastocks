@@ -13,11 +13,21 @@
         <span class="badge badge-ok">CERRADA</span>
       {% elif rr.status == "CERRADA_PARCIAL" %}
         <span class="badge badge-warn">CERRADA PARCIAL</span>
+      {% elif rr.status == "CANCELADA" %}
+        <span class="badge badge-neutral">CANCELADA</span>
+      {% elif rr.status == "RECHAZADA" %}
+        <span class="badge badge-danger">RECHAZADA</span>
       {% else %}
         <span class="badge badge-neutral">PENDIENTE</span>
       {% endif %}
       {% if rr.closed_at %}
-        · Cerrada {{ rr.closed_at.strftime("%Y-%m-%d %H:%M") }}{% if rr.closed_by %} por {{ rr.closed_by.full_name or rr.closed_by.username }}{% endif %}.
+        {% if rr.status == "CANCELADA" %}
+          · Cancelada {{ rr.closed_at.strftime("%Y-%m-%d %H:%M") }}{% if rr.closed_by %} por {{ rr.closed_by.full_name or rr.closed_by.username }}{% endif %}.
+        {% elif rr.status == "RECHAZADA" %}
+          · Rechazada {{ rr.closed_at.strftime("%Y-%m-%d %H:%M") }}{% if rr.closed_by %} por {{ rr.closed_by.full_name or rr.closed_by.username }}{% endif %}.
+        {% else %}
+          · Cerrada {{ rr.closed_at.strftime("%Y-%m-%d %H:%M") }}{% if rr.closed_by %} por {{ rr.closed_by.full_name or rr.closed_by.username }}{% endif %}.
+        {% endif %}
       {% endif %}
     </p>
   </div>
@@ -36,7 +46,7 @@
           <td>{{ ln.item.code }}</td>
           <td>{{ ln.item.name }}{% if ln.item.serialized %} <span class="badge badge-neutral">serial</span>{% endif %}</td>
           <td class="num">{{ fmt_qty(ln.qty, ln.item) }}</td>
-          <td class="num">{% if rr.status == "PENDIENTE" %}<span class="muted">—</span>{% else %}{{ fmt_qty(ln.qty_entregada, ln.item) }}{% endif %}</td>
+          <td class="num">{% if rr.status in ("PENDIENTE", "CANCELADA", "RECHAZADA") %}<span class="muted">—</span>{% else %}{{ fmt_qty(ln.qty_entregada, ln.item) }}{% endif %}</td>
         </tr>
         {% endfor %}
       </tbody>
@@ -48,12 +58,58 @@
 <div class="card"><strong>Observación:</strong> {{ rr.observation }}</div>
 {% endif %}
 
+{% if rr.close_reason %}
+<div class="card">
+  <strong>Motivo de {{ "la cancelación" if rr.status == "CANCELADA" else "rechazo" }}:</strong>
+  {{ rr.close_reason }}
+</div>
+{% endif %}
+
+{% if can_cancel %}
+<div class="card">
+  <div class="card-header"><span class="card-title">Cancelar solicitud</span></div>
+  <p class="muted">
+    Si ya no necesitás estos repuestos, cancelá la solicitud. Queda registrada como
+    CANCELADA y deja de aparecer como pendiente para el depósito. No afecta el stock.
+  </p>
+  <form method="post" action="{{ url_for('repair_request_cancel', rr_id=rr.id) }}"
+        onsubmit="return confirm('¿Cancelar la solicitud {{ rr.number }}? No se puede deshacer.');">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="field" style="max-width:520px;">
+      <label>Motivo <span class="muted">(obligatorio)</span></label>
+      <input type="text" name="close_reason" maxlength="255" required style="width:100%;">
+    </div>
+    <button type="submit" class="btn btn-danger" style="margin-top:8px;">Cancelar solicitud</button>
+  </form>
+</div>
+{% endif %}
+
+{% if can_reject %}
+<div class="card">
+  <div class="card-header"><span class="card-title">Rechazar solicitud</span></div>
+  <p class="muted">
+    Usá esto cuando <b>no se va a entregar nada</b>. Queda como RECHAZADA con el motivo.
+    No genera movimientos ni afecta el stock.
+  </p>
+  <form method="post" action="{{ url_for('repair_request_reject', rr_id=rr.id) }}"
+        onsubmit="return confirm('¿Rechazar la solicitud {{ rr.number }}? No se puede deshacer.');">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="field" style="max-width:520px;">
+      <label>Motivo <span class="muted">(obligatorio)</span></label>
+      <input type="text" name="close_reason" maxlength="255" required style="width:100%;">
+    </div>
+    <button type="submit" class="btn btn-danger" style="margin-top:8px;">Rechazar solicitud</button>
+  </form>
+</div>
+{% endif %}
+
 {% if can_close %}
 <div class="card">
   <div class="card-header"><span class="card-title">Cerrar y entregar</span></div>
   <p class="muted">
     Elegí qué entregás de cada repuesto. Para los serializados marcá los seriales; para el resto poné la cantidad.
     Podés entregar menos de lo pedido (cierre parcial). Se genera el movimiento Jaula → {{ rr.dest_location.name if rr.dest_location else "camioneta" }}.
+    Si no vas a entregar <b>nada</b>, no cierres con 0: usá «Rechazar solicitud» más abajo.
   </p>
   <form method="post" action="{{ url_for('repair_request_close', rr_id=rr.id) }}"
         onsubmit="return confirm('¿Cerrar la solicitud {{ rr.number }} y generar los movimientos de entrega?');">
@@ -77,7 +133,7 @@
             {% endfor %}
           </div>
         {% else %}
-          <p class="muted" style="margin:8px 0 0;">No hay seriales disponibles en la Jaula. Se entrega 0 (cierre parcial).</p>
+          <p class="muted" style="margin:8px 0 0;">No hay seriales disponibles en la Jaula: de este ítem se entrega 0. Si no hay nada para entregar en toda la solicitud, rechazala en vez de cerrarla.</p>
         {% endif %}
       {% else %}
         {% set avail = jaula_stock.get(ln.item.id, 0) %}

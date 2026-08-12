@@ -99,6 +99,10 @@
               <span class="badge badge-ok">CERRADA</span>
             {% elif r.status == "CERRADA_PARCIAL" %}
               <span class="badge badge-warn">CERRADA PARCIAL</span>
+            {% elif r.status == "CANCELADA" %}
+              <span class="badge badge-neutral">CANCELADA</span>
+            {% elif r.status == "RECHAZADA" %}
+              <span class="badge badge-danger">RECHAZADA</span>
             {% else %}
               <span class="badge badge-neutral">PENDIENTE</span>
             {% endif %}
