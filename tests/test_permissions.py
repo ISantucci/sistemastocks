@@ -37,7 +37,9 @@ GET_MATRIX = [
     ("/items", {"ADMIN", "SUPERVISOR", "TECNICO", "LECTOR"}),
     ("/perfil", {"ADMIN", "SUPERVISOR", "TECNICO", "LECTOR"}),
     ("/remitos", {"ADMIN", "SUPERVISOR", "TECNICO", "LECTOR"}),
-    ("/items/new", {"ADMIN"}),
+    # El SUPERVISOR gestiona el catálogo de ítems igual que el ADMIN.
+    ("/items/new", {"ADMIN", "SUPERVISOR"}),
+    ("/items/export.xlsx", {"ADMIN", "SUPERVISOR", "LECTOR"}),
     ("/movements", {"ADMIN", "SUPERVISOR"}),
     ("/movements/bulk", {"ADMIN", "SUPERVISOR"}),
     ("/movements/export.csv", {"ADMIN", "SUPERVISOR"}),
@@ -92,13 +94,30 @@ def test_admin_crea_ubicacion(env):
     assert A.Location.query.count() == n0 + 1
 
 
-def test_supervisor_no_crea_item(env):
+def test_supervisor_crea_item(env):
+    """El SUPERVISOR trabaja el catálogo de ítems igual que el ADMIN.
+
+    Cambio deliberado: antes esta ruta era solo ADMIN. Lo que sigue reservado
+    a ADMIN es el panel /admin, la gestión de usuarios y la importación masiva
+    (ver test_solo_admin_crea_usuarios y la matriz GET_MATRIX).
+    """
     A, c, as_role = env
     make_category(A, "Cables", "CAB")
     n0 = A.Item.query.count()
     as_role("SUPERVISOR").post("/items/new", data={
         "category_id": A.Category.query.first().id, "name": "Item", "stock_min": "0",
     })
+    assert A.Item.query.count() == n0 + 1
+
+
+def test_tecnico_y_lector_no_crean_item(env):
+    A, c, as_role = env
+    make_category(A, "Cables", "CAB")
+    n0 = A.Item.query.count()
+    for role in ("TECNICO", "LECTOR"):
+        as_role(role).post("/items/new", data={
+            "category_id": A.Category.query.first().id, "name": f"Item{role}", "stock_min": "0",
+        })
     assert A.Item.query.count() == n0
 
 

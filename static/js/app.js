@@ -65,11 +65,38 @@ document.addEventListener('keydown', function (e) {
     if (open) { closeModal(open.id); }
   }
 });
-document.addEventListener('click', function (e) {
-  if (e.target.classList && e.target.classList.contains('modal-overlay') && e.target.classList.contains('open')) {
-    closeModal(e.target.id);
+/* Cierre por click en el fondo.
+   El evento 'click' del DOM se dispara en el ANCESTRO COMUN de mousedown y
+   mouseup. Si el usuario empieza a seleccionar texto DENTRO del modal y suelta
+   el boton afuera, ese ancestro comun termina siendo el .modal-overlay y el
+   modal se cerraba, perdiendo lo cargado. Para evitarlo se exige que el gesto
+   EMPIECE y TERMINE sobre el overlay. */
+(function () {
+  var pressStartedOnOverlay = null;
+
+  function isOpenOverlay(el) {
+    return !!(el && el.classList &&
+      el.classList.contains('modal-overlay') &&
+      el.classList.contains('open') &&
+      // El modal global de detalle (base.html) tiene su propio cierre, que
+      // ademas limpia el iframe y sincroniza el historial. No lo tocamos.
+      !el.classList.contains('detail-overlay'));
   }
-});
+
+  document.addEventListener('mousedown', function (e) {
+    // Solo boton principal; ignoramos click derecho / rueda.
+    pressStartedOnOverlay = (e.button === 0 && isOpenOverlay(e.target)) ? e.target : null;
+  }, true);
+
+  document.addEventListener('mouseup', function (e) {
+    var started = pressStartedOnOverlay;
+    pressStartedOnOverlay = null;
+    if (e.button !== 0) return;
+    if (started && started === e.target && isOpenOverlay(e.target)) {
+      closeModal(e.target.id);
+    }
+  }, true);
+})();
 
 /* ---------- Selects buscables (select.js-buscar) ---------- */
 window.TS_SINGLE_OPTS = {
@@ -81,10 +108,25 @@ window.TS_SINGLE_OPTS = {
   onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
   onChange: function () { this.blur(); }
 };
+/* Multi-seleccion buscable (select.js-multi-prov, multiple). A diferencia del
+   single, NO cierra ni pierde el foco al elegir, para poder cargar varios
+   seguidos. */
+window.TS_MULTI_OPTS = {
+  create: false,
+  plugins: ['remove_button'],
+  sortField: { field: 'text', direction: 'asc' },
+  placeholder: 'Elegí uno o varios...',
+  closeAfterSelect: false,
+  hideSelected: true
+};
 document.addEventListener('DOMContentLoaded', function () {
   document.querySelectorAll('select.js-buscar').forEach(function (el) {
     if (el.tomselect) return;
     new TomSelect(el, window.TS_SINGLE_OPTS);
+  });
+  document.querySelectorAll('select.js-multi-prov').forEach(function (el) {
+    if (el.tomselect) return;
+    new TomSelect(el, window.TS_MULTI_OPTS);
   });
 });
 

@@ -4,9 +4,17 @@
 {% block content %}
 <div class="page-header">
   <div><h2>Ítems</h2><p>Catálogo de ítems del sistema.</p></div>
-  {% if me and me.role == "ADMIN" %}
-    <button type="button" class="btn btn-primary" onclick="openModal('modal-item-new')">+ Nuevo ítem</button>
-  {% endif %}
+  <div style="display:flex; gap:8px; align-items:center;">
+    {# Export disponible para ADMIN, SUPERVISOR y LECTOR. Respeta los filtros
+       y el orden actuales: se baja exactamente lo que se está viendo. #}
+    <a class="btn btn-secondary"
+       href="{{ url_for('items_export_xlsx', category_id=selected_category_id, trackable=selected_trackable, q=selected_q, item_id=selected_item_id, sort_by=selected_sort_by, sort_dir=selected_sort_dir) }}">
+      Exportar a Excel
+    </a>
+    {% if can_edit_items %}
+      <button type="button" class="btn btn-primary" onclick="openModal('modal-item-new')">+ Nuevo ítem</button>
+    {% endif %}
+  </div>
 </div>
 
 <div class="card">
@@ -58,8 +66,9 @@
           <th class="num"><a href="{{ url_for('items', category_id=selected_category_id, trackable=selected_trackable, q=selected_q, item_id=selected_item_id, sort_by='stock_min', sort_dir='desc' if selected_sort_by == 'stock_min' and selected_sort_dir == 'asc' else 'asc') }}">Stock seg.{% if selected_sort_by == 'stock_min' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
           <th><a href="{{ url_for('items', category_id=selected_category_id, trackable=selected_trackable, q=selected_q, item_id=selected_item_id, sort_by='description', sort_dir='desc' if selected_sort_by == 'description' and selected_sort_dir == 'asc' else 'asc') }}">Descripción{% if selected_sort_by == 'description' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
           <th><a href="{{ url_for('items', category_id=selected_category_id, trackable=selected_trackable, q=selected_q, item_id=selected_item_id, sort_by='is_active', sort_dir='desc' if selected_sort_by == 'is_active' and selected_sort_dir == 'asc' else 'asc') }}">Activo{% if selected_sort_by == 'is_active' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th>Proveedores</th>
           <th>Link de referencia</th>
-          {% if me and me.role == "ADMIN" %}<th>Acciones</th>{% endif %}
+          {% if can_edit_items %}<th>Acciones</th>{% endif %}
         </tr>
       </thead>
       <tbody>
@@ -77,20 +86,21 @@
           <td class="num">{{ "-" if it.trackable else it.stock_min }}</td>
           <td>{{ it.description or "" }}</td>
           <td>{% if it.is_active %}<span class="badge badge-ok">Activo</span>{% else %}<span class="badge badge-danger">Inactivo</span>{% endif %}</td>
+          <td>{{ item_supplier_names(it) or "—" }}</td>
           <td>{% if it.reference_link %}<a href="{{ it.reference_link }}" target="_blank" rel="noopener noreferrer">Abrir</a>{% else %}—{% endif %}</td>
-          {% if me and me.role == "ADMIN" %}
+          {% if can_edit_items %}
           <td class="actions-cell"><button type="button" class="btn btn-secondary btn-sm" onclick="openModal('modal-item-{{ it.id }}')">Editar</button></td>
           {% endif %}
         </tr>
         {% else %}
-        <tr><td colspan="{% if me and me.role == 'ADMIN' %}9{% else %}8{% endif %}" class="muted">Sin ítems.</td></tr>
+        <tr><td colspan="{% if can_edit_items %}10{% else %}9{% endif %}" class="muted">Sin ítems.</td></tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
 </div>
 
-{% if me and me.role == "ADMIN" %}
+{% if can_edit_items %}
 <!-- Modal: nuevo item -->
 <div class="modal-overlay" id="modal-item-new">
   <div class="modal">
@@ -112,6 +122,15 @@
         <div class="field"><label>Nombre</label><input name="name" required><div class="muted">No puede repetir el nombre de otro ítem.</div></div>
         <div class="field"><label>Descripción (opcional)</label><input name="description"></div>
         <div class="field"><label>Link de referencia</label><input type="url" name="reference_link" maxlength="500" placeholder="https://..."><div class="muted">Opcional. Link de referencia de compra.</div></div>
+        <input type="hidden" name="manages_suppliers" value="1">
+        <div class="field"><label>Proveedores</label>
+          <select name="supplier_ids" class="js-multi-prov" multiple>
+            {% for s in suppliers %}
+              <option value="{{ s.id }}">{{ s.business_name or s.contact_name }}{% if s.business_name and s.contact_name %} ({{ s.contact_name }}){% endif %}</option>
+            {% endfor %}
+          </select>
+          <div class="muted">Opcional. Podés elegir más de uno.</div>
+        </div>
         <div class="field"><label>Forma de contabilización</label>
           <select name="unit">
             <option value="unidad" selected>Unidad</option>
@@ -149,6 +168,33 @@
           </select>
           <div class="muted">La categoría no se puede cambiar (el código depende de ella).</div>
         </div>
+        {% set sel_ids = item_supplier_ids.get(it.id, []) %}
+        {% set pref_id = item_preferred_id.get(it.id) %}
+        <input type="hidden" name="manages_suppliers" value="1">
+        <div class="field"><label>Proveedores</label>
+          <select name="supplier_ids" class="js-multi-prov" multiple>
+            {% for s in suppliers %}
+              <option value="{{ s.id }}" {% if s.id in sel_ids %}selected{% endif %}>{{ s.business_name or s.contact_name }}{% if s.business_name and s.contact_name %} ({{ s.contact_name }}){% endif %}</option>
+            {% endfor %}
+            {# Proveedores dados de baja que ya estaban vinculados: se muestran
+               para no perderlos silenciosamente al guardar. #}
+            {% for l in it.supplier_links %}
+              {% if l.supplier and not l.supplier.is_active %}
+                <option value="{{ l.supplier_id }}" selected>{{ l.supplier.business_name or l.supplier.contact_name }} (dado de baja)</option>
+              {% endif %}
+            {% endfor %}
+          </select>
+          <div class="muted">Podés elegir más de uno. Dejalo vacío para quitarlos todos.</div>
+        </div>
+        <div class="field"><label>Proveedor preferido</label>
+          <select name="preferred_supplier_id">
+            <option value="">— Sin preferencia —</option>
+            {% for s in suppliers %}
+              <option value="{{ s.id }}" {% if pref_id == s.id %}selected{% endif %}>{{ s.business_name or s.contact_name }}</option>
+            {% endfor %}
+          </select>
+          <div class="muted">Opcional. Tiene que estar entre los proveedores elegidos arriba. Todavía no dispara nada: queda listo para cuando se automaticen las solicitudes de compra.</div>
+        </div>
         <div class="field"><label>Forma de contabilización</label>
           <select name="unit">
             <option value="unidad" {% if it.unit != 'metros' %}selected{% endif %}>Unidad</option>
@@ -166,7 +212,7 @@
         <button type="submit" class="btn btn-primary">Guardar cambios</button>
       </div>
     </form>
-    {% if me and me.role == "ADMIN" %}
+    {% if can_edit_items %}
     <form method="post" action="{{ url_for('item_delete', item_id=it.id) }}"
           onsubmit="return confirm('¿Eliminar definitivamente el ítem {{ it.code }} - {{ it.name }}? No se puede deshacer. Solo funciona si el ítem no tiene historial (movimientos/pendientes/stock).');"
           style="border-top:1px solid var(--border); padding:12px 16px;">
