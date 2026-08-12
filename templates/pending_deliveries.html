@@ -4,30 +4,106 @@
 {% block content %}
 <div class="page-header"><div><h2>Pendientes de entrega</h2><p>Entregas sin devolución confirmada.</p></div></div>
 
+{# Filtros: mismo patrón que Movimientos / Descartes (colapsables en mobile,
+   siempre visibles en desktop). El estilo vive en app.css. #}
+<details class="filters-collapse" id="pendFilters">
+<summary class="filters-toggle">
+  <span class="nav-icon">&#9776;</span> Filtros
+  <span class="filters-caret">&#9662;</span>
+</summary>
+<div class="card">
+  <form method="get" class="filters-grid">
+    <div class="field">
+      <label>Desde</label>
+      <input type="date" name="from_date" value="{{ from_date }}">
+    </div>
+    <div class="field">
+      <label>Hasta</label>
+      <input type="date" name="to_date" value="{{ to_date }}">
+    </div>
+    <div class="field">
+      <label>Ítem</label>
+      <select name="item_id" class="js-buscar">
+        <option value="">Todos</option>
+        {% for it in items %}
+          <option value="{{ it.id }}" {% if item_filter and (item_filter|string) == (it.id|string) %}selected{% endif %}>{{ it.code }} - {{ it.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label>Entrega</label>
+      <select name="from_user_id" class="js-buscar">
+        <option value="">Todos</option>
+        {% for u in users %}
+          <option value="{{ u.id }}" {% if from_user_filter and (from_user_filter|string) == (u.id|string) %}selected{% endif %}>{{ u.full_name or u.username }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    {% if me.role != "TECNICO" %}
+    <div class="field">
+      <label>Recibe</label>
+      <select name="to_user_id" class="js-buscar">
+        <option value="">Todos</option>
+        {% for u in users %}
+          <option value="{{ u.id }}" {% if to_user_filter and (to_user_filter|string) == (u.id|string) %}selected{% endif %}>{{ u.full_name or u.username }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    {% endif %}
+    <div class="field">
+      <label>Estado</label>
+      <select name="status">
+        <option value="">Todos</option>
+        <option value="PENDIENTE" {% if status_filter == "PENDIENTE" %}selected{% endif %}>Pendiente</option>
+        <option value="DEVUELTO" {% if status_filter == "DEVUELTO" %}selected{% endif %}>Devuelto</option>
+      </select>
+    </div>
+    <input type="hidden" name="sort_by" value="{{ selected_sort_by or 'date' }}">
+    <input type="hidden" name="sort_dir" value="{{ selected_sort_dir or 'desc' }}">
+    <div class="field-actions">
+      <button type="submit" class="btn btn-primary">Aplicar filtros</button>
+      <a href="{{ url_for('pending_deliveries') }}" class="btn btn-secondary">Limpiar</a>
+    </div>
+  </form>
+</div>
+</details>
+
+{% set _args = {'from_date': from_date, 'to_date': to_date, 'item_id': item_filter,
+                'from_user_id': from_user_filter, 'to_user_id': to_user_filter,
+                'status': status_filter} %}
+
 <div class="table-card">
   <div class="table-scroll">
     <table class="data-table">
       <thead>
         <tr>
-          <th><a href="{{ url_for('pending_deliveries', sort_by='date', sort_dir='asc' if selected_sort_by == 'date' and selected_sort_dir == 'desc' else 'desc') }}">Fecha{% if selected_sort_by == 'date' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th><a href="{{ url_for('pending_deliveries', sort_by='date', sort_dir='asc' if selected_sort_by == 'date' and selected_sort_dir == 'desc' else 'desc', **_args) }}">Fecha{% if selected_sort_by == 'date' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
           <th>Entrega</th><th>Recibe</th>
-          <th><a href="{{ url_for('pending_deliveries', sort_by='item', sort_dir='desc' if selected_sort_by == 'item' and selected_sort_dir == 'asc' else 'asc') }}">ID Item{% if selected_sort_by == 'item' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
-          <th>Nombre item</th><th>Debe devolver</th><th>Comentario</th><th>Devuelto</th><th>Acción</th>
+          <th><a href="{{ url_for('pending_deliveries', sort_by='item', sort_dir='desc' if selected_sort_by == 'item' and selected_sort_dir == 'asc' else 'asc', **_args) }}">Entregado{% if selected_sort_by == 'item' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th>Debe devolver</th><th class="num">Cant.</th>
+          <th>Comentario</th><th>Estado</th><th>Acción</th>
         </tr>
       </thead>
       <tbody>
         {% for p in pendings %}
+        {% set swap = p.return_item_id and p.return_item_id != p.item_id %}
+        {% set ret_item = p.return_item if swap else p.item %}
         <tr>
           <td>{{ p.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
           <td>{{ p.responsible_from.username }}</td>
           <td>{{ p.responsible_to.username }}</td>
-          <td>{{ p.item.code }}</td>
-          <td>{{ p.item.name }}</td>
-          {% set swap = p.return_item_id and p.return_item_id != p.item_id %}
+          {# Ítem ENTREGADO: código y nombre. #}
+          <td>{{ p.item.code }} — {{ p.item.name }}</td>
+          {# Ítem que DEBE VOLVER: si es distinto se muestra su código Y su
+             nombre (antes solo salía el código). Si es el mismo, se aclara. #}
           <td>
-            {% if swap %}<span class="badge badge-warn">{{ p.return_item.code }}</span> x{{ fmt_qty(p.return_qty or p.movement.qty, p.return_item) }}
-            {% else %}<span class="muted">mismo</span> x{{ fmt_qty(p.return_qty or p.movement.qty, p.item) }}{% endif %}
+            {% if swap %}
+              <span class="badge badge-warn">{{ p.return_item.code }}</span> {{ p.return_item.name }}
+            {% else %}
+              <span class="muted">mismo ítem</span>
+            {% endif %}
           </td>
+          <td class="num">{{ fmt_qty(p.return_qty or p.movement.qty, ret_item) }}</td>
           <td>{{ p.comment or "" }}</td>
           <td>
             {% if p.returned %}
@@ -74,7 +150,7 @@
           </td>
         </tr>
         {% else %}
-        <tr><td colspan="9" class="muted">Sin pendientes.</td></tr>
+        <tr><td colspan="9" class="muted">Sin pendientes con esos filtros.</td></tr>
         {% endfor %}
       </tbody>
     </table>

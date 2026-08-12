@@ -1,10 +1,11 @@
 /* Compat temporal para pantallas todavia no re-maquetadas (Paso 2).
    Se elimina cuando todas las vistas usen el sistema de diseno nuevo. */
-.filters-grid{--cols:5;display:grid;grid-template-columns:repeat(var(--cols),minmax(180px,1fr));gap:12px;align-items:end;margin-bottom:12px;}
+/* .filters-grid se sacó de acá: legacy.css se carga DESPUÉS de app.css y su
+   grilla de 5 columnas fijas pisaba el auto-fit de app.css, así que todas las
+   pantallas con filtros se veían con anchos distintos a los del diseño nuevo.
+   La única definición válida vive ahora en app.css. */
 .filter{grid-column:var(--col,1)/span var(--span,1);grid-row:var(--row,1);}
 .filter-item{display:flex;flex-direction:column;}
 .filters-actions{display:flex;gap:10px;align-items:center;}
 .muted{color:#777;}
 .row{display:flex;gap:16px;flex-wrap:wrap;}
-@media (max-width:1100px){.filters-grid{--cols:3;}}
-@media (max-width:700px){.filters-grid{--cols:1;}}

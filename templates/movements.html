@@ -92,7 +92,9 @@
       </div>
     </div>
 
-    {% if not is_tecnico %}
+    {# Los pendientes de entrega los genera SOLO ADMIN/SUPERVISOR (validado
+       también en backend, ver movements() en app.py). #}
+    {% if me.role in ("ADMIN", "SUPERVISOR") %}
     <div style="margin-top:14px;">
       <label class="check-inline">
         <input type="checkbox" id="generate_pending" name="generate_pending" value="1">
@@ -147,15 +149,7 @@
 </div>
 
 <style>
-  .filters-collapse{margin-bottom:14px;}
-  .filters-toggle{list-style:none;cursor:pointer;display:inline-flex;align-items:center;gap:8px;
-    padding:8px 14px;border:1px solid var(--border,#d0d5dd);border-radius:8px;
-    font-weight:600;font-size:14px;background:var(--surface,#fff);user-select:none;}
-  .filters-toggle::-webkit-details-marker{display:none;}
-  .filters-collapse[open] .filters-caret{transform:rotate(180deg);}
-  .filters-caret{transition:transform .15s ease;margin-left:2px;}
-  .filters-collapse .card{margin-top:10px;}
-  @media (min-width:768px){ .filters-toggle{display:none;} .filters-collapse .card{margin-top:0;} }
+  /* El estilo de .filters-collapse / .filters-toggle vive en app.css. */
   .serial-pick-list{display:flex;flex-wrap:wrap;gap:8px;margin-top:4px;}
   .serial-pick-list label{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--border,#d0d5dd);
     border-radius:8px;padding:6px 10px;font-size:14px;cursor:pointer;background:var(--surface,#fff);}
