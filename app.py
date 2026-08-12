@@ -800,7 +800,11 @@ class RepairRequest(db.Model):
     number = db.Column(db.String(32), unique=True, nullable=False)  # SR-2026-0001
 
     # PENDIENTE (recién creada) / CERRADA (entregada completa) /
-    # CERRADA_PARCIAL (se entregó menos de lo pedido por falta de stock).
+    # CERRADA_PARCIAL (se entregó ALGO pero menos de lo pedido) /
+    # CANCELADA (el técnico dio de baja su propia solicitud) /
+    # RECHAZADA (admin/supervisor la rechaza, no se entrega nada).
+    # CANCELADA y RECHAZADA son estados terminales SIN efecto sobre stock,
+    # movimientos ni pendientes: la solicitud simplemente no se ejecuta.
     status = db.Column(db.String(20), nullable=False, default="PENDIENTE")
 
     created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
@@ -810,6 +814,9 @@ class RepairRequest(db.Model):
 
     closed_at = db.Column(db.DateTime, nullable=True)
     closed_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    # Motivo de cancelación (técnico) o rechazo (admin/supervisor). Aditivo y
+    # nullable: el schema auto-sync lo agrega con ALTER TABLE ADD COLUMN.
+    close_reason = db.Column(db.String(255), nullable=True)
 
     created_by = db.relationship("User", foreign_keys=[created_by_user_id])
     closed_by = db.relationship("User", foreign_keys=[closed_by_user_id])
@@ -5807,6 +5814,14 @@ def repair_request_detail(rr_id: int):
         return redirect(url_for("repair_requests"))
 
     can_close = current_user.role in ("ADMIN", "SUPERVISOR") and rr.status == "PENDIENTE"
+    # El técnico cancela SOLO su propia solicitud y solo mientras esté PENDIENTE.
+    can_cancel = (
+        current_user.role == "TECNICO"
+        and rr.created_by_user_id == current_user.id
+        and rr.status == "PENDIENTE"
+    )
+    # Admin/supervisor rechazan una solicitud PENDIENTE (no se entrega nada).
+    can_reject = current_user.role in ("ADMIN", "SUPERVISOR") and rr.status == "PENDIENTE"
 
     # Seriales disponibles (EN_STOCK) en la Jaula por ítem, para el cierre.
     jaula = get_jaula_location()
@@ -5827,10 +5842,82 @@ def repair_request_detail(rr_id: int):
         "repair_request_detail.html",
         rr=rr,
         can_close=can_close,
+        can_cancel=can_cancel,
+        can_reject=can_reject,
         jaula_units=jaula_units,
         jaula_stock=jaula_stock,
         items=items_list,
     )
+
+
+@app.route("/solicitudes-repuestos/<int:rr_id>/cancelar", methods=["POST"])
+@login_required
+@role_required("TECNICO")
+def repair_request_cancel(rr_id: int):
+    """El técnico cancela su propia solicitud (solo si sigue PENDIENTE).
+
+    Estado terminal SIN efecto sobre stock: no genera ni revierte movimientos,
+    porque una solicitud PENDIENTE todavía no tocó inventario.
+    """
+    rr = RepairRequest.query.get_or_404(rr_id)
+
+    # Validación real en backend, no solo ocultar el botón.
+    if rr.created_by_user_id != current_user.id:
+        flash("Solo podés cancelar tus propias solicitudes.", "error")
+        return redirect(url_for("repair_requests"))
+    if rr.status != "PENDIENTE":
+        flash("Solo se puede cancelar una solicitud PENDIENTE.", "error")
+        return redirect(url_for("repair_request_detail", rr_id=rr.id))
+
+    reason = (request.form.get("close_reason", "") or "").strip()
+    if not reason:
+        flash("Escribí el motivo de la cancelación.", "error")
+        return redirect(url_for("repair_request_detail", rr_id=rr.id))
+
+    try:
+        rr.status = "CANCELADA"
+        rr.closed_at = now_ar()
+        rr.closed_by_user_id = current_user.id
+        rr.close_reason = reason[:255]
+        db.session.commit()
+        flash(f"Solicitud {rr.number} cancelada.", "ok")
+    except Exception as e:
+        db.session.rollback()
+        flash(f"No se pudo cancelar la solicitud: {e}", "error")
+    return redirect(url_for("repair_request_detail", rr_id=rr.id))
+
+
+@app.route("/solicitudes-repuestos/<int:rr_id>/rechazar", methods=["POST"])
+@login_required
+@role_required("ADMIN", "SUPERVISOR")
+def repair_request_reject(rr_id: int):
+    """Admin/supervisor rechazan la solicitud: no se entrega nada.
+
+    Estado terminal SIN efecto sobre stock. Este es el camino correcto cuando
+    no se va a entregar ningún ítem; NO se cierra con cantidad 0 (eso quedaría
+    mal registrado como CERRADA_PARCIAL).
+    """
+    rr = RepairRequest.query.get_or_404(rr_id)
+    if rr.status != "PENDIENTE":
+        flash("Solo se puede rechazar una solicitud PENDIENTE.", "error")
+        return redirect(url_for("repair_request_detail", rr_id=rr.id))
+
+    reason = (request.form.get("close_reason", "") or "").strip()
+    if not reason:
+        flash("Escribí el motivo del rechazo.", "error")
+        return redirect(url_for("repair_request_detail", rr_id=rr.id))
+
+    try:
+        rr.status = "RECHAZADA"
+        rr.closed_at = now_ar()
+        rr.closed_by_user_id = current_user.id
+        rr.close_reason = reason[:255]
+        db.session.commit()
+        flash(f"Solicitud {rr.number} rechazada.", "ok")
+    except Exception as e:
+        db.session.rollback()
+        flash(f"No se pudo rechazar la solicitud: {e}", "error")
+    return redirect(url_for("repair_request_detail", rr_id=rr.id))
 
 
 @app.route("/solicitudes-repuestos/<int:rr_id>/cerrar", methods=["POST"])
@@ -5839,7 +5926,7 @@ def repair_request_detail(rr_id: int):
 def repair_request_close(rr_id: int):
     rr = RepairRequest.query.get_or_404(rr_id)
     if rr.status != "PENDIENTE":
-        flash("La solicitud ya fue cerrada.", "error")
+        flash("La solicitud ya no está PENDIENTE.", "error")
         return redirect(url_for("repair_request_detail", rr_id=rr.id))
 
     jaula = get_jaula_location()
@@ -5886,6 +5973,16 @@ def repair_request_close(rr_id: int):
                 flash(f"«{item.code} - {item.name}»: no hay tanto en Jaula (disponible {avail}).", "error")
                 return redirect(url_for("repair_request_detail", rr_id=rr.id))
             plan.append({"line": ln, "item": item, "delivered": delivered, "units": []})
+
+    # --- No se cierra una solicitud sin entregar nada. Cerrar con 0 en todas
+    #     las líneas quedaba registrado como CERRADA_PARCIAL, que es un estado
+    #     equivocado: si no se entrega nada, corresponde RECHAZADA (con motivo).
+    if sum(p["delivered"] for p in plan) <= 0:
+        flash(
+            "No estás entregando ningún repuesto. Si no vas a entregar nada, "
+            "usá «Rechazar solicitud» e indicá el motivo.", "error",
+        )
+        return redirect(url_for("repair_request_detail", rr_id=rr.id))
 
     # --- Pendientes de entrega (opcional, por línea, misma flexibilidad que
     #     Movimientos: qué ítem y cuánto deben devolver). Se valida acá, todo o
