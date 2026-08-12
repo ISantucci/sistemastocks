@@ -195,7 +195,7 @@
 </div>
 
 <!-- Modal global de detalle (remitos, solicitudes) -->
-<div class="modal-overlay detail-overlay" id="detail-modal" onclick="if(event.target===this) dismissDetail()">
+<div class="modal-overlay detail-overlay" id="detail-modal">
   <div class="detail-box">
     <button type="button" class="detail-close" onclick="dismissDetail()" aria-label="Cerrar">&times;</button>
     <iframe id="detail-frame" class="detail-frame" title="Detalle"></iframe>
@@ -243,6 +243,22 @@
     var ov = document.getElementById('detail-modal');
     if (e.key === 'Escape' && ov && ov.classList.contains('open')) dismissDetail();
   });
+  // Cierre por clic en el fondo. Se exige que el gesto EMPIECE y TERMINE sobre
+  // el fondo: si se arrastra desde adentro (por ejemplo seleccionando texto) y
+  // se suelta afuera, el modal NO se cierra.
+  (function () {
+    var startedOnBackdrop = false;
+    var ov = document.getElementById('detail-modal');
+    if (!ov) return;
+    ov.addEventListener('mousedown', function (e) {
+      startedOnBackdrop = (e.button === 0 && e.target === ov);
+    });
+    ov.addEventListener('mouseup', function (e) {
+      var started = startedOnBackdrop;
+      startedOnBackdrop = false;
+      if (e.button === 0 && started && e.target === ov) dismissDetail();
+    });
+  })();
 </script>
 {% endif %}
 {% block extra_scripts %}{% endblock %}

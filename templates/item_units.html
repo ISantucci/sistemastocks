@@ -32,7 +32,7 @@
 </div>
 {% endif %}
 
-{% if me and me.role == "ADMIN" and it.serialized %}
+{% if can_edit_items and it.serialized %}
 <div class="card" style="margin-bottom:18px;">
   <div class="card-header"><span class="card-title">Registrar serial de stock existente</span></div>
   <form method="post" action="{{ url_for('item_unit_new', item_id=it.id) }}">
@@ -82,7 +82,7 @@
     <div class="sn">{{ u.serial }}</div>
     <div class="meta">{{ u.location.name if u.location else "—" }}</div>
     {% if u.notes %}<div class="notes">{{ u.notes }}</div>{% endif %}
-    {% if me and me.role == "ADMIN" %}
+    {% if can_edit_items %}
     <div class="card-actions">
       <button type="button" class="btn btn-secondary btn-sm" onclick="toggleEdit('edit-{{ u.id }}')">Editar</button>
       <form method="post" action="{{ url_for('item_unit_delete', unit_id=u.id) }}"

@@ -221,6 +221,14 @@ def role_required(*allowed_roles):
 # Roles que un SUPERVISOR NO puede gestionar ni asignar (solo ADMIN).
 PRIVILEGED_ROLES = ("ADMIN", "SUPERVISOR")
 
+# Quien puede VER el catálogo de Ítems (incluye el export a Excel).
+ITEM_VIEW_ROLES = ("ADMIN", "SUPERVISOR", "LECTOR")
+# Quien puede dar de alta / editar / borrar ítems, unidades serializadas y
+# proveedores asociados. El SUPERVISOR trabaja igual que el ADMIN en esta
+# sección; lo que sigue reservado a ADMIN es el panel /admin, la gestión de
+# usuarios y la importación masiva.
+ITEM_EDIT_ROLES = ("ADMIN", "SUPERVISOR")
+
 
 def can_manage_target(target_user) -> bool:
     """¿El usuario actual puede editar/cambiar clave del usuario target?
@@ -492,6 +500,101 @@ class Item(db.Model):
     # Es OPT-IN e independiente de 'trackable'. Un ítem NO serializado se comporta
     # exactamente igual que antes (esta columna queda en 0/False).
     serialized = db.Column(db.Boolean, default=False, nullable=False)
+
+
+class ItemSupplier(db.Model):
+    """Proveedores asociados a un ítem (relación N a N).
+
+    Aditivo y sin efecto sobre stock, movimientos ni historial: es únicamente
+    catálogo, pensado para poder automatizar más adelante las solicitudes de
+    compra (agrupar los ítems pedidos por proveedor).
+
+    'is_preferred' queda disponible desde ahora para marcar el proveedor por
+    defecto de un ítem. Todavía no lo consume ninguna lógica: se guarda y se
+    muestra, nada más. Así, cuando se implemente el envío de solicitudes, no
+    hace falta otra migración.
+    """
+    __tablename__ = "item_suppliers"
+    id = db.Column(db.Integer, primary_key=True)
+    item_id = db.Column(db.Integer, db.ForeignKey("items.id"), nullable=False)
+    supplier_id = db.Column(db.Integer, db.ForeignKey("suppliers.id"), nullable=False)
+    is_preferred = db.Column(db.Boolean, default=False, nullable=False)
+    created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
+
+    item = db.relationship(
+        "Item",
+        backref=db.backref("supplier_links", cascade="all, delete-orphan"),
+    )
+    supplier = db.relationship("Supplier")
+
+    __table_args__ = (
+        db.UniqueConstraint("item_id", "supplier_id", name="uq_item_supplier"),
+    )
+
+
+def item_supplier_names(it) -> str:
+    """Proveedores de un ítem como texto, con el preferido primero y marcado.
+
+    Se usa en el listado y en el export. Si el ítem no tiene proveedores
+    devuelve cadena vacía (comportamiento de todos los ítems ya cargados).
+    """
+    links = sorted(
+        it.supplier_links or [],
+        key=lambda l: (not l.is_preferred, (l.supplier.contact_name or "").lower()),
+    )
+    out = []
+    for l in links:
+        if not l.supplier:
+            continue
+        label = l.supplier.business_name or l.supplier.contact_name
+        out.append(f"{label} ★" if l.is_preferred else label)
+    return ", ".join(out)
+
+
+def apply_item_suppliers(item, form):
+    """Sincroniza los proveedores de un ítem con lo enviado en el formulario.
+
+    Espera 'supplier_ids' (multiple) y opcionalmente 'preferred_supplier_id'.
+    NO hace commit: lo deja para el caller, que ya maneja su propia transacción.
+
+    Importante: el formulario tiene que declarar 'manages_suppliers=1'. Si no
+    viene, se asume que esa pantalla no gestiona proveedores y NO se toca nada.
+    Hace falta un marcador aparte porque un <select multiple> sin nada elegido
+    directamente NO envía la clave: sin esto, vaciar la lista sería
+    indistinguible de un formulario que no maneja proveedores, y no se podrían
+    quitar todos.
+    """
+    if form.get("manages_suppliers") != "1":
+        return
+
+    raw = [v for v in form.getlist("supplier_ids") if v.strip().isdigit()]
+    wanted = {int(v) for v in raw}
+
+    # Solo proveedores existentes. Los inactivos se conservan si ya estaban
+    # vinculados (no rompemos historial), pero no se pueden agregar nuevos.
+    existing_ids = {l.supplier_id for l in (item.supplier_links or [])}
+    valid = {
+        s.id for s in Supplier.query.filter(Supplier.id.in_(wanted)).all()
+        if s.is_active or s.id in existing_ids
+    } if wanted else set()
+
+    pref_raw = (form.get("preferred_supplier_id") or "").strip()
+    pref_id = int(pref_raw) if pref_raw.isdigit() and int(pref_raw) in valid else None
+
+    # Quitar los que ya no están.
+    for link in list(item.supplier_links or []):
+        if link.supplier_id not in valid:
+            db.session.delete(link)
+        else:
+            link.is_preferred = (link.supplier_id == pref_id)
+
+    # Agregar los nuevos.
+    for sid in valid - existing_ids:
+        db.session.add(ItemSupplier(
+            item_id=item.id,
+            supplier_id=sid,
+            is_preferred=(sid == pref_id),
+        ))
 
 
 # Estados de una unidad serializada.
@@ -2300,32 +2403,38 @@ def category_edit(cat_id):
 
 # ---- ITEMS (con filtros) ----
 
-@app.route("/items")
-@login_required
-@role_required("ADMIN", "SUPERVISOR", "LECTOR")
-def items():
-    cat_id = request.args.get("category_id", "").strip()
-    trackable = request.args.get("trackable", "").strip()
-    q_text = request.args.get("q", "").strip()
-    item_filter = request.args.get("item_id", "").strip()
+def _items_filters_from_request():
+    """Lee los filtros de la pantalla de Ítems desde la query string."""
+    return {
+        "category_id": request.args.get("category_id", "").strip(),
+        "trackable": request.args.get("trackable", "").strip(),
+        "q": request.args.get("q", "").strip(),
+        "item_id": request.args.get("item_id", "").strip(),
+        "sort_by": request.args.get("sort_by", "code").strip(),
+        "sort_dir": request.args.get("sort_dir", "asc").strip().lower(),
+    }
 
-    sort_by = request.args.get("sort_by", "code").strip()
-    sort_dir = request.args.get("sort_dir", "asc").strip().lower()
 
+def _build_items_query(f: dict):
+    """Query de Ítems según filtros y orden.
+
+    Lo usan la pantalla /items y el export a Excel, para que lo exportado sea
+    exactamente lo que se está viendo y no se desincronicen con el tiempo.
+    """
     q = Item.query.join(Category)
 
-    if cat_id.isdigit():
-        q = q.filter(Item.category_id == int(cat_id))
+    if f["category_id"].isdigit():
+        q = q.filter(Item.category_id == int(f["category_id"]))
 
-    if trackable in ("0", "1"):
-        q = q.filter(Item.trackable == (trackable == "1"))
+    if f["trackable"] in ("0", "1"):
+        q = q.filter(Item.trackable == (f["trackable"] == "1"))
 
     # Buscador tipo Movimientos: si se elige un item puntual, se filtra por ese.
-    if item_filter.isdigit():
-        q = q.filter(Item.id == int(item_filter))
+    if f["item_id"].isdigit():
+        q = q.filter(Item.id == int(f["item_id"]))
 
-    if q_text:
-        like = f"%{q_text}%"
+    if f["q"]:
+        like = f"%{f['q']}%"
         q = q.filter(
             db.or_(
                 Item.code.ilike(like),
@@ -2344,17 +2453,41 @@ def items():
         "description": Item.description,
         "is_active": Item.is_active,
     }
+    sort_column = sortable_columns.get(f["sort_by"], Item.code)
+    return q.order_by(sort_column.desc() if f["sort_dir"] == "desc" else sort_column.asc())
 
-    sort_column = sortable_columns.get(sort_by, Item.code)
 
-    if sort_dir == "desc":
-        q = q.order_by(sort_column.desc())
-    else:
-        q = q.order_by(sort_column.asc())
+@app.route("/items")
+@login_required
+@role_required(*ITEM_VIEW_ROLES)
+def items():
+    f = _items_filters_from_request()
+    cat_id = f["category_id"]
+    trackable = f["trackable"]
+    q_text = f["q"]
+    item_filter = f["item_id"]
+    sort_by = f["sort_by"]
+    sort_dir = f["sort_dir"]
 
-    items_list = q.all()
+    items_list = _build_items_query(f).all()
     categories_list = Category.query.order_by(Category.name).all()
     all_items = Item.query.order_by(Item.code).all()
+
+    # Proveedores activos para los selectores de alta/edición. Se ordenan por
+    # el nombre que se muestra, igual que en la pantalla de Proveedores.
+    suppliers_list = (
+        Supplier.query.filter_by(is_active=True).order_by(Supplier.contact_name).all()
+    )
+    # Proveedores ya vinculados por ítem, para precargar el selector del modal.
+    item_supplier_ids = {
+        it.id: [l.supplier_id for l in (it.supplier_links or [])] for it in items_list
+    }
+    item_preferred_id = {
+        it.id: next(
+            (l.supplier_id for l in (it.supplier_links or []) if l.is_preferred), None
+        )
+        for it in items_list
+    }
 
     # Próximo código por categoría, para autocompletar el preview en el alta.
     next_codes = {}
@@ -2368,6 +2501,10 @@ def items():
         categories=categories_list,
         all_items=all_items,
         next_codes=next_codes,
+        suppliers=suppliers_list,
+        item_supplier_ids=item_supplier_ids,
+        item_preferred_id=item_preferred_id,
+        item_supplier_names=item_supplier_names,
         selected_category_id=cat_id,
         selected_trackable=trackable,
         selected_q=q_text,
@@ -2377,9 +2514,88 @@ def items():
     )
 
 
+@app.route("/items/export.xlsx", methods=["GET"])
+@login_required
+@role_required(*ITEM_VIEW_ROLES)
+def items_export_xlsx():
+    """Exporta el catálogo de Ítems a Excel respetando los filtros de pantalla.
+
+    Solo lectura: no toca stock, movimientos ni historial. openpyxl se importa
+    acá adentro a propósito, para que si falta la dependencia en el servidor
+    falle SOLO este botón y no el arranque de toda la app.
+    """
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, Alignment, PatternFill
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        flash(
+            "Falta la librería 'openpyxl' en el servidor. "
+            "Instalala con: pip install openpyxl",
+            "error",
+        )
+        return redirect(url_for("items", **request.args.to_dict()))
+
+    f = _items_filters_from_request()
+    rows = _build_items_query(f).all()
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Items"
+
+    headers = [
+        "Código", "Nombre", "Categoría", "Rastreable", "Serializado",
+        "Unidad", "Stock seguridad", "Descripción", "Activo",
+        "Proveedores", "Link de referencia",
+    ]
+    ws.append(headers)
+
+    head_font = Font(bold=True, color="FFFFFF")
+    head_fill = PatternFill("solid", fgColor="374151")
+    for col in range(1, len(headers) + 1):
+        c = ws.cell(row=1, column=col)
+        c.font = head_font
+        c.fill = head_fill
+        c.alignment = Alignment(horizontal="center", vertical="center")
+
+    for it in rows:
+        ws.append([
+            it.code,
+            it.name,
+            it.category.name if it.category else "",
+            "Sí" if it.trackable else "No",
+            "Sí" if it.serialized else "No",
+            it.unit or "unidad",
+            0 if it.trackable else (it.stock_min or 0),
+            it.description or "",
+            "Sí" if it.is_active else "No",
+            item_supplier_names(it),
+            it.reference_link or "",
+        ])
+
+    # Fila de encabezados fija y con autofiltro.
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{ws.max_row}"
+
+    widths = [14, 40, 22, 12, 13, 10, 16, 45, 9, 40, 45]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    filename = f"items_{now_ar().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return Response(
+        buf.getvalue(),
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @app.route("/items/new", methods=["GET", "POST"])
 @login_required
-@role_required("ADMIN")
+@role_required(*ITEM_EDIT_ROLES)
 def item_new():
     cats = Category.query.order_by(Category.name).all()
 
@@ -2444,7 +2660,7 @@ def item_new():
         #    (dos altas simultáneas en la misma categoría).
         for _ in range(5):
             code = next_item_code(prefix)
-            db.session.add(Item(
+            new_item = Item(
                 code=code,
                 name=name,
                 description=description,
@@ -2454,8 +2670,11 @@ def item_new():
                 stock_min=stock_min,
                 reference_link=reference_link,
                 unit=unit,
-            ))
+            )
+            db.session.add(new_item)
             try:
+                db.session.flush()  # asigna new_item.id sin cerrar la transacción
+                apply_item_suppliers(new_item, request.form)
                 db.session.commit()
                 flash(f"Item creado con código {code}", "ok")
                 if wants_json:
@@ -2479,7 +2698,7 @@ def item_new():
 
 @app.route("/items/<int:item_id>/edit", methods=["GET", "POST"])
 @login_required
-@role_required("ADMIN")
+@role_required(*ITEM_EDIT_ROLES)
 def item_edit(item_id: int):
     it = Item.query.get_or_404(item_id)
     cats = Category.query.order_by(Category.name).all()
@@ -2534,6 +2753,7 @@ def item_edit(item_id: int):
         it.is_active = is_active
         it.reference_link = reference_link  # None cuando queda vacío
         it.unit = unit
+        apply_item_suppliers(it, request.form)
 
         try:
             db.session.commit()
@@ -2549,7 +2769,7 @@ def item_edit(item_id: int):
 
 @app.route("/items/<int:item_id>/delete", methods=["POST"])
 @login_required
-@role_required("ADMIN")
+@role_required(*ITEM_EDIT_ROLES)
 def item_delete(item_id: int):
     """Borrado real de un ítem. Solo ADMIN y solo si NO tiene historial
     (movimientos, pendientes o stock con cantidad). Si tiene historial, no se
@@ -2654,7 +2874,7 @@ def item_units(item_id: int):
 
 @app.route("/items/<int:item_id>/units/new", methods=["POST"])
 @login_required
-@role_required("ADMIN")
+@role_required(*ITEM_EDIT_ROLES)
 def item_unit_new(item_id: int):
     """Registra un serial de stock EXISTENTE en una ubicación (onboarding/etiquetado).
 
@@ -2719,7 +2939,7 @@ def item_unit_new(item_id: int):
 
 @app.route("/units/<int:unit_id>/edit", methods=["POST"])
 @login_required
-@role_required("ADMIN")
+@role_required(*ITEM_EDIT_ROLES)
 def item_unit_edit(unit_id: int):
     """Corrige el número de serie o las notas de una unidad. No mueve stock."""
     u = ItemUnit.query.get_or_404(unit_id)
@@ -2752,7 +2972,7 @@ def item_unit_edit(unit_id: int):
 
 @app.route("/units/<int:unit_id>/delete", methods=["POST"])
 @login_required
-@role_required("ADMIN")
+@role_required(*ITEM_EDIT_ROLES)
 def item_unit_delete(unit_id: int):
     """Quita la etiqueta de serial de una unidad EN_STOCK. No toca stock agregado.
 
@@ -4152,8 +4372,14 @@ def inject_me():
     # Hacemos que los templates tengan siempre `me` disponible de forma consistente.
     # Esto evita depender de session manual y respeta Flask-Login.
     if current_user.is_authenticated:
-        return {"me": current_user}
-    return {"me": None}
+        return {
+            "me": current_user,
+            # Flag de UI para la sección Ítems. Es SOLO para mostrar/ocultar:
+            # la seguridad real la aplica @role_required(*ITEM_EDIT_ROLES) en
+            # cada ruta del backend.
+            "can_edit_items": current_user.role in ITEM_EDIT_ROLES,
+        }
+    return {"me": None, "can_edit_items": False}
 
 
 @app.context_processor
