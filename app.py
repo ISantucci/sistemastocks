@@ -3004,7 +3004,17 @@ def movements():
         to_id = request.form.get("to_location_id", "").strip()
         observation = (request.form.get("observacion", "") or request.form.get("observation", "")).strip() or None
 
+        # Los pendientes de entrega los genera SOLO ADMIN/SUPERVISOR. El técnico
+        # puede registrar su movimiento, pero no dejar a nadie con una deuda de
+        # devolución. Se valida en backend: ocultar el bloque en el template no
+        # alcanza como control de permisos.
         generate_pending = request.form.get("generate_pending")
+        if generate_pending and current_user.role not in ("ADMIN", "SUPERVISOR"):
+            flash(
+                "No tenés permisos para generar pendientes de entrega. "
+                "Pedíselo a un supervisor.", "error",
+            )
+            return redirect(url_for("movements"))
         pending_comment = request.form.get("pending_comment", "").strip() or None
         # Devolucion esperada (opcional). Si no vienen, se usa el mismo item y cantidad.
         pending_return_item_raw = request.form.get("pending_return_item_id", "").strip()
@@ -4466,10 +4476,68 @@ def pending_deliveries():
 
     pendings_q = PendingDelivery.query
     # TECNICO: solo los pendientes que él debe devolver (a su nombre).
+    # IMPORTANTE: este scope se aplica SIEMPRE y los filtros de la UI se suman
+    # encima; nunca lo reemplazan (un técnico no puede ver pendientes ajenos).
     if current_user.role == "TECNICO":
         pendings_q = pendings_q.filter(
             PendingDelivery.responsible_to_id == current_user.id
         )
+
+    # --- Filtros (mismo patrón que Movimientos / Descartes). Solo acotan el
+    #     SELECT: no modifican datos. ---
+    f_date_from = request.args.get("from_date", "").strip()
+    f_date_to = request.args.get("to_date", "").strip()
+    f_item = (request.args.get("item_id") or "").strip()
+    f_from_user = (request.args.get("from_user_id") or "").strip()
+    f_to_user = (request.args.get("to_user_id") or "").strip()
+    f_status = (request.args.get("status") or "").strip().upper()
+
+    if f_date_from:
+        _d = _parse_date_arg(f_date_from)
+        if _d:
+            pendings_q = pendings_q.filter(
+                PendingDelivery.created_at >= datetime(_d.year, _d.month, _d.day)
+            )
+        else:
+            f_date_from = ""
+    if f_date_to:
+        _d = _parse_date_arg(f_date_to)
+        if _d:
+            pendings_q = pendings_q.filter(
+                PendingDelivery.created_at
+                <= datetime(_d.year, _d.month, _d.day, 23, 59, 59)
+            )
+        else:
+            f_date_to = ""
+    if f_item.isdigit():
+        # Coincide tanto con el ítem entregado como con el que se debe devolver.
+        pendings_q = pendings_q.filter(
+            db.or_(
+                PendingDelivery.item_id == int(f_item),
+                PendingDelivery.return_item_id == int(f_item),
+            )
+        )
+    else:
+        f_item = ""
+    if f_from_user.isdigit():
+        pendings_q = pendings_q.filter(
+            PendingDelivery.responsible_from_id == int(f_from_user)
+        )
+    else:
+        f_from_user = ""
+    if f_to_user.isdigit():
+        pendings_q = pendings_q.filter(
+            PendingDelivery.responsible_to_id == int(f_to_user)
+        )
+    else:
+        f_to_user = ""
+    if f_status == "PENDIENTE":
+        pendings_q = pendings_q.filter(PendingDelivery.returned == False)  # noqa: E712
+    elif f_status == "DEVUELTO":
+        pendings_q = pendings_q.filter(PendingDelivery.returned == True)  # noqa: E712
+    else:
+        f_status = ""
+
     sort_by = (request.args.get("sort_by") or "date").strip()
     sort_dir = (request.args.get("sort_dir") or "desc").strip().lower()
     if sort_by == "item":
@@ -4480,9 +4548,41 @@ def pending_deliveries():
         _col = PendingDelivery.created_at
     pendings = pendings_q.order_by(_col.desc() if sort_dir == "desc" else _col.asc()).all()
 
+    # Opciones de los selectores. Para el TECNICO se acotan a lo que aparece en
+    # SUS pendientes: no tiene por qué ver el catálogo completo ni la lista de
+    # usuarios del sistema desde esta pantalla. El filtro "Recibe" directamente
+    # no se le muestra (siempre es él).
+    if current_user.role == "TECNICO":
+        _scope = PendingDelivery.query.filter(
+            PendingDelivery.responsible_to_id == current_user.id
+        ).all()
+        _item_ids = {p.item_id for p in _scope} | {
+            p.return_item_id for p in _scope if p.return_item_id
+        }
+        _user_ids = {p.responsible_from_id for p in _scope}
+        items_list = (
+            Item.query.filter(Item.id.in_(_item_ids)).order_by(Item.code).all()
+            if _item_ids else []
+        )
+        users_list = (
+            User.query.filter(User.id.in_(_user_ids)).order_by(User.username).all()
+            if _user_ids else []
+        )
+    else:
+        items_list = Item.query.order_by(Item.code).all()
+        users_list = User.query.order_by(User.username).all()
+
     return render_template(
         "pending_deliveries.html",
         pendings=pendings,
+        items=items_list,
+        users=users_list,
+        from_date=f_date_from,
+        to_date=f_date_to,
+        item_filter=f_item,
+        from_user_filter=f_from_user,
+        to_user_filter=f_to_user,
+        status_filter=f_status,
         selected_sort_by=sort_by,
         selected_sort_dir=sort_dir,
     )

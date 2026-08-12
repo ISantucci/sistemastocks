@@ -88,6 +88,23 @@ document.addEventListener('DOMContentLoaded', function () {
   });
 });
 
+/* ---------- Filtros colapsables (details.filters-collapse) ----------
+   En desktop (>=768px) los filtros siempre se muestran abiertos; en mobile
+   quedan colapsados detrás del botón "Filtros". Genérico: aplica a cualquier
+   pantalla que use .filters-collapse, sin necesidad de script por template.
+   Es idempotente, así que convive con los scripts inline que ya hacen esto. */
+document.addEventListener('DOMContentLoaded', function () {
+  var blocks = document.querySelectorAll('details.filters-collapse');
+  if (!blocks.length) return;
+  function syncFilters() {
+    if (window.matchMedia('(min-width:768px)').matches) {
+      blocks.forEach(function (el) { el.open = true; });
+    }
+  }
+  syncFilters();
+  window.addEventListener('resize', syncFilters);
+});
+
 /* ---------- Mostrar/ocultar contraseña ---------- */
 function togglePw(inputId, btn) {
   var el = document.getElementById(inputId);

@@ -8,7 +8,9 @@
 
   <form method="post" style="max-width:720px;">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-    <div class="filters-grid" style="--cols: 3;">
+    {# Se mantiene la grilla de 3 columnas que tenía esta pantalla: antes venía
+       de la variable --cols de legacy.css, que ya no se usa. #}
+    <div class="filters-grid" style="grid-template-columns: repeat(3, minmax(160px, 1fr));">
       <div class="filter-item">
         <label>Item</label>
         <select name="item_id" class="js-buscar" required>

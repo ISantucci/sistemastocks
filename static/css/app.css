@@ -360,6 +360,24 @@ input:focus, select:focus, textarea:focus{
 }
 .filters-grid .field-actions{ display: flex; gap: 8px; }
 
+/* Filtros colapsables: en desktop siempre visibles, en mobile detrás del
+   botón "Filtros". Estaba duplicado inline en movements / scrap_report /
+   item_usage; vive acá para que todas las pantallas se vean igual. */
+.filters-collapse{ margin-bottom: 14px; }
+.filters-toggle{
+  list-style: none; cursor: pointer; display: inline-flex; align-items: center; gap: 8px;
+  padding: 8px 14px; border: 1px solid var(--border, #d0d5dd); border-radius: 8px;
+  font-weight: 600; font-size: 14px; background: var(--surface, #fff); user-select: none;
+}
+.filters-toggle::-webkit-details-marker{ display: none; }
+.filters-collapse[open] .filters-caret{ transform: rotate(180deg); }
+.filters-caret{ transition: transform .15s ease; margin-left: 2px; }
+.filters-collapse .card{ margin-top: 10px; }
+@media (min-width: 768px){
+  .filters-toggle{ display: none; }
+  .filters-collapse .card{ margin-top: 0; }
+}
+
 /* ---------- Tables ---------- */
 .table-card{ background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; }
 .table-scroll{ overflow-x: auto; }
