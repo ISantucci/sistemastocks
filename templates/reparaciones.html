@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_pagination.html" import pagination %}
 {% block title %}Reparaciones · TNGStocks{% endblock %}
 {% block page_title %}Reparaciones{% endblock %}
 {% block content %}
@@ -211,5 +212,6 @@
       </tbody>
     </table>
   </div>
+  {{ pagination(page_obj, "registro", "registros") }}
 </div>
 {% endblock %}

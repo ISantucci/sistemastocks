@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_pagination.html" import pagination, per_page_selector %}
 {% block title %}Stock · TNGStocks{% endblock %}
 {% block page_title %}Stock{% endblock %}
 {% block content %}
@@ -51,13 +52,31 @@
     </div>
     <div class="field">
       <label>Buscar item</label>
-      <select name="q" class="js-buscar">
+      {# Con catalogo chico se listan todos los items (igual que siempre). Si el
+         catalogo crece, items_remote pasa a true y el select busca contra la
+         API en vez de volcar miles de <option> en el HTML. #}
+      <select name="q" class="js-buscar{% if items_remote %} js-buscar-remoto{% endif %}"
+              {% if items_remote %}data-src="{{ url_for('api_items_search') }}" data-value-field="code"{% endif %}>
         <option value="">Todos</option>
         {% for it in items %}
           <option value="{{ it.code }}" {% if selected_q == it.code %}selected{% endif %}>{{ it.code }} - {{ it.name }}</option>
         {% endfor %}
       </select>
     </div>
+    <div class="field">
+      <label>Filas por página</label>
+      <select name="limit">
+        {% for n in PER_PAGE_CHOICES %}
+          <option value="{{ n }}" {% if page_obj.per_page == n %}selected{% endif %}>{{ n }}</option>
+        {% endfor %}
+        {% if page_obj.per_page not in PER_PAGE_CHOICES %}
+          <option value="{{ page_obj.per_page }}" selected>{{ page_obj.per_page }}</option>
+        {% endif %}
+      </select>
+    </div>
+    {# Al cambiar cualquier filtro se vuelve a la pagina 1: si no, un filtro mas
+       restrictivo podria dejar al usuario en una pagina que ya no existe. #}
+    <input type="hidden" name="page" value="1" />
     <div class="field-actions">
       <button type="submit" class="btn btn-primary">Filtrar</button>
       <a href="{{ url_for('stock') }}" class="btn btn-secondary">Limpiar</a>
@@ -101,5 +120,6 @@
       </tbody>
     </table>
   </div>
+  {{ pagination(page_obj, "fila de stock", "filas de stock") }}
 </div>
 {% endblock %}

@@ -119,10 +119,44 @@ window.TS_MULTI_OPTS = {
   closeAfterSelect: false,
   hideSelected: true
 };
+/* Selects REMOTOS (select.js-buscar-remoto).
+   Se activan solos cuando el catálogo de ítems supera el umbral del backend
+   (ITEM_PICKER_MAX_INLINE). En vez de volcar miles de <option> en el HTML,
+   piden resultados a data-src a medida que se tipea. Si el select NO tiene la
+   clase, se comporta exactamente como antes: no hay cambio de UX para los
+   catálogos chicos, que es el caso actual. */
+window.TS_REMOTE_OPTS = function (el) {
+  var src = el.getAttribute('data-src');
+  var valueField = el.getAttribute('data-value-field') || 'code';
+  return Object.assign({}, window.TS_SINGLE_OPTS, {
+    valueField: valueField,
+    labelField: 'label',
+    searchField: ['code', 'name'],
+    preload: 'focus',
+    loadThrottle: 250,
+    load: function (query, callback) {
+      fetch(src + '?q=' + encodeURIComponent(query), {
+        credentials: 'same-origin',
+        headers: { 'Accept': 'application/json' }
+      })
+        .then(function (r) { return r.ok ? r.json() : []; })
+        .then(function (rows) { callback(rows || []); })
+        .catch(function () { callback(); });
+    },
+    // Sin resultados cargados todavía, no reordenar por texto: el backend ya
+    // devuelve ordenado por código.
+    sortField: null
+  });
+};
+
 document.addEventListener('DOMContentLoaded', function () {
   document.querySelectorAll('select.js-buscar').forEach(function (el) {
     if (el.tomselect) return;
-    new TomSelect(el, window.TS_SINGLE_OPTS);
+    if (el.classList.contains('js-buscar-remoto') && el.getAttribute('data-src')) {
+      new TomSelect(el, window.TS_REMOTE_OPTS(el));
+    } else {
+      new TomSelect(el, window.TS_SINGLE_OPTS);
+    }
   });
   document.querySelectorAll('select.js-multi-prov').forEach(function (el) {
     if (el.tomselect) return;

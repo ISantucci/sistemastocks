@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_pagination.html" import pagination %}
 {% block title %}Movimientos · TNGStocks{% endblock %}
 {% block page_title %}Movimientos{% endblock %}
 {% block content %}
@@ -240,6 +241,7 @@
       </tbody>
     </table>
   </div>
+  {{ pagination(page_obj, "movimiento", "movimientos") }}
 </div>
 
 <script>

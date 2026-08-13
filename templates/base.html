@@ -7,7 +7,8 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tom-select@2.3.1/dist/css/tom-select.bootstrap5.min.css">
+{%- set _ts_css = vendor_asset('tom-select-css') %}
+<link rel="stylesheet" href="{{ _ts_css.url }}"{% if _ts_css.integrity %} integrity="{{ _ts_css.integrity }}"{% endif %}{% if not _ts_css.is_local %} crossorigin="anonymous" referrerpolicy="no-referrer"{% endif %}>
 <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/legacy.css') }}">
 {% block extra_head %}{% endblock %}
@@ -206,7 +207,8 @@
 {% else %}
 </main>
 {% endif %}
-<script src="https://cdn.jsdelivr.net/npm/tom-select@2.3.1/dist/js/tom-select.complete.min.js"></script>
+{%- set _ts_js = vendor_asset('tom-select-js') %}
+<script src="{{ _ts_js.url }}"{% if _ts_js.integrity %} integrity="{{ _ts_js.integrity }}"{% endif %}{% if not _ts_js.is_local %} crossorigin="anonymous" referrerpolicy="no-referrer"{% endif %}></script>
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 <script src="{{ url_for('static', filename='js/serial_picker.js') }}"></script>
 {% if current_user.is_authenticated and not embed %}

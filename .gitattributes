@@ -1,0 +1,91 @@
+# =============================================================================
+# Normalización de fin de línea
+# =============================================================================
+# Problema: el repo tiene una mezcla de CRLF y LF. Algunos archivos quedaron
+# commiteados con LF y en el working tree están con CRLF (o al revés), así que
+# git los marca como modificados sin que nadie los haya tocado. Eso ensucia
+# todos los diffs y hace que una revisión de código sea inservible: 23 archivos
+# aparecían "modificados" en un cambio que no los tocó.
+#
+# Criterio: en el REPOSITORIO todo se guarda con LF (estándar de git). En el
+# WORKING TREE de Windows los archivos se ven con CRLF, así que el Bloc de
+# notas y cualquier editor viejo los abren bien.
+#
+# -----------------------------------------------------------------------------
+# IMPORTANTE - cómo aplicarlo sin ensuciar el historial
+# -----------------------------------------------------------------------------
+# Este archivo NO reescribe lo ya commiteado por sí solo. Hace falta un paso
+# único, y conviene hacerlo en UN COMMIT APARTE, sin mezclar con cambios reales:
+#
+#     git add .gitattributes
+#     git commit -m "Normalizar fin de linea (.gitattributes)"
+#     git add --renormalize .
+#     git commit -m "Renormalizar fin de linea (sin cambios de contenido)"
+#
+# El segundo commit va a tocar muchos archivos pero NO cambia una sola línea de
+# código: se puede verificar con `git diff --cached --ignore-cr-at-eol`, que
+# tiene que salir vacío.
+#
+# Hacerlo con el árbol limpio (sin cambios pendientes).
+# =============================================================================
+
+# Default: git decide si es texto y lo guarda con LF en el repo.
+* text=auto
+
+# --- Código y configuración: CRLF en Windows, LF en el repo -------------------
+*.py      text eol=crlf
+*.html    text eol=crlf
+*.css     text eol=crlf
+*.js      text eol=crlf
+*.json    text eol=crlf
+*.md      text eol=crlf
+*.txt     text eol=crlf
+*.yml     text eol=crlf
+*.yaml    text eol=crlf
+*.cfg     text eol=crlf
+*.ini     text eol=crlf
+*.csv     text eol=crlf
+
+# --- Scripts de Windows: CRLF obligatorio ------------------------------------
+# Un .bat o .ps1 con LF puede fallar de formas raras.
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+*.ps1     text eol=crlf
+
+# --- Scripts de Linux y archivos de Docker: LF obligatorio -------------------
+# Un .sh o un Dockerfile con CRLF rompe dentro del contenedor
+# ("/bin/sh^M: bad interpreter").
+*.sh          text eol=lf
+Dockerfile    text eol=lf
+.dockerignore text eol=lf
+*.conf        text eol=lf
+*.example     text eol=lf
+
+# --- Binarios: git no los toca nunca -----------------------------------------
+*.db      binary
+*.db-wal  binary
+*.db-shm  binary
+*.sqlite  binary
+*.sqlite3 binary
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.ico     binary
+*.svg     text eol=lf
+*.pdf     binary
+*.xlsx    binary
+*.xls     binary
+*.zip     binary
+*.woff    binary
+*.woff2   binary
+*.ttf     binary
+*.eot     binary
+
+# --- Assets vendorizados: no los revisamos, no los normalizamos --------------
+# Son librerías minificadas de terceros. Cambiarles un solo byte invalidaría el
+# hash SRI del manifiesto, así que git no los debe tocar ni intentar diffear.
+static/vendor/** -text -diff
+
+# El manifiesto sí es nuestro y sí se revisa a mano.
+static/vendor/assets.json text eol=crlf diff

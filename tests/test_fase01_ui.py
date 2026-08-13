@@ -64,9 +64,14 @@ def test_remito_listado_detalle_accesible_los_cuatro(env):
         "from_location_id": str(prov.id), "to_location_id": str(dep.id),
         "movement_id": str(mov.id), "responsible_to_id": str(resp.id)})
     r = A.Remito.query.first()
+    # El LISTADO lo ven los cuatro roles.
     for role in ("ADMIN", "SUPERVISOR", "TECNICO", "LECTOR"):
         assert as_role(role).get("/remitos").status_code == 200
+    # El DETALLE tambien, salvo el TECNICO, que solo abre los remitos donde es
+    # parte (proteccion anti-IDOR deliberada). Ver test_remitos.py.
+    for role in ("ADMIN", "SUPERVISOR", "LECTOR"):
         assert as_role(role).get(f"/remitos/{r.id}").status_code == 200
+    assert as_role("TECNICO").get(f"/remitos/{r.id}").status_code == 302
 
 
 def test_post_manual_remito_bloqueado_tec_lec(env):
@@ -84,10 +89,16 @@ def test_dashboard_tecnico_enlaza_item_usage(env):
     assert 'href="/item-usage"' in body
 
 
-def test_dashboard_tecnico_no_enlaza_movements(env):
+def test_dashboard_tecnico_enlaza_movements_y_no_catalogo(env):
+    """El TECNICO tiene vista acotada de movimientos, pero NO la seccion Items.
+
+    Confirmado con Ignacio (2026-08-13): ve los items de su camioneta desde
+    /stock, no el catalogo.
+    """
     A, c, as_role = env
     body = as_role("TECNICO").get("/").get_data(as_text=True)
-    assert 'href="/movements"' not in body
+    assert 'href="/movements"' in body
+    assert 'href="/items"' not in body, "el menu no debe ofrecerle una seccion que el backend rebota"
 
 
 def test_item_usage_permitido_tecnico(env):
@@ -95,15 +106,23 @@ def test_item_usage_permitido_tecnico(env):
     assert as_role("TECNICO").get("/item-usage").status_code == 200
 
 
-def test_movements_bloqueado_tecnico(env):
+def test_movements_permitido_tecnico(env):
+    """El TECNICO entra a /movements con alcance acotado a sus ubicaciones.
+
+    Lo que NO puede hacer (mover desde ubicacion ajena, generar pendientes) se
+    verifica en test_tecnico_scope.py, que es donde importa.
+    """
     A, c, as_role = env
-    assert as_role("TECNICO").get("/movements").status_code in (302, 403)
+    assert as_role("TECNICO").get("/movements").status_code == 200
 
 
 # ---- Tarea 8: solicitudes de compra solo ADMIN/SUPERVISOR ----
 
+# El LECTOR consulta y reporta: VE las solicitudes de compra pero no las genera
+# (el POST /solicitudes-compra/new sigue siendo ADMIN/SUPERVISOR, y eso lo
+# verifica test_post_manual_solicitud_lector_no_crea). Confirmado 2026-08-13.
 @pytest.mark.parametrize("role,allowed", [
-    ("ADMIN", True), ("SUPERVISOR", True), ("TECNICO", False), ("LECTOR", False)])
+    ("ADMIN", True), ("SUPERVISOR", True), ("TECNICO", False), ("LECTOR", True)])
 def test_solicitudes_acceso_por_rol(env, role, allowed):
     A, c, as_role = env
     r = as_role(role).get("/solicitudes-compra")
@@ -113,11 +132,16 @@ def test_solicitudes_acceso_por_rol(env, role, allowed):
         assert r.status_code in (302, 403)
 
 
-def test_nav_solicitudes_oculto_tec_lec(env):
+def test_nav_solicitudes_oculto_solo_al_tecnico(env):
+    """El menu tiene que coincidir con el backend, en los dos sentidos."""
     A, c, as_role = env
-    for role in ("TECNICO", "LECTOR"):
-        body = as_role(role).get("/").get_data(as_text=True)
-        assert "Solicitudes de Compra" not in body
+    body_tec = as_role("TECNICO").get("/").get_data(as_text=True)
+    assert "Solicitudes de Compra" not in body_tec
+
+    body_lec = as_role("LECTOR").get("/").get_data(as_text=True)
+    assert "Solicitudes de Compra" in body_lec, (
+        "el LECTOR puede verlas: ocultarle el link seria un menu mentiroso"
+    )
 
 
 def test_post_manual_solicitud_lector_no_crea(env):
@@ -129,11 +153,23 @@ def test_post_manual_solicitud_lector_no_crea(env):
 
 # ---- Tarea 10: run_local.bat con debug false ----
 
-def test_run_local_bat_debug_false():
-    path = os.path.join(os.path.dirname(__file__), "..", "run_local.bat")
-    txt = open(path, encoding="utf-8", errors="ignore").read()
-    assert "APP_DEBUG=false" in txt
-    assert "APP_DEBUG=true" not in txt
+def test_no_hay_scripts_con_debug_activado():
+    """run_local.bat ya no existe. Lo que importa es que ningun script del repo
+    deje APP_DEBUG=true: con debug activo, Flask expone una consola ejecutable.
+    """
+    raiz = os.path.join(os.path.dirname(__file__), "..")
+    ofensores = []
+    for carpeta, _dirs, archivos in os.walk(raiz):
+        if any(x in carpeta for x in (".git", ".venv", "node_modules", "backups", "data")):
+            continue
+        for nombre in archivos:
+            if not nombre.endswith((".bat", ".cmd", ".ps1", ".sh", ".yml", ".yaml")):
+                continue
+            ruta = os.path.join(carpeta, nombre)
+            txt = open(ruta, encoding="utf-8", errors="ignore").read()
+            if "APP_DEBUG=true" in txt.replace(" ", ""):
+                ofensores.append(nombre)
+    assert not ofensores, f"scripts con debug activado: {ofensores}"
 
 
 # ---- Tarea 9: mensaje de eliminación de item ----

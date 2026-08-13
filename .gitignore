@@ -13,6 +13,25 @@ logs_local/
 .env
 env/
 *.env
+!deploy/.env.example
 *.bak
 *.bak_*
 SistemaStocksTNG.zip
+
+# --- Vault de Obsidian (documentacion funcional) -----------------------------
+# El vault vive fuera del repo (ObsidianVaults/TNGStocks/TNGStock) y es la
+# fuente de verdad FUNCIONAL, no codigo. Se ignora explicitamente por si alguna
+# vez se copia o se sincroniza adentro del repo por error: no queremos notas
+# internas, plantillas ni el estado de Obsidian mezclados con el codigo.
+TNGStock/
+TNGStocks/
+ObsidianVaults/
+00_START_HERE/
+01_Producto/
+.obsidian/
+*.obsidian/
+
+# --- Pytest / herramientas ---------------------------------------------------
+.pytest_cache/
+.coverage
+htmlcov/

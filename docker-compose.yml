@@ -4,7 +4,10 @@ services:
     container_name: sistemastocks
     restart: unless-stopped
     ports:
-      - "5000:5000"
+      # Solo loopback: el contenedor NO queda expuesto a Internet. El unico
+      # punto de entrada debe ser el reverse proxy (Apache/nginx) del host.
+      # Si alguna vez hace falta exponerlo, hacerlo con firewall de por medio.
+      - "127.0.0.1:5000:5000"
     env_file:
       - /home/isantucci/srv/sistemastocks/env/.env
     volumes:

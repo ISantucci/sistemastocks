@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_pagination.html" import pagination %}
 {% block title %}Descartes · TNGStocks{% endblock %}
 {% block page_title %}Descartes{% endblock %}
 {% block content %}
@@ -171,6 +172,7 @@
       </tbody>
     </table>
   </div>
+  {{ pagination(page_obj, "descarte", "descartes") }}
 </div>
 
 <script>

@@ -38,9 +38,15 @@ def _crear_pendiente(A, esc):
 
 
 def test_creacion_pendiente_junto_con_movimiento(A, esc):
-    _crear_pendiente(A, esc)
-    assert A.PendingDelivery.query.count() == 1
+    """Se genera UN pendiente POR UNIDAD a devolver, no uno por movimiento.
+
+    Es deliberado: de dos unidades entregadas, una puede volver bien y la otra
+    ir a reparacion, y cada una se cierra por separado.
+    """
+    _crear_pendiente(A, esc)          # el helper entrega qty=2
+    assert A.PendingDelivery.query.count() == 2
     assert A.Movement.query.count() == 1
+    assert all(p.return_qty == 1 for p in A.PendingDelivery.query.all())
 
 
 def test_cierre_genera_movimiento_inverso_y_returned_true(A, esc):
@@ -61,8 +67,16 @@ def test_segundo_cierre_no_genera_otro_movimiento(A, esc):
     assert A.Movement.query.count() == movs_after_first  # no duplica
 
 
-def test_tecnico_y_lector_no_acceden_pendientes(A, esc):
-    for role in ("tec", "lec"):
-        c = A.app.test_client()
-        login(c, role)
-        assert c.get("/pending-deliveries").status_code in (302, 403)
+def test_tecnico_ve_pendientes_y_lector_no(A, esc):
+    """El TECNICO SI accede a /pending-deliveries: ve los suyos.
+
+    Confirmado con Ignacio (2026-08-13). La pantalla filtra por objeto, y eso
+    se verifica aparte en test_tecnico_scope.py. El LECTOR no accede.
+    """
+    c_tec = A.app.test_client()
+    login(c_tec, "tec")
+    assert c_tec.get("/pending-deliveries").status_code == 200
+
+    c_lec = A.app.test_client()
+    login(c_lec, "lec")
+    assert c_lec.get("/pending-deliveries").status_code in (302, 403)

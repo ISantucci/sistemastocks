@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_pagination.html" import pagination %}
 {% block title %}Remitos · TNGStocks{% endblock %}
 {% block page_title %}Remitos{% endblock %}
 {% block content %}
@@ -60,6 +61,7 @@
       </tbody>
     </table>
   </div>
+  {{ pagination(page_obj, "remito", "remitos") }}
 </div>
 
 {% if me and me.role in ["ADMIN", "SUPERVISOR"] %}

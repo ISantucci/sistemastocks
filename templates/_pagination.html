@@ -1,0 +1,64 @@
+{#
+  Barra de paginacion reutilizable.
+
+  Uso:
+    {% from "_pagination.html" import pagination, per_page_selector %}
+    {{ pagination(page_obj) }}
+
+  Los links conservan TODOS los filtros vigentes porque se arman con
+  url_with(page=N), que parte de request.args. Por eso agregar un filtro nuevo
+  a una pantalla no obliga a tocar este archivo.
+#}
+
+{% macro per_page_selector(page_obj, label="Filas por página") %}
+  <label class="pagination-perpage">{{ label }}
+    <select name="limit" onchange="this.form.submit()">
+      {% for n in PER_PAGE_CHOICES %}
+        <option value="{{ n }}" {% if page_obj.per_page == n %}selected{% endif %}>{{ n }}</option>
+      {% endfor %}
+      {% if page_obj.per_page not in PER_PAGE_CHOICES %}
+        <option value="{{ page_obj.per_page }}" selected>{{ page_obj.per_page }}</option>
+      {% endif %}
+    </select>
+  </label>
+{% endmacro %}
+
+{% macro pagination(page_obj, singular="registro", plural="registros") %}
+{% if page_obj.total %}
+<div class="pagination-bar">
+  <div class="pagination-count muted">
+    Mostrando <strong>{{ page_obj.first_index }}</strong>–<strong>{{ page_obj.last_index }}</strong>
+    de <strong>{{ page_obj.total }}</strong> {{ singular if page_obj.total == 1 else plural }}
+  </div>
+  {% if page_obj.pages > 1 %}
+  <nav class="pagination-nav" aria-label="Paginación">
+    {% if page_obj.has_prev %}
+      <a class="page-link" href="{{ url_with(page=1) }}" aria-label="Primera página">«</a>
+      <a class="page-link" href="{{ url_with(page=page_obj.page - 1) }}" rel="prev">‹ Anterior</a>
+    {% else %}
+      <span class="page-link disabled">«</span>
+      <span class="page-link disabled">‹ Anterior</span>
+    {% endif %}
+
+    {% for n in page_obj.window() %}
+      {% if n is none %}
+        <span class="page-gap">…</span>
+      {% elif n == page_obj.page %}
+        <span class="page-link current" aria-current="page">{{ n }}</span>
+      {% else %}
+        <a class="page-link" href="{{ url_with(page=n) }}">{{ n }}</a>
+      {% endif %}
+    {% endfor %}
+
+    {% if page_obj.has_next %}
+      <a class="page-link" href="{{ url_with(page=page_obj.page + 1) }}" rel="next">Siguiente ›</a>
+      <a class="page-link" href="{{ url_with(page=page_obj.pages) }}" aria-label="Última página">»</a>
+    {% else %}
+      <span class="page-link disabled">Siguiente ›</span>
+      <span class="page-link disabled">»</span>
+    {% endif %}
+  </nav>
+  {% endif %}
+</div>
+{% endif %}
+{% endmacro %}
