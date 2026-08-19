@@ -1,0 +1,1825 @@
+From 013c1fad7372afd19576ca70797a68e0d6177e48 Mon Sep 17 00:00:00 2001
+From: c <a@b>
+Date: Tue, 18 Aug 2026 14:29:38 +0000
+Subject: [PATCH 7/7] Fase 6: el catalogo de items tampoco viaja en el HTML
+ (selector remoto por ubicacion)
+
+---
+ app.py                                 | 143 +++++++++++---
+ static/js/app.js                       |  55 ++++++
+ static/js/ingresos_egresos.js          |  34 +++-
+ static/js/item_usage.js                |  33 +++-
+ static/js/movements.js                 |  81 ++++----
+ static/js/movements_bulk.js            |  34 +++-
+ static/js/scrap_report.js              |  33 +++-
+ templates/ingresos_egresos.html        |   7 +-
+ templates/item_usage.html              |  18 +-
+ templates/movements.html               |  24 ++-
+ templates/movements_bulk.html          |  16 +-
+ templates/scrap_report.html            |  18 +-
+ tests/test_items_remoto.py             | 212 +++++++++++++++++++++
+ tests/test_stock_map_remoto.py         |  33 ++--
+ verificacion/verificar_items_remoto.py | 207 +++++++++++++++++++++
+ verificacion/verificar_navegador.py    | 188 +++++++++++++++++++
+ verificacion/verificar_ui.py           | 248 +++++++++++++++++++++++++
+ 17 files changed, 1266 insertions(+), 118 deletions(-)
+ create mode 100644 tests/test_items_remoto.py
+ create mode 100644 verificacion/verificar_items_remoto.py
+ create mode 100644 verificacion/verificar_navegador.py
+ create mode 100644 verificacion/verificar_ui.py
+
+diff --git a/app.py b/app.py
+index 878ad04..e850ffc 100644
+--- a/app.py
++++ b/app.py
+@@ -2705,6 +2705,45 @@ def item_picker_options(selected_value=None, value_field="code", base_query=None
+     return q.filter(column == needle).all(), True
+ 
+ 
++def opciones_items_para_select(query, sin_serializados=False):
++    """(opciones, remoto) para el selector de items de las pantallas de carga.
++
++    Si el catalogo supera ITEM_PICKER_MAX_INLINE **no se materializa ni se
++    manda**: se devuelve vacio y el front lo busca contra /api/items/search a
++    medida que se tipea. Es el mismo criterio y el mismo umbral que ya usaba el
++    selector de /stock desde el 2026-08-13.
++
++    Por debajo del umbral el comportamiento es identico al historico: la lista
++    completa, embebida. Con el catalogo actual (299 items) no cambia nada.
++    """
++    if query is None:
++        return [], False
++    if query.order_by(None).count() > ITEM_PICKER_MAX_INLINE:
++        return [], True
++    return opciones_items(query.all(), sin_serializados), False
++
++
++def opcion_item_seleccionada(item_id):
++    """La opcion {value,text} de un item ya elegido, o None.
++
++    Con el selector remoto el <select> se renderiza vacio; sin esto, un filtro
++    vigente se veria en blanco al recargar la pagina.
++    """
++    if not item_id:
++        return None
++    raw = str(item_id).strip()
++    if not raw.isdigit():
++        return None
++    it = Item.query.get(int(raw))
++    return {"value": str(it.id), "text": f"{it.code} - {it.name}"} if it else None
++
++
++def ids_items_serializados():
++    """Ids de los items serializados. Se consulta directo en vez de derivarlo
++    de la lista de items, porque esa lista puede venir vacia en modo remoto."""
++    return [r[0] for r in db.session.query(Item.id).filter(Item.serialized.is_(True)).all()]
++
++
+ @app.route("/api/items/search")
+ @login_required
+ def api_items_search():
+@@ -2720,6 +2759,29 @@ def api_items_search():
+     """
+     term = (request.args.get("q") or "").strip()
+     q = items_visible_query()
++
++    # Acotar por ubicacion de origen (Fase 6). Lo usan los selectores de carga:
++    # si el origen es una ubicacion interna, solo se pueden mover items que
++    # TENGAN stock ahi, que es exactamente lo que antes filtraba el JS contra
++    # stockMap. Ahora se filtra en el servidor, asi no hay que mandar el
++    # catalogo entero para poder descartarlo en el navegador.
++    #
++    # Ubicacion externa (Proveedor / Baja) o sin ubicacion: no filtra, porque
++    # esas no tienen stock propio y admiten cualquier item. Es la misma regla
++    # que ya aplicaba externalLocIds en el front.
++    raw_loc = (request.args.get("location_id") or "").strip()
++    if raw_loc.isdigit():
++        loc_id = int(raw_loc)
++        if not location_is_external(loc_id):
++            q = q.filter(
++                Item.id.in_(
++                    db.session.query(Stock.item_id).filter(
++                        Stock.location_id == loc_id,
++                        Stock.quantity > 0,
++                    )
++                )
++            )
++
+     if term:
+         like = f"%{term}%"
+         q = q.filter(db.or_(Item.code.ilike(like), Item.name.ilike(like)))
+@@ -2928,17 +2990,13 @@ def movements():
+         tech_location_ids = {l.id for l in tech_locations}
+         locations_list = Location.query.filter_by(is_truck=True).order_by(Location.name).all()
+         # TECNICO: solo items que tiene en stock (>0) en su(s) ubicacion(es)
+-        if tech_location_ids:
+-            items_list = (
+-                Item.query.filter_by(is_active=True)
+-                .join(Stock, Stock.item_id == Item.id)
+-                .filter(Stock.location_id.in_(tech_location_ids), Stock.quantity > 0)
+-                .distinct()
+-                .order_by(Item.code)
+-                .all()
+-            )
+-        else:
+-            items_list = []
++        items_q = (
++            Item.query.filter_by(is_active=True)
++            .join(Stock, Stock.item_id == Item.id)
++            .filter(Stock.location_id.in_(tech_location_ids), Stock.quantity > 0)
++            .distinct()
++            .order_by(Item.code)
++        ) if tech_location_ids else None
+     else:
+         # Proveedor se saca del desplegable de Movimientos: los ingresos/egresos
+         # hacia/desde Proveedor se cargan en la sección Ingresos/Egresos.
+@@ -2946,7 +3004,12 @@ def movements():
+             Location.query.filter(Location.name != LOCATION_PROVEEDOR)
+             .order_by(Location.name).all()
+         )
+-        items_list = Item.query.filter_by(is_active=True).order_by(Item.code).all()
++        items_q = Item.query.filter_by(is_active=True).order_by(Item.code)
++
++    # Fase 6: si el catalogo es grande no se manda ninguna opcion; el selector
++    # las pide a /api/items/search acotadas por la ubicacion de origen. Debajo
++    # del umbral se manda la lista completa, igual que siempre.
++    items_list, items_remote = opciones_items_para_select(items_q)
+ 
+     _descartes = Location.query.filter_by(name="Descartes").first()
+     descartes_id = _descartes.id if _descartes else None
+@@ -3241,9 +3304,16 @@ def movements():
+         location_ids=tech_location_ids if is_tecnico else None
+     )
+ 
++    # Con el selector remoto el <select> del filtro va vacio, asi que hay que
++    # mandarle la opcion vigente para que el filtro aplicado se siga viendo.
++    # Mismo criterio que item_picker_options() en /stock.
++    item_sel = opcion_item_seleccionada(filters["item_filter"]) if items_remote else None
++
+     return render_template(
+         "movements.html",
+         items=items_list,
++        items_remote=items_remote,
++        item_seleccionado=item_sel,
+         locations=locations_list,
+         from_locations=from_locations,
+         logs=logs,
+@@ -3276,7 +3346,10 @@ def movements():
+ @login_required
+ @role_required("ADMIN", "SUPERVISOR")
+ def movements_bulk():
+-    items_list = Item.query.filter_by(is_active=True).order_by(Item.code).all()
++    # Fase 6: catalogo grande -> ninguna opcion en el HTML, las trae la API.
++    items_list, items_remote = opciones_items_para_select(
++        Item.query.filter_by(is_active=True).order_by(Item.code)
++    )
+     locations_list = Location.query.order_by(Location.name).all()
+ 
+     if request.method == "POST":
+@@ -3498,6 +3571,7 @@ def movements_bulk():
+ 
+     return render_template(
+         "movements_bulk.html",
++        items_remote=items_remote,
+         items=items_list,
+         locations=locations_list,
+         descartes_id=_descartes_b.id if _descartes_b else None,
+@@ -3604,6 +3678,7 @@ def item_usage():
+                 items=[], is_tecnico=True, locations=[], movements=[],
+                 page_obj=PageResult([], 1, 100, 0),
+                 stock_map={}, stock_qty_map={}, stock_remote=False,
++                items_remote=False, item_seleccionado=None,
+                 serialized_item_ids=[],
+                 users=[], from_date="", to_date="",
+                 item_filter="", user_filter="", limit="100",
+@@ -3717,16 +3792,18 @@ def item_usage():
+ 
+     if is_tecnico:
+         # TECNICO: solo items que tiene en stock (>0) en su(s) ubicacion(es)
+-        items = (
++        items_q = (
+             Item.query.filter_by(is_active=True)
+             .join(Stock, Stock.item_id == Item.id)
+             .filter(Stock.location_id.in_(tech_location_ids), Stock.quantity > 0)
+             .distinct()
+             .order_by(Item.code)
+-            .all()
+-        ) if tech_location_ids else []
++        ) if tech_location_ids else None
+     else:
+-        items = Item.query.filter_by(is_active=True).order_by(Item.code).all()
++        items_q = Item.query.filter_by(is_active=True).order_by(Item.code)
++
++    # Fase 6: catalogo grande -> ninguna opcion en el HTML, las trae la API.
++    items, items_remote = opciones_items_para_select(items_q, sin_serializados=True)
+     utilizados_id = utilizados_loc.id if utilizados_loc else None
+ 
+     # Filtros del historial (admin: fecha/item/responsable/mostrar; tecnico: fecha/item)
+@@ -3795,11 +3872,14 @@ def item_usage():
+         location_ids=tech_location_ids if is_tecnico else None
+     )
+ 
+-    serialized_item_ids = [it.id for it in items if it.serialized]
++    # Se consulta directo: en modo remoto `items` viene vacio.
++    serialized_item_ids = ids_items_serializados()
+ 
+     return render_template(
+         "item_usage.html",
+         items=items,
++        items_remote=items_remote,
++        item_seleccionado=(opcion_item_seleccionada(f_item) if items_remote else None),
+         locations=locations,
+         movements=movements_list,
+         page_obj=movements_page,
+@@ -5029,15 +5109,20 @@ def scrap_report():
+         .order_by(Location.name)
+         .all()
+     )
+-    items_all = Item.query.filter_by(is_active=True).order_by(Item.code).all()
++    # Fase 6: catalogo grande -> ninguna opcion en el HTML, las trae la API.
++    items_all, items_remote = opciones_items_para_select(
++        Item.query.filter_by(is_active=True).order_by(Item.code), sin_serializados=True
++    )
+     users_list = User.query.order_by(User.username).all()
+     # /scrap es solo ADMIN/SUPERVISOR: alcance completo, sin cambios.
+     stock_map, stock_qty_map, stock_remote = stock_maps_for_render()
+ 
+-    serialized_item_ids = [it.id for it in items_all if it.serialized]
++    serialized_item_ids = ids_items_serializados()
+ 
+     return render_template(
+         "scrap_report.html",
++        items_remote=items_remote,
++        item_seleccionado=(opcion_item_seleccionada(f_item) if items_remote else None),
+         scraps=scraps,
+         page_obj=scraps_page,
+         reason_filter=reason_filter,
+@@ -5955,6 +6040,9 @@ def repair_request_detail(rr_id: int):
+ 
+     # Seriales disponibles (EN_STOCK) en la Jaula por ítem, para el cierre.
+     jaula = get_jaula_location()
++    # Los seriales SI se siguen embebiendo: son unidades fisicas rastreables, un
++    # subconjunto acotado del catalogo (hoy 0 en produccion). Si algun dia crecen
++    # lo suficiente, este es el proximo bloque a mover a la API.
+     jaula_units = {}
+     if jaula:
+         for u in (ItemUnit.query
+@@ -7242,7 +7330,10 @@ def in_out():
+ 
+     # ---- GET ----
+     suppliers_list = Supplier.query.filter_by(is_active=True).order_by(Supplier.contact_name).all()
+-    items_list = Item.query.filter_by(is_active=True).order_by(Item.code).all()
++    # Fase 6: catalogo grande -> ninguna opcion en el HTML, las trae la API.
++    items_list, items_remote = opciones_items_para_select(
++        Item.query.filter_by(is_active=True).order_by(Item.code)
++    )
+ 
+     # Antes: .limit(300).all(). Ese tope ESCONDIA filas sin avisar -- no habia
+     # "pagina 2" ni aviso -- lo cual en un sistema de trazabilidad es peor que
+@@ -7275,17 +7366,23 @@ def in_out():
+                   .filter_by(status=UNIT_EN_STOCK, location_id=jaula.id)
+                   .order_by(ItemUnit.item_id, ItemUnit.serial).all()):
+             jaula_units.setdefault(u.item_id, []).append([u.id, u.serial])
+-    serialized_item_ids = [it.id for it in items_list if it.serialized]
++    serialized_item_ids = ids_items_serializados()
+ 
+     # Stock de la Jaula por ítem (para egreso: qué ítems mostrar y el tope de
+     # cantidad). {item_id: cantidad}.
++    #
++    # En modo remoto NO se embebe: con un catalogo grande esto solo era el
++    # ultimo bloque que seguia creciendo con el inventario (~250 KB con 25.000
++    # items). El front lo pide una vez a /api/stock/by-location, que ya existe
++    # y aplica el mismo alcance.
+     jaula_stock = {}
+-    if jaula:
++    if jaula and not items_remote:
+         for s in Stock.query.filter(Stock.location_id == jaula.id, Stock.quantity > 0).all():
+             jaula_stock[s.item_id] = s.quantity
+ 
+     return render_template(
+         "ingresos_egresos.html",
++        items_remote=items_remote,
+         suppliers=suppliers_list,
+         items=items_list,
+         jaula_stock=jaula_stock,
+diff --git a/static/js/app.js b/static/js/app.js
+index 6fb1107..8b2ff76 100644
+--- a/static/js/app.js
++++ b/static/js/app.js
+@@ -260,3 +260,58 @@ function leerDatos(id, porDefecto) {
+     return porDefecto === undefined ? {} : porDefecto;
+   }
+ }
++
++/* ---------- Selector de items acotado por ubicacion de origen (Fase 6) ----------
++ *
++ * Las pantallas de carga (movimientos, lote, utilizados, descartes, ingresos)
++ * volcaban el catalogo COMPLETO en <option> y despues el JS descartaba en el
++ * navegador los items sin stock en el origen elegido. Con 25.000 items eso son
++ * ~4 MB de HTML por pantalla, en cada request, para terminar mostrando unas
++ * pocas opciones.
++ *
++ * Ahora, cuando el catalogo supera ITEM_PICKER_MAX_INLINE, el servidor no manda
++ * ninguna opcion y el select las pide a /api/items/search filtrando por la
++ * ubicacion de origen. El filtrado pasa a hacerse donde estan los datos.
++ *
++ * Debajo del umbral no se usa nada de esto: sigue el camino de siempre.
++ */
++function tomSelectItemsRemoto(el, src, extra) {
++  var opciones = Object.assign({}, window.TS_SINGLE_OPTS, {
++    valueField: "id",
++    labelField: "label",
++    searchField: ["code", "name"],
++    preload: "focus",
++    loadThrottle: 250,
++    sortField: null,            // el backend ya devuelve ordenado por codigo
++    placeholder: "Elegí la ubicación de origen primero...",
++    load: function (query, callback) {
++      var loc = el.getAttribute("data-location") || "";
++      if (!loc) { callback(); return; }
++      fetch(src + "?location_id=" + encodeURIComponent(loc) +
++            "&q=" + encodeURIComponent(query), {
++        credentials: "same-origin",
++        headers: { "Accept": "application/json" }
++      })
++        .then(function (r) { return r.ok ? r.json() : []; })
++        .then(function (filas) { callback(filas || []); })
++        .catch(function () { callback(); });
++    }
++  }, extra || {});
++  return new TomSelect(el, opciones);
++}
++
++/* Reapunta un selector remoto a otra ubicacion de origen. */
++function reiniciarSelectorRemoto(el, locId) {
++  if (!el) return;
++  locId = String(locId || "");
++  el.setAttribute("data-location", locId);
++
++  var ts = el.tomselect;
++  if (!ts) return;
++  ts.clear(true);
++  ts.clearOptions();
++  // TomSelect cachea los resultados por texto buscado. Si no se vacia, al
++  // cambiar de ubicacion sigue ofreciendo los items de la anterior.
++  ts.loadedSearches = {};
++  if (locId) { ts.enable(); ts.load(""); } else { ts.disable(); }
++}
+diff --git a/static/js/ingresos_egresos.js b/static/js/ingresos_egresos.js
+index 2d773dc..a5b05a3 100644
+--- a/static/js/ingresos_egresos.js
++++ b/static/js/ingresos_egresos.js
+@@ -8,6 +8,19 @@ var D = leerDatos("inout-datos");
+   var IO_SERIALIZED = new Set(D.serializedItems || []);
+   var IO_JAULA_UNITS = D.jaulaUnits || {};  // { item_id: [[unit_id, serial], ...] }
+   var IO_JAULA_STOCK = D.jaulaStock || {};  // { item_id: cantidad en Jaula }
++
++  // En modo remoto el stock de la Jaula tampoco viaja embebido: se pide una vez
++  // a /api/stock/by-location y se cachea en el mismo objeto, asi el resto del
++  // codigo (topes de cantidad, seriales) no se entera del cambio.
++  if(D.itemsRemote && D.jaulaId){
++    fetch('/api/stock/by-location?location_id=' + encodeURIComponent(D.jaulaId),
++          {credentials:'same-origin', headers:{'Accept':'application/json'}})
++      .then(function(r){ return r.ok ? r.json() : {qty:{}}; })
++      .then(function(d){
++        Object.keys(d.qty || {}).forEach(function(k){ IO_JAULA_STOCK[k] = d.qty[k]; });
++      })
++      .catch(function(){ /* sin stock cacheado el tope simplemente no se aplica */ });
++  }
+   var IO_ALL_ITEMS = D.items || [];
+   var snCurrentLine = null;
+ 
+@@ -26,6 +39,16 @@ var D = leerDatos("inout-datos");
+     var sel = line.querySelector('.io-item');
+     var ts = sel.tomselect;
+     if(!ts) return;
++
++    // Fase 6: con el catalogo grande no hay lista local. En EGRESO se apunta el
++    // selector a la Jaula (el backend devuelve solo lo que hay ahi) y en
++    // INGRESO se deja sin ubicacion, porque el ingreso viene de Proveedor y
++    // puede ser cualquier item. Es la misma regla que aplicaba allowedItems().
++    if(D.itemsRemote){
++      reiniciarSelectorRemoto(sel, currentTipo() === 'EGRESO' ? D.jaulaId : '');
++      return;
++    }
++
+     var allowed = allowedItems();
+     var cur = ts.getValue();
+     ts.clearOptions();
+@@ -145,8 +168,15 @@ var D = leerDatos("inout-datos");
+   function wireLine(line){
+     var sel = line.querySelector('.io-item');
+     if(window.TomSelect && !sel.tomselect){
+-      new TomSelect(sel, { create:false, sortField:{field:'text',direction:'asc'}, maxOptions:null,
+-                           placeholder:'Buscá un ítem...', onChange:function(){ refreshLine(line); } });
++      if(D.itemsRemote){
++        tomSelectItemsRemoto(sel, D.itemsSearchUrl, {
++          placeholder: 'Buscá un ítem...',
++          onChange: function(){ refreshLine(line); }
++        });
++      } else {
++        new TomSelect(sel, { create:false, sortField:{field:'text',direction:'asc'}, maxOptions:null,
++                             placeholder:'Buscá un ítem...', onChange:function(){ refreshLine(line); } });
++      }
+     }
+     sel.addEventListener('change', function(){ refreshLine(line); });
+     // Si cambia la cantidad: se limpian los seriales elegidos y se aplica el tope.
+diff --git a/static/js/item_usage.js b/static/js/item_usage.js
+index 6b4b657..64f15e1 100644
+--- a/static/js/item_usage.js
++++ b/static/js/item_usage.js
+@@ -66,6 +66,14 @@ document.addEventListener("DOMContentLoaded", function () {
+ 
+   function applyStockFilterToLine(el) {
+     if (!el || !el.tomselect) return;
++
++    // Modo remoto: no hay lista local que filtrar, se reapunta el selector a la
++    // ubicacion elegida y el backend devuelve solo lo que hay ahi.
++    if (D.itemsRemote) {
++      reiniciarSelectorRemoto(el, fromSel ? fromSel.value : "");
++      return;
++    }
++
+     var ts = el.tomselect;
+     var info = allowedForCurrentFrom();
+     ts.clear(true);
+@@ -81,14 +89,23 @@ document.addEventListener("DOMContentLoaded", function () {
+ 
+   function initTomSelectFor(el) {
+     if (!el || el.tomselect) return;
+-    new TomSelect(el, {
+-      create: false,
+-      sortField: { field: "text", direction: "asc" },
+-      placeholder: "Elegí la ubicación de origen primero...",
+-      closeAfterSelect: true,
+-      onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
+-      onChange: function () { this.blur(); clampUsageQty(el.closest(".usage-line")); }
+-    });
++    var alCambiar = function () { this.blur(); clampUsageQty(el.closest(".usage-line")); };
++
++  // Fase 6: con el catalogo grande el servidor no manda ninguna opcion. El
++  // select las pide a /api/items/search acotadas por la ubicacion de origen,
++  // que es exactamente el filtro que antes hacia este JS contra stockMap.
++    if (D.itemsRemote) {
++      tomSelectItemsRemoto(el, D.itemsSearchUrl, { onChange: alCambiar });
++    } else {
++      new TomSelect(el, {
++        create: false,
++        sortField: { field: "text", direction: "asc" },
++        placeholder: "Elegí la ubicación de origen primero...",
++        closeAfterSelect: true,
++        onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
++        onChange: alCambiar
++      });
++    }
+     applyStockFilterToLine(el);
+   }
+ 
+diff --git a/static/js/movements.js b/static/js/movements.js
+index 06500df..cb5d0ef 100644
+--- a/static/js/movements.js
++++ b/static/js/movements.js
+@@ -83,39 +83,58 @@ document.addEventListener("DOMContentLoaded", function () {
+   });
+ 
+   if (itemEl && !itemEl.tomselect) {
+-    var allItems = [];
+-    Array.from(itemEl.options).forEach(function (o) {
+-      if (o.value) allItems.push({ value: o.value, text: o.text });
+-    });
++    var alCambiarItem = function () { this.blur(); refreshSerialUI(); clampMovQty(); };
++    var refreshItems;
+ 
+-    var tsItem = new TomSelect(itemEl, {
+-      create: false,
+-      sortField: { field: "text", direction: "asc" },
+-      placeholder: "Elegí la ubicación de origen primero...",
+-      closeAfterSelect: true,
+-      onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
+-      onChange: function () { this.blur(); refreshSerialUI(); clampMovQty(); }
+-    });
++    if (D.itemsRemote) {
++      // Catalogo grande: las opciones las trae /api/items/search acotadas por la
++      // ubicacion de origen. El servidor no mando ninguna <option>.
++      tomSelectItemsRemoto(itemEl, D.itemsSearchUrl, { onChange: alCambiarItem });
+ 
+-    var refreshItems = function () {
+-      var locId = fromSel ? String(fromSel.value || "") : "";
+-      var isExternal = externalLocIds.indexOf(locId) !== -1;
+-      tsItem.clear(true);
+-      tsItem.clearOptions();
+-      if (isExternal) {
+-        // Ubicación externa (Proveedor/Baja): puede mover cualquier ítem.
+-        allItems.forEach(function (o) { tsItem.addOption(o); });
+-      } else {
+-        var allowed = stockMap[locId] || [];
+-        var allowedSet = {};
+-        allowed.forEach(function (id) { allowedSet[String(id)] = true; });
+-        allItems.forEach(function (o) { if (allowedSet[o.value]) tsItem.addOption(o); });
+-      }
+-      tsItem.refreshOptions(false);
+-      if (!locId) { tsItem.disable(); } else { tsItem.enable(); }
+-      refreshSerialUI();
+-      clampMovQty();
+-    };
++      refreshItems = function () {
++        // Externa (Proveedor/Baja): el endpoint no filtra por stock, porque esas
++        // ubicaciones no tienen stock propio y admiten cualquier item. Es la
++        // misma regla que aplicaba externalLocIds aca abajo.
++        reiniciarSelectorRemoto(itemEl, fromSel ? fromSel.value : "");
++        refreshSerialUI();
++        clampMovQty();
++      };
++    } else {
++      // Catalogo chico: camino historico, sin un solo cambio de comportamiento.
++      var allItems = [];
++      Array.from(itemEl.options).forEach(function (o) {
++        if (o.value) allItems.push({ value: o.value, text: o.text });
++      });
++
++      var tsItem = new TomSelect(itemEl, {
++        create: false,
++        sortField: { field: "text", direction: "asc" },
++        placeholder: "Elegí la ubicación de origen primero...",
++        closeAfterSelect: true,
++        onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
++        onChange: alCambiarItem
++      });
++
++      refreshItems = function () {
++        var locId = fromSel ? String(fromSel.value || "") : "";
++        var isExternal = externalLocIds.indexOf(locId) !== -1;
++        tsItem.clear(true);
++        tsItem.clearOptions();
++        if (isExternal) {
++          // Ubicación externa (Proveedor/Baja): puede mover cualquier ítem.
++          allItems.forEach(function (o) { tsItem.addOption(o); });
++        } else {
++          var allowed = stockMap[locId] || [];
++          var allowedSet = {};
++          allowed.forEach(function (id) { allowedSet[String(id)] = true; });
++          allItems.forEach(function (o) { if (allowedSet[o.value]) tsItem.addOption(o); });
++        }
++        tsItem.refreshOptions(false);
++        if (!locId) { tsItem.disable(); } else { tsItem.enable(); }
++        refreshSerialUI();
++        clampMovQty();
++      };
++    }
+ 
+     var refreshItemsConStock = function () {
+       ensureStock(fromSel ? fromSel.value : "", refreshItems);
+diff --git a/static/js/movements_bulk.js b/static/js/movements_bulk.js
+index f5b289e..53ab8cc 100644
+--- a/static/js/movements_bulk.js
++++ b/static/js/movements_bulk.js
+@@ -64,6 +64,15 @@ var D = leerDatos("movements-bulk-datos");
+ 
+   function applyStockFilterToLine(el) {
+     if (!el || !el.tomselect) return;
++
++    // Modo remoto: no hay lista local que filtrar, se reapunta el selector a la
++    // ubicacion elegida y el backend devuelve solo lo que hay ahi.
++    if (D.itemsRemote) {
++      var fs = document.getElementById("bulk_from_location_id");
++      reiniciarSelectorRemoto(el, fs ? fs.value : "");
++      return;
++    }
++
+     var ts = el.tomselect;
+     var info = allowedForCurrentFrom();
+     ts.clear(true);
+@@ -81,14 +90,23 @@ var D = leerDatos("movements-bulk-datos");
+   function initTomSelectFor(el) {
+     if (!el) return;
+     if (el.tomselect) return;
+-    new TomSelect(el, {
+-      create: false,
+-      sortField: { field: "text", direction: "asc" },
+-      placeholder: "Elegí la ubicación de origen primero...",
+-      closeAfterSelect: true,
+-      onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
+-      onChange: function () { this.blur(); clampBulkQty(el.closest(".bulk-line")); }
+-    });
++    var alCambiar = function () { this.blur(); clampBulkQty(el.closest(".bulk-line")); };
++
++  // Fase 6: con el catalogo grande el servidor no manda ninguna opcion. El
++  // select las pide a /api/items/search acotadas por la ubicacion de origen,
++  // que es exactamente el filtro que antes hacia este JS contra stockMap.
++    if (D.itemsRemote) {
++      tomSelectItemsRemoto(el, D.itemsSearchUrl, { onChange: alCambiar });
++    } else {
++      new TomSelect(el, {
++        create: false,
++        sortField: { field: "text", direction: "asc" },
++        placeholder: "Elegí la ubicación de origen primero...",
++        closeAfterSelect: true,
++        onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
++        onChange: alCambiar
++      });
++    }
+     applyStockFilterToLine(el);
+   }
+ 
+diff --git a/static/js/scrap_report.js b/static/js/scrap_report.js
+index c7416f1..4890a3a 100644
+--- a/static/js/scrap_report.js
++++ b/static/js/scrap_report.js
+@@ -65,6 +65,14 @@ document.addEventListener("DOMContentLoaded", function () {
+ 
+   function applyStockFilterToLine(el) {
+     if (!el || !el.tomselect) return;
++
++    // Modo remoto: no hay lista local que filtrar, se reapunta el selector a la
++    // ubicacion elegida y el backend devuelve solo lo que hay ahi.
++    if (D.itemsRemote) {
++      reiniciarSelectorRemoto(el, fromSel ? fromSel.value : "");
++      return;
++    }
++
+     var ts = el.tomselect;
+     var info = allowedForCurrentFrom();
+     ts.clear(true);
+@@ -80,14 +88,23 @@ document.addEventListener("DOMContentLoaded", function () {
+ 
+   function initTomSelectFor(el) {
+     if (!el || el.tomselect) return;
+-    new TomSelect(el, {
+-      create: false,
+-      sortField: { field: "text", direction: "asc" },
+-      placeholder: "Elegí la ubicación de origen primero...",
+-      closeAfterSelect: true,
+-      onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
+-      onChange: function () { this.blur(); clampScrapQty(el.closest(".scrap-line")); }
+-    });
++    var alCambiar = function () { this.blur(); clampScrapQty(el.closest(".scrap-line")); };
++
++  // Fase 6: con el catalogo grande el servidor no manda ninguna opcion. El
++  // select las pide a /api/items/search acotadas por la ubicacion de origen,
++  // que es exactamente el filtro que antes hacia este JS contra stockMap.
++    if (D.itemsRemote) {
++      tomSelectItemsRemoto(el, D.itemsSearchUrl, { onChange: alCambiar });
++    } else {
++      new TomSelect(el, {
++        create: false,
++        sortField: { field: "text", direction: "asc" },
++        placeholder: "Elegí la ubicación de origen primero...",
++        closeAfterSelect: true,
++        onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
++        onChange: alCambiar
++      });
++    }
+     applyStockFilterToLine(el);
+   }
+ 
+diff --git a/templates/ingresos_egresos.html b/templates/ingresos_egresos.html
+index b32b360..b486245 100644
+--- a/templates/ingresos_egresos.html
++++ b/templates/ingresos_egresos.html
+@@ -64,7 +64,7 @@
+       <label>Ítem</label>
+       <select name="item_id[]" class="io-item" required>
+         <option value="" selected disabled>Seleccionar ítem</option>
+-        {% for i in items %}<option value="{{ i.id }}">{{ i.code }} - {{ i.name }}</option>{% endfor %}
++        {% for i in items %}<option value="{{ i.value }}">{{ i.text }}</option>{% endfor %}
+       </select>
+     </div>
+     <div class="field">
+@@ -139,7 +139,10 @@
+   "serializedItems": {{ serialized_item_ids|tojson }},
+   "jaulaUnits": {{ jaula_units|tojson }},
+   "jaulaStock": {{ jaula_stock|tojson }},
+-  "items": {{ opciones_items(items)|tojson }}
++  "items": {{ items|tojson }},
++  "itemsRemote": {{ items_remote|tojson }},
++  "itemsSearchUrl": {{ url_for('api_items_search')|tojson }},
++  "jaulaId": {{ (jaula.id if jaula else '')|string|tojson }}
+ }
+ </script>
+ {% endblock %}
+diff --git a/templates/item_usage.html b/templates/item_usage.html
+index 7a1236c..d4e8426 100644
+--- a/templates/item_usage.html
++++ b/templates/item_usage.html
+@@ -54,10 +54,11 @@
+   <div class="usage-line" style="display:flex; gap:12px; align-items:flex-end; margin-bottom:10px; flex-wrap:wrap;">
+     <div class="usage-item-select field" style="flex:1; min-width:240px;">
+       <label>Item</label>
+-      <select name="item_id[]" class="usage-item" required>
++      <select name="item_id[]" class="usage-item" required
++              {% if items_remote %}data-location=""{% endif %}>
+         <option value="">Seleccionar item</option>
+         {% for it in items %}
+-          <option value="{{ it.id }}">{{ it.code }} - {{ it.name }}</option>
++          <option value="{{ it.value }}">{{ it.text }}</option>
+         {% endfor %}
+       </select>
+     </div>
+@@ -98,10 +99,15 @@
+     </div>
+     <div class="field">
+       <label>Item</label>
+-      <select name="item_id" class="js-buscar">
++      <select name="item_id"
++              class="js-buscar{% if items_remote %} js-buscar-remoto{% endif %}"
++              {% if items_remote %}data-src="{{ url_for('api_items_search') }}" data-value-field="id"{% endif %}>
+         <option value="">Todos</option>
++        {% if item_seleccionado %}
++          <option value="{{ item_seleccionado.value }}" selected>{{ item_seleccionado.text }}</option>
++        {% endif %}
+         {% for it in items %}
+-          <option value="{{ it.id }}" {% if item_filter and (item_filter|string) == (it.id|string) %}selected{% endif %}>{{ it.code }} - {{ it.name }}</option>
++          <option value="{{ it.value }}" {% if item_filter and (item_filter|string) == it.value %}selected{% endif %}>{{ it.text }}</option>
+         {% endfor %}
+       </select>
+     </div>
+@@ -176,7 +182,9 @@
+   "stockQtyMap": {{ stock_qty_map|tojson }},
+   "stockRemote": {{ stock_remote|tojson }},
+   "serializedItems": {{ serialized_item_ids|tojson }},
+-  "items": {{ opciones_items(items, true)|tojson }}
++  "itemsRemote": {{ items_remote|tojson }},
++  "itemsSearchUrl": {{ url_for('api_items_search')|tojson }},
++  "items": {{ items|tojson }}
+ }
+ </script>
+ {% endblock %}
+diff --git a/templates/movements.html b/templates/movements.html
+index 7eaf8cb..70f3343 100644
+--- a/templates/movements.html
++++ b/templates/movements.html
+@@ -52,10 +52,11 @@
+ 
+       <div class="field">
+         <label>Item <span class="muted" style="font-weight:400;">(según la ubicación de origen)</span></label>
+-        <select name="item_id" id="item_id" required>
++        <select name="item_id" id="item_id" required
++                {% if items_remote %}data-location=""{% endif %}>
+           <option value="" selected disabled>Elegí la ubicación primero...</option>
+           {% for it in items %}
+-            <option value="{{ it.id }}">{{ it.code }} - {{ it.name }}</option>
++            <option value="{{ it.value }}">{{ it.text }}</option>
+           {% endfor %}
+         </select>
+       </div>
+@@ -109,10 +110,12 @@
+       </div>
+       <div class="field">
+         <label for="pending_return_item_id">¿Qué deben devolver?</label>
+-        <select name="pending_return_item_id" id="pending_return_item_id" class="js-buscar">
++        <select name="pending_return_item_id" id="pending_return_item_id"
++                class="js-buscar{% if items_remote %} js-buscar-remoto{% endif %}"
++                {% if items_remote %}data-src="{{ url_for('api_items_search') }}" data-value-field="id"{% endif %}>
+           <option value="">El mismo ítem entregado</option>
+           {% for it in items %}
+-            <option value="{{ it.id }}">{{ it.code }} - {{ it.name }}</option>
++            <option value="{{ it.value }}">{{ it.text }}</option>
+           {% endfor %}
+         </select>
+         <span class="muted" style="font-weight:400;">Elegí otro si deben traer un ítem distinto (ej. entregás domo y traen Onvif).</span>
+@@ -162,10 +165,15 @@
+     </div>
+     <div class="field">
+       <label>Item</label>
+-      <select name="item_id" class="js-buscar">
++      <select name="item_id"
++              class="js-buscar{% if items_remote %} js-buscar-remoto{% endif %}"
++              {% if items_remote %}data-src="{{ url_for('api_items_search') }}" data-value-field="id"{% endif %}>
+         <option value="">Todos</option>
++        {% if item_seleccionado %}
++          <option value="{{ item_seleccionado.value }}" selected>{{ item_seleccionado.text }}</option>
++        {% endif %}
+         {% for it in items %}
+-          <option value="{{ it.id }}" {% if item_filter and (item_filter|int) == it.id %}selected{% endif %}>{{ it.code }} - {{ it.name }}</option>
++          <option value="{{ it.value }}" {% if item_filter and (item_filter|string) == it.value %}selected{% endif %}>{{ it.text }}</option>
+         {% endfor %}
+       </select>
+     </div>
+@@ -241,7 +249,9 @@
+   "externalLocIds": {{ external_location_ids|tojson }},
+   "unitsMap": {{ units_map|tojson }},
+   "serializedItems": {{ serialized_item_ids|tojson }},
+-  "descartesId": {{ (descartes_id or '')|string|tojson }}
++  "descartesId": {{ (descartes_id or '')|string|tojson }},
++  "itemsRemote": {{ items_remote|tojson }},
++  "itemsSearchUrl": {{ url_for('api_items_search')|tojson }}
+ }
+ </script>
+ {% endblock %}
+diff --git a/templates/movements_bulk.html b/templates/movements_bulk.html
+index 81fd00c..2c64134 100644
+--- a/templates/movements_bulk.html
++++ b/templates/movements_bulk.html
+@@ -56,10 +56,11 @@
+   <div class="bulk-line">
+     <div class="bulk-item-select field">
+       <label>Item</label>
+-      <select name="item_id[]" class="bulk-item" required>
++      <select name="item_id[]" class="bulk-item" required
++              {% if items_remote %}data-location=""{% endif %}>
+         <option value="">Seleccionar item</option>
+         {% for i in items %}
+-          <option value="{{ i.id }}">{{ i.code }} - {{ i.name }}</option>
++          <option value="{{ i.value }}">{{ i.text }}</option>
+         {% endfor %}
+       </select>
+     </div>
+@@ -88,10 +89,13 @@
+     <div class="pending-comment-wrap field">
+       <label>Pendiente: devolución</label>
+       <input type="text" name="pending_comment[]" placeholder="Comentario del pendiente" style="width:100%; margin-bottom:6px;">
+-      <select name="pending_return_item_id[]" class="pending-return-item" style="width:100%; margin-bottom:6px;">
++      <select name="pending_return_item_id[]"
++              class="pending-return-item{% if items_remote %} js-buscar js-buscar-remoto{% endif %}"
++              {% if items_remote %}data-src="{{ url_for('api_items_search') }}" data-value-field="id"{% endif %}
++              style="width:100%; margin-bottom:6px;">
+         <option value="">Devuelve el mismo ítem</option>
+         {% for i in items %}
+-          <option value="{{ i.id }}">{{ i.code }} - {{ i.name }}</option>
++          <option value="{{ i.value }}">{{ i.text }}</option>
+         {% endfor %}
+       </select>
+       <input type="number" name="pending_return_qty[]" min="1" placeholder="Cant. a devolver (igual a la entregada)" style="width:100%;">
+@@ -110,7 +114,9 @@
+   "stockRemote": {{ stock_remote|tojson }},
+   "externalLocIds": {{ external_location_ids|tojson }},
+   "descartesId": {{ (descartes_id or '')|string|tojson }},
+-  "items": {{ opciones_items(items)|tojson }}
++  "itemsRemote": {{ items_remote|tojson }},
++  "itemsSearchUrl": {{ url_for('api_items_search')|tojson }},
++  "items": {{ items|tojson }}
+ }
+ </script>
+ {% endblock %}
+diff --git a/templates/scrap_report.html b/templates/scrap_report.html
+index 63640f3..ab29e63 100644
+--- a/templates/scrap_report.html
++++ b/templates/scrap_report.html
+@@ -44,10 +44,11 @@
+   <div class="scrap-line" style="display:flex; gap:12px; align-items:flex-end; margin-bottom:10px; flex-wrap:wrap;">
+     <div class="scrap-item-select field" style="flex:1; min-width:240px;">
+       <label>Item</label>
+-      <select name="item_id[]" class="scrap-item" required>
++      <select name="item_id[]" class="scrap-item" required
++              {% if items_remote %}data-location=""{% endif %}>
+         <option value="">Seleccionar item</option>
+         {% for it in items %}
+-          <option value="{{ it.id }}">{{ it.code }} - {{ it.name }}</option>
++          <option value="{{ it.value }}">{{ it.text }}</option>
+         {% endfor %}
+       </select>
+     </div>
+@@ -99,10 +100,15 @@
+     </div>
+     <div class="field">
+       <label>Item</label>
+-      <select name="item_id" class="js-buscar">
++      <select name="item_id"
++              class="js-buscar{% if items_remote %} js-buscar-remoto{% endif %}"
++              {% if items_remote %}data-src="{{ url_for('api_items_search') }}" data-value-field="id"{% endif %}>
+         <option value="">Todos</option>
++        {% if item_seleccionado %}
++          <option value="{{ item_seleccionado.value }}" selected>{{ item_seleccionado.text }}</option>
++        {% endif %}
+         {% for it in items %}
+-          <option value="{{ it.id }}" {% if item_filter and (item_filter|string) == (it.id|string) %}selected{% endif %}>{{ it.code }} - {{ it.name }}</option>
++          <option value="{{ it.value }}" {% if item_filter and (item_filter|string) == it.value %}selected{% endif %}>{{ it.text }}</option>
+         {% endfor %}
+       </select>
+     </div>
+@@ -180,7 +186,9 @@
+   "stockMap": {{ stock_map|tojson }},
+   "stockQtyMap": {{ stock_qty_map|tojson }},
+   "stockRemote": {{ stock_remote|tojson }},
+-  "items": {{ opciones_items(items, true)|tojson }}
++  "itemsRemote": {{ items_remote|tojson }},
++  "itemsSearchUrl": {{ url_for('api_items_search')|tojson }},
++  "items": {{ items|tojson }}
+ }
+ </script>
+ {% endblock %}
+diff --git a/tests/test_items_remoto.py b/tests/test_items_remoto.py
+new file mode 100644
+index 0000000..19b12ec
+--- /dev/null
++++ b/tests/test_items_remoto.py
+@@ -0,0 +1,212 @@
++"""Fase 6 — el catálogo de ítems deja de viajar dentro del HTML.
++
++Antes de esta fase, `/movements`, `/movements/bulk`, `/item-usage`, `/scrap` e
++`/ingresos-egresos` volcaban el catálogo COMPLETO en `<option>` y el JavaScript
++descartaba en el navegador los ítems sin stock en el origen elegido. Medido: con
++25.000 ítems eran ~5 MB de HTML por pantalla, en cada request, para terminar
++mostrando unas pocas opciones.
++
++Ahora, por encima de ITEM_PICKER_MAX_INLINE, el servidor no manda ninguna opción
++y el filtrado ocurre donde están los datos.
++
++Lo que estos tests cuidan:
++  - por debajo del umbral NO cambia nada (compatibilidad con el volumen actual)
++  - por encima, el HTML deja de crecer con el catálogo
++  - la API acota por ubicación igual que lo hacía el JS
++  - y respeta el alcance del TÉCNICO, que es lo que no se puede perder
++"""
++import re
++
++import pytest
++from conftest import make_user, make_item, make_location, login
++
++PANTALLAS = ["/movements", "/movements/bulk", "/item-usage", "/scrap", "/ingresos-egresos"]
++
++
++@pytest.fixture()
++def esc(A):
++    A.app.config["WTF_CSRF_ENABLED"] = False
++
++    tec = make_user(A, "tec", "TECNICO")
++    make_user(A, "adm2", "ADMIN")
++
++    jaula = make_location(A, A.LOCATION_JAULA_TNG)
++    make_location(A, A.LOCATION_PROVEEDOR, is_external=True)
++    mi_cam = make_location(A, "Camioneta Mia", is_truck=True)
++    otra = make_location(A, "Camioneta Ajena", is_truck=True)
++
++    A.db.session.add(A.LocationResponsible(location_id=mi_cam.id, user_id=tec.id))
++    A.db.session.commit()
++
++    it_mio = make_item(A, code="MIO-001", name="Item mio")
++    it_ajeno = make_item(A, code="AJE-001", name="Item ajeno")
++    it_jaula = make_item(A, code="JAU-001", name="Item de jaula")
++    it_sin = make_item(A, code="SIN-001", name="Item sin stock")
++
++    A.upsert_stock(it_mio.id, mi_cam.id, 7)
++    A.upsert_stock(it_ajeno.id, otra.id, 9)
++    A.upsert_stock(it_jaula.id, jaula.id, 100)
++    A.db.session.commit()
++
++    return {"tec": tec, "jaula": jaula, "mi_cam": mi_cam, "otra": otra,
++            "it_mio": it_mio, "it_ajeno": it_ajeno, "it_jaula": it_jaula,
++            "it_sin": it_sin,
++            "proveedor": A.Location.query.filter_by(name=A.LOCATION_PROVEEDOR).first()}
++
++
++def _como(A, username):
++    c = A.app.test_client()
++    login(c, username)
++    return c
++
++
++@pytest.fixture()
++def umbral(A):
++    original = A.ITEM_PICKER_MAX_INLINE
++    yield lambda v: setattr(A, "ITEM_PICKER_MAX_INLINE", v)
++    A.ITEM_PICKER_MAX_INLINE = original
++
++
++def _n_options(html):
++    return len(re.findall(r'<option value="\d+"', html))
++
++
++def _sembrar_catalogo(A, n, prefijo="MASA"):
++    cat = A.Category.query.first()
++    A.db.session.bulk_save_objects([
++        A.Item(code=f"{prefijo}-{i:05d}", name=f"Item masivo {i}",
++               category_id=cat.id, is_active=True)
++        for i in range(n)
++    ])
++    A.db.session.commit()
++
++
++# --------------------------------------------------- compatibilidad (hoy)
++
++@pytest.mark.parametrize("ruta", PANTALLAS)
++def test_catalogo_chico_sigue_embebido(A, esc, umbral, ruta):
++    """Con el volumen actual (299 items) no debe cambiar absolutamente nada."""
++    umbral(800)
++    html = _como(A, "adm2").get(ruta).get_data(as_text=True)
++    assert _n_options(html) > 0, f"{ruta} dejo de embeber opciones sin superar el umbral"
++
++
++def test_umbral_por_defecto_es_el_de_siempre(A):
++    """El umbral se comparte con el selector de /stock desde el 2026-08-13."""
++    assert A.ITEM_PICKER_MAX_INLINE >= 800
++
++
++# ------------------------------------------------------------ modo remoto
++
++@pytest.mark.parametrize("ruta", PANTALLAS)
++def test_catalogo_grande_no_viaja_en_el_html(A, esc, umbral, ruta):
++    umbral(0)
++    _sembrar_catalogo(A, 200)
++    html = _como(A, "adm2").get(ruta).get_data(as_text=True)
++    assert _n_options(html) < 30, (
++        f"{ruta} sigue mandando {_n_options(html)} opciones con el modo remoto activo"
++    )
++
++
++@pytest.mark.parametrize("ruta", PANTALLAS)
++def test_el_html_no_crece_con_el_catalogo(A, esc, umbral, ruta):
++    """La prueba de fondo: mas items no debe pesar mas HTML."""
++    umbral(0)
++    c = _como(A, "adm2")
++    antes = len(c.get(ruta).get_data())
++    _sembrar_catalogo(A, 500)
++    despues = len(c.get(ruta).get_data())
++    assert despues - antes < 5_000, (
++        f"{ruta} crecio {despues - antes} bytes al agregar 500 items"
++    )
++
++
++def test_en_modo_embebido_el_html_si_crece(A, esc, umbral):
++    """Contraprueba: sin modo remoto el problema existe. Evita un falso verde."""
++    umbral(999_999)
++    c = _como(A, "adm2")
++    antes = len(c.get("/movements").get_data())
++    _sembrar_catalogo(A, 500)
++    assert len(c.get("/movements").get_data()) - antes > 20_000
++
++
++# ------------------------------------------- la API acota por ubicacion
++
++def _codigos(resp):
++    return {f["code"] for f in resp.get_json()}
++
++
++def test_api_acota_por_ubicacion_interna(A, esc):
++    """Debe devolver solo lo que TIENE stock ahi: es el filtro que hacia el JS."""
++    c = _como(A, "adm2")
++    cods = _codigos(c.get(f"/api/items/search?location_id={esc['mi_cam'].id}"))
++    assert "MIO-001" in cods
++    assert "AJE-001" not in cods
++    assert "JAU-001" not in cods
++    assert "SIN-001" not in cods
++
++
++def test_api_no_acota_en_ubicacion_externa(A, esc):
++    """Proveedor/Baja no tienen stock propio: admiten cualquier item."""
++    cods = _codigos(_como(A, "adm2").get(
++        f"/api/items/search?location_id={esc['proveedor'].id}"))
++    assert {"MIO-001", "AJE-001", "JAU-001", "SIN-001"} <= cods
++
++
++def test_api_sin_ubicacion_devuelve_todo(A, esc):
++    cods = _codigos(_como(A, "adm2").get("/api/items/search"))
++    assert "SIN-001" in cods
++
++
++@pytest.mark.parametrize("valor", ["", "abc", "-1", "999999", "1;DROP TABLE items"])
++def test_api_tolera_basura_en_location_id(A, esc, valor):
++    r = _como(A, "adm2").get("/api/items/search", query_string={"location_id": valor})
++    assert r.status_code == 200
++    assert isinstance(r.get_json(), list)
++
++
++def test_api_respeta_el_limite(A, esc, umbral):
++    _sembrar_catalogo(A, 300)
++    r = _como(A, "adm2").get("/api/items/search")
++    assert len(r.get_json()) <= A.ITEM_SEARCH_LIMIT
++
++
++# ------------------------------------- el alcance del TECNICO no se pierde
++
++def test_tecnico_no_ve_items_de_ubicacion_ajena_por_la_api(A, esc):
++    """Lo importante de la fase: acotar el HTML no puede abrir la API."""
++    cods = _codigos(_como(A, "tec").get(
++        f"/api/items/search?location_id={esc['otra'].id}"))
++    assert "AJE-001" not in cods
++
++
++def test_tecnico_si_ve_los_suyos(A, esc):
++    cods = _codigos(_como(A, "tec").get(
++        f"/api/items/search?location_id={esc['mi_cam'].id}"))
++    assert "MIO-001" in cods
++
++
++def test_tecnico_no_ve_el_catalogo_completo_ni_sin_ubicacion(A, esc):
++    """Sin location_id sigue mandando items_visible_query(), que ya lo acota."""
++    cods = _codigos(_como(A, "tec").get("/api/items/search"))
++    assert "MIO-001" in cods
++    assert "AJE-001" not in cods
++    assert "JAU-001" not in cods
++
++
++def test_tecnico_no_puede_usar_una_externa_para_ver_todo(A, esc):
++    """Una ubicacion externa no filtra por stock, pero el alcance del rol sigue."""
++    cods = _codigos(_como(A, "tec").get(
++        f"/api/items/search?location_id={esc['proveedor'].id}"))
++    assert "AJE-001" not in cods
++    assert "JAU-001" not in cods
++
++
++# ------------------------------------------------ el filtro sigue visible
++
++def test_el_filtro_aplicado_se_sigue_viendo_en_modo_remoto(A, esc, umbral):
++    """Con el select vacio, un filtro vigente quedaria en blanco al recargar."""
++    umbral(0)
++    html = _como(A, "adm2").get(
++        f"/movements?item_id={esc['it_jaula'].id}").get_data(as_text=True)
++    assert "JAU-001" in html, "se perdio el item elegido en el filtro"
+diff --git a/tests/test_stock_map_remoto.py b/tests/test_stock_map_remoto.py
+index 78b8ef0..186813d 100644
+--- a/tests/test_stock_map_remoto.py
++++ b/tests/test_stock_map_remoto.py
+@@ -125,22 +125,27 @@ def test_en_modo_embebido_el_mapa_si_crece(A, esc, umbral):
+     assert _peso_mapa(c.get("/movements").get_data(as_text=True)) > antes * 5
+ 
+ 
+-@pytest.mark.xfail(reason="Limitacion conocida: el <select> de items de estas 4 "
+-                          "pantallas se sigue renderizando completo. No usan "
+-                          "item_picker_options(). Queda como hallazgo aparte.",
+-                   strict=True)
+-def test_el_select_de_items_todavia_se_embebe_completo(A, esc, umbral):
+-    """Documenta lo que la Fase 2 NO resolvio, para que no se pierda.
+-
+-    Medido: con 300 items el HTML de /movements crece ~64 KB aunque el mapa de
+-    stock vaya vacio. El peso ya no viene del stock sino del catalogo.
++def test_el_select_de_items_tampoco_se_embebe_ya(A, esc, umbral):
++    """Lo que en la Fase 2 quedo pendiente y la Fase 6 cerro.
++
++    Cuando se escribio este archivo, /movements crecia ~64 KB con 300 items
++    aunque el mapa de stock fuera vacio: el peso venia del <select> del
++    catalogo. Estaba marcado xfail para no perderlo de vista. Ahora ese select
++    tambien es remoto (ver test_items_remoto.py) y el test pasa de verdad.
+     """
+     umbral(0)
+-    c = _como(A, "adm2")
+-    antes = len(c.get("/movements").get_data())
+-    _sembrar_stock(A, esc["jaula"], 300, "BULK")
+-    despues = len(c.get("/movements").get_data())
+-    assert despues - antes < 10_000
++    original = A.ITEM_PICKER_MAX_INLINE
++    A.ITEM_PICKER_MAX_INLINE = 0
++    try:
++        c = _como(A, "adm2")
++        antes = len(c.get("/movements").get_data())
++        _sembrar_stock(A, esc["jaula"], 300, "BULK")
++        despues = len(c.get("/movements").get_data())
++        assert despues - antes < 10_000, (
++            f"el HTML crecio {despues - antes} bytes al agregar 300 items"
++        )
++    finally:
++        A.ITEM_PICKER_MAX_INLINE = original
+ 
+ 
+ # ------------------------------------------------------------- el endpoint
+diff --git a/verificacion/verificar_items_remoto.py b/verificacion/verificar_items_remoto.py
+new file mode 100644
+index 0000000..7415846
+--- /dev/null
++++ b/verificacion/verificar_items_remoto.py
+@@ -0,0 +1,207 @@
++"""Fase 6 — verificación en navegador del selector de ítems remoto.
++
++Monta un catálogo grande (por encima de ITEM_PICKER_MAX_INLINE) y comprueba en
++Chromium que /movements siga ofreciendo exactamente los mismos ítems que antes,
++pero sin volcar el catálogo en el HTML.
++
++Lo que se verifica:
++  - el HTML no trae las opciones (peso acotado, no crece con el catálogo)
++  - al elegir una ubicación interna, solo aparecen los ítems CON stock ahí
++  - al cambiar de ubicación, la lista cambia (no queda cacheada la anterior)
++  - una ubicación externa (Proveedor/Baja) ofrece cualquier ítem
++  - el tope de cantidad sigue saliendo bien
++  - cero errores de JavaScript
++
++Base sintética y temporal. No toca ningún dato real.
++"""
++import json
++import os
++import re
++import sys
++import tempfile
++import threading
++import time
++from wsgiref.simple_server import make_server
++
++N_ITEMS = int(os.environ.get("N_ITEMS", "3000"))
++
++_T = tempfile.mkdtemp(prefix="verif_items_")
++os.environ.update(
++    STOCKS_DB_PATH=os.path.join(_T, "data", "s.db"),
++    STOCKS_BACKUP_DIR=os.path.join(_T, "b"),
++    STOCKS_LOG_DIR=os.path.join(_T, "l"),
++    FLASK_SECRET_KEY="verificacion-items",
++    APP_DEBUG="false",
++    RATELIMIT_ENABLED="false",
++)
++sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++
++import app as A  # noqa: E402
++
++A.app.config["WTF_CSRF_ENABLED"] = False
++FALLAS = []
++D = {}
++
++
++def chequear(cond, msg):
++    print(("  OK   " if cond else "  FALLA") + "  " + msg)
++    if not cond:
++        FALLAS.append(msg)
++
++
++def sembrar():
++    with A.app.app_context():
++        A.db.drop_all()
++        A.db.create_all()
++        A.seed_defaults()
++
++        cat = A.Category(name="Cables", prefix="CAB")
++        A.db.session.add(cat)
++        A.db.session.commit()
++
++        jaula = A.Location.query.filter_by(name=A.LOCATION_JAULA_TNG).first()
++        if not jaula:
++            jaula = A.Location(name=A.LOCATION_JAULA_TNG)
++            A.db.session.add(jaula)
++        cam_a = A.Location(name="Camioneta A", is_truck=True)
++        cam_b = A.Location(name="Camioneta B", is_truck=True)
++        A.db.session.add_all([cam_a, cam_b])
++        A.db.session.commit()
++
++        A.db.session.bulk_save_objects([
++            A.Item(code="CAB-%05d" % i, name="Cable modelo %d" % i,
++                   category_id=cat.id, is_active=True)
++            for i in range(N_ITEMS)
++        ])
++        A.db.session.commit()
++
++        its = A.Item.query.order_by(A.Item.code).all()
++        # Reparto a proposito desparejo, para poder distinguir una ubicacion de otra:
++        #   Camioneta A -> los 5 primeros    Camioneta B -> los 5 siguientes
++        #   Jaula       -> del 10 en adelante
++        filas = []
++        filas += [A.Stock(item_id=i.id, location_id=cam_a.id, quantity=7) for i in its[:5]]
++        filas += [A.Stock(item_id=i.id, location_id=cam_b.id, quantity=9) for i in its[5:10]]
++        filas += [A.Stock(item_id=i.id, location_id=jaula.id, quantity=3) for i in its[10:]]
++        A.db.session.bulk_save_objects(filas)
++        A.db.session.commit()
++
++        u = A.User(username="adm2", full_name="Admin Dos", role="ADMIN")
++        u.set_password("pass1234")
++        A.db.session.add(u)
++        A.db.session.commit()
++
++        D.update(
++            cam_a=cam_a.id, cam_b=cam_b.id, jaula=jaula.id,
++            item_a=its[0].code, item_b=its[5].code, item_jaula=its[10].code,
++            total=A.Item.query.count(),
++        )
++
++
++def opciones(pag):
++    return pag.evaluate(
++        "Object.values(document.getElementById('item_id').tomselect.options)"
++        ".map(function(o){return o.label || o.text;})")
++
++
++def elegir(pag, loc_id):
++    pag.select_option("#from_location_id", str(loc_id))
++    pag.wait_for_timeout(1200)
++
++
++def main():
++    sembrar()
++    srv = make_server("127.0.0.1", 5097, A.app)
++    threading.Thread(target=srv.serve_forever, daemon=True).start()
++    time.sleep(0.6)
++    base = "http://127.0.0.1:5097"
++
++    from playwright.sync_api import sync_playwright
++
++    with sync_playwright() as pw:
++        nav = pw.chromium.launch(
++            executable_path="/opt/pw-browsers/chromium-1194/chrome-linux/chrome")
++        pag = nav.new_page()
++        errores = []
++        pag.on("pageerror", lambda e: errores.append(str(e)))
++
++        pag.goto(base + "/login")
++        pag.fill('input[name="username"]', "adm2")
++        pag.fill('input[name="password"]', "pass1234")
++        pag.click('button[type="submit"], input[type="submit"]')
++        pag.wait_for_load_state("networkidle")
++
++        pag.goto(base + "/movements")
++        pag.wait_for_load_state("networkidle")
++        html = pag.content()
++
++        print("catalogo: %d items | umbral: %d\n" % (D["total"], A.ITEM_PICKER_MAX_INLINE))
++
++        # --- 1. el catalogo no viaja ---
++        isla = json.loads(re.search(
++            r'<script type="application/json" id="movements-datos">\s*(.*?)\s*</script>',
++            html, re.S).group(1))
++        remoto = D["total"] > A.ITEM_PICKER_MAX_INLINE
++        n_options = len(re.findall(r'<option value="\d+"', html))
++        chequear(isla.get("itemsRemote") is remoto,
++                 "modo remoto = %s (catalogo %d vs umbral %d)"
++                 % (remoto, D["total"], A.ITEM_PICKER_MAX_INLINE))
++        if remoto:
++            chequear(n_options < 50,
++                     "el HTML trae %d <option> (antes traia %d)" % (n_options, D["total"]))
++        else:
++            # Debajo del umbral tiene que seguir embebiendo, como siempre.
++            chequear(n_options >= D["total"],
++                     "catalogo chico: el HTML sigue trayendo las %d opciones (%d)"
++                     % (D["total"], n_options))
++
++        # --- 2. ubicacion interna: solo sus items ---
++        elegir(pag, D["cam_a"])
++        ops = opciones(pag)
++        chequear(any(o.startswith(D["item_a"]) for o in ops),
++                 "Camioneta A ofrece su item (%d opciones)" % len(ops))
++        chequear(not any(o.startswith(D["item_b"]) for o in ops),
++                 "Camioneta A NO ofrece el item de Camioneta B")
++        chequear(not any(o.startswith(D["item_jaula"]) for o in ops),
++                 "Camioneta A NO ofrece los items de la Jaula")
++        chequear(len(ops) <= 10, "Camioneta A ofrece solo sus 5 items, no el catalogo")
++
++        # --- 3. tope de cantidad ---
++        pag.evaluate(
++            "var ts = document.getElementById('item_id').tomselect;"
++            "var op = Object.values(ts.options).find(function(o){"
++            "  return (o.label || o.text).indexOf('%s') === 0; });"
++            "ts.setValue(op.id || op.value);" % D["item_a"])
++        pag.wait_for_timeout(500)
++        mx = pag.get_attribute("#qty_input", "max")
++        chequear(mx == "7", "tope de cantidad = %s (esperado 7)" % mx)
++
++        # --- 4. cambiar de ubicacion refresca de verdad ---
++        elegir(pag, D["cam_b"])
++        ops2 = opciones(pag)
++        chequear(any(o.startswith(D["item_b"]) for o in ops2),
++                 "Camioneta B ofrece su item")
++        chequear(not any(o.startswith(D["item_a"]) for o in ops2),
++                 "al cambiar de ubicacion ya NO ofrece el item de la anterior")
++
++        # --- 5. buscar por texto llega a un item lejano ---
++        elegir(pag, D["jaula"])
++        lejano = "CAB-%05d" % (D["total"] - 1)
++        pag.evaluate("document.getElementById('item_id').tomselect.load('%s')" % lejano)
++        pag.wait_for_timeout(1200)
++        chequear(any(o.startswith(lejano) for o in opciones(pag)),
++                 "buscando '%s' aparece el ultimo item del catalogo" % lejano)
++
++        chequear(not errores, "sin errores de JS (%s)" % errores)
++        nav.close()
++
++    print()
++    if FALLAS:
++        print("RESULTADO: %d FALLAS" % len(FALLAS))
++        sys.exit(1)
++    print("RESULTADO: todo OK")
++
++
++if __name__ == "__main__":
++    print("=== Fase 6 — selector de items remoto ===")
++    main()
+diff --git a/verificacion/verificar_navegador.py b/verificacion/verificar_navegador.py
+new file mode 100644
+index 0000000..855dbba
+--- /dev/null
++++ b/verificacion/verificar_navegador.py
+@@ -0,0 +1,188 @@
++"""Verificacion REAL en navegador de la Fase 2 (Chromium headless).
++
++Los tests de pytest prueban el servidor. Esto prueba lo que el pytest no puede:
++que el JavaScript de la pantalla de movimientos siga funcionando igual en los
++dos modos (mapa embebido y mapa remoto).
++
++Base sintetica y temporal. No toca ningun dato real.
++"""
++import json
++import os
++import re
++import sys
++import tempfile
++import threading
++import time
++from wsgiref.simple_server import make_server
++
++MODO_REMOTO = os.environ.get("MODO", "embebido") == "remoto"
++
++_T = tempfile.mkdtemp(prefix="verif_")
++os.environ.update(
++    STOCKS_DB_PATH=os.path.join(_T, "data", "s.db"),
++    STOCKS_BACKUP_DIR=os.path.join(_T, "b"),
++    STOCKS_LOG_DIR=os.path.join(_T, "l"),
++    FLASK_SECRET_KEY="verificacion",
++    APP_DEBUG="false",
++    RATELIMIT_ENABLED="false",
++    STOCK_MAP_MAX_INLINE="0" if MODO_REMOTO else "5000",
++)
++sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++
++import app as A  # noqa: E402
++
++DATOS = {}
++
++
++def sembrar():
++    with A.app.app_context():
++        A.db.drop_all()
++        A.db.create_all()
++        A.seed_defaults()
++
++        cat = A.Category(name="Cables", prefix="CAB")
++        A.db.session.add(cat)
++        A.db.session.commit()
++
++        jaula = A.Location.query.filter_by(name=A.LOCATION_JAULA_TNG).first()
++        if not jaula:
++            jaula = A.Location(name=A.LOCATION_JAULA_TNG)
++            A.db.session.add(jaula)
++            A.db.session.commit()
++
++        cam_a = A.Location(name="Camioneta A", is_truck=True)
++        cam_b = A.Location(name="Camioneta B", is_truck=True)
++        A.db.session.add_all([cam_a, cam_b])
++        A.db.session.commit()
++
++        it_a = A.Item(code="AAA-001", name="Item de A", category_id=cat.id, is_active=True)
++        it_b = A.Item(code="BBB-001", name="Item de B", category_id=cat.id, is_active=True)
++        it_j = A.Item(code="JJJ-001", name="Item de Jaula", category_id=cat.id, is_active=True)
++        A.db.session.add_all([it_a, it_b, it_j])
++        A.db.session.commit()
++
++        A.upsert_stock(it_a.id, cam_a.id, 7)
++        A.upsert_stock(it_b.id, cam_b.id, 9)
++        A.upsert_stock(it_j.id, jaula.id, 55)
++        A.db.session.commit()
++
++        u = A.User(username="adm2", full_name="Admin Dos", role="ADMIN")
++        u.set_password("pass1234")
++        A.db.session.add(u)
++        A.db.session.commit()
++
++        DATOS.update(
++            cam_a=cam_a.id, cam_b=cam_b.id, jaula=jaula.id,
++            it_a=f"{it_a.code} - {it_a.name}", it_b=f"{it_b.code} - {it_b.name}",
++            it_j=f"{it_j.code} - {it_j.name}",
++        )
++
++
++def servir(puerto):
++    srv = make_server("127.0.0.1", puerto, A.app)
++    threading.Thread(target=srv.serve_forever, daemon=True).start()
++    time.sleep(0.6)
++    return srv
++
++
++FALLAS = []
++
++
++def chequear(cond, msg):
++    print(("  OK   " if cond else "  FALLA") + f"  {msg}")
++    if not cond:
++        FALLAS.append(msg)
++
++
++def main():
++    sembrar()
++    puerto = 5099
++    servir(puerto)
++    base = f"http://127.0.0.1:{puerto}"
++
++    from playwright.sync_api import sync_playwright
++
++    with sync_playwright() as pw:
++        nav = pw.chromium.launch(executable_path="/opt/pw-browsers/chromium-1194/chrome-linux/chrome")
++        pag = nav.new_page()
++
++        llamadas_api = []
++        pag.on("request", lambda r: llamadas_api.append(r.url)
++               if "/api/stock/by-location" in r.url else None)
++        errores_js = []
++        pag.on("pageerror", lambda e: errores_js.append(str(e)))
++
++        # --- login ---
++        pag.goto(f"{base}/login")
++        pag.fill('input[name="username"]', "adm2")
++        pag.fill('input[name="password"]', "pass1234")
++        pag.click('button[type="submit"], input[type="submit"]')
++        pag.wait_for_load_state("networkidle")
++
++        # --- movimientos ---
++        pag.goto(f"{base}/movements")
++        pag.wait_for_load_state("networkidle")
++
++        # Las variables viven dentro del callback de DOMContentLoaded, asi que no
++        # son globales: se leen del HTML servido, que es justo lo que ve el F12.
++        fuente = pag.content()
++        m = re.search(r'<script type="application/json" id="[\w-]+-datos">\s*(.*?)\s*</script>',
++                      fuente, re.S)
++        embebido = len(json.loads(m.group(1)).get("stockQtyMap", {})) if m else -1
++        chequear(
++            (embebido == 0) if MODO_REMOTO else (embebido > 0),
++            f"mapa inicial: {embebido} ubicaciones (modo {'remoto' if MODO_REMOTO else 'embebido'})",
++        )
++
++        # elegir Camioneta A como origen
++        pag.select_option("#from_location_id", str(DATOS["cam_a"]))
++        pag.wait_for_timeout(900)
++
++        opciones = pag.evaluate(
++            "Object.values(document.getElementById('item_id').tomselect.options)"
++            ".map(function(o){return o.text;})"
++        )
++        chequear(DATOS["it_a"] in opciones, f"ofrece el item de Camioneta A -> {opciones}")
++        chequear(DATOS["it_b"] not in opciones, "NO ofrece el item de Camioneta B")
++        chequear(DATOS["it_j"] not in opciones, "NO ofrece el item de la Jaula")
++
++        # tope de cantidad
++        pag.evaluate(
++            "var ts = document.getElementById('item_id').tomselect;"
++            "var op = Object.values(ts.options).find("
++            "  function(o){ return o.text.indexOf('AAA-001') === 0; });"
++            "ts.setValue(op.value);"
++        )
++        pag.wait_for_timeout(400)
++        mx = pag.get_attribute("#qty_input", "max")
++        chequear(mx == "7", f"tope de cantidad = {mx} (esperado 7)")
++
++        # cambiar a la Jaula
++        pag.select_option("#from_location_id", str(DATOS["jaula"]))
++        pag.wait_for_timeout(900)
++        opciones2 = pag.evaluate(
++            "Object.values(document.getElementById('item_id').tomselect.options)"
++            ".map(function(o){return o.text;})"
++        )
++        chequear(DATOS["it_j"] in opciones2, "al cambiar a Jaula ofrece su item")
++        chequear(DATOS["it_a"] not in opciones2, "al cambiar a Jaula ya no ofrece el de Camioneta A")
++
++        if MODO_REMOTO:
++            chequear(len(llamadas_api) >= 2, f"pidio la API por ubicacion ({len(llamadas_api)} veces)")
++        else:
++            chequear(len(llamadas_api) == 0, "modo embebido: no pide la API (0 requests)")
++
++        chequear(not errores_js, f"sin errores de JS ({errores_js})")
++
++        nav.close()
++
++    print()
++    if FALLAS:
++        print(f"RESULTADO: {len(FALLAS)} FALLAS")
++        sys.exit(1)
++    print("RESULTADO: todo OK")
++
++
++if __name__ == "__main__":
++    print(f"=== Verificacion en navegador — modo {'REMOTO' if MODO_REMOTO else 'EMBEBIDO'} ===")
++    main()
+diff --git a/verificacion/verificar_ui.py b/verificacion/verificar_ui.py
+new file mode 100644
+index 0000000..4e16308
+--- /dev/null
++++ b/verificacion/verificar_ui.py
+@@ -0,0 +1,248 @@
++"""Fase 4 — verificacion en navegador de los comportamientos data-* .
++
++Recorre las pantallas reales con Chromium, abre y cierra los modales, dispara
++los toggles y confirma que no quede ni un error de JavaScript. Es lo que el
++pytest no puede ver: pytest valida el HTML que sale del servidor, esto valida
++que el navegador siga haciendo lo mismo que antes con los handlers movidos.
++
++Base sintetica y temporal. No toca ningun dato real.
++"""
++import os
++import sys
++import tempfile
++import threading
++import time
++from wsgiref.simple_server import make_server
++
++_T = tempfile.mkdtemp(prefix="verif_ui_")
++os.environ.update(
++    STOCKS_DB_PATH=os.path.join(_T, "data", "s.db"),
++    STOCKS_BACKUP_DIR=os.path.join(_T, "b"),
++    STOCKS_LOG_DIR=os.path.join(_T, "l"),
++    FLASK_SECRET_KEY="verificacion-ui",
++    APP_DEBUG="false",
++    RATELIMIT_ENABLED="false",
++    CSP_ENFORCE=os.environ.get("CSP", "false"),
++)
++sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++
++import app as A  # noqa: E402
++
++FALLAS = []
++
++
++def chequear(cond, msg):
++    print(("  OK   " if cond else "  FALLA") + "  " + msg)
++    if not cond:
++        FALLAS.append(msg)
++
++
++def sembrar():
++    with A.app.app_context():
++        A.db.drop_all()
++        A.db.create_all()
++        A.seed_defaults()
++
++        cat = A.Category(name="Cables", prefix="CAB")
++        A.db.session.add(cat)
++        A.db.session.commit()
++
++        jaula = A.Location.query.filter_by(name=A.LOCATION_JAULA_TNG).first()
++        if not jaula:
++            jaula = A.Location(name=A.LOCATION_JAULA_TNG)
++            A.db.session.add(jaula)
++        cam = A.Location(name="Camioneta A", is_truck=True)
++        A.db.session.add(cam)
++        A.db.session.commit()
++
++        for i in range(3):
++            it = A.Item(code="CAB-%03d" % i, name="Cable %d" % i,
++                        category_id=cat.id, is_active=True, stock_min=5)
++            A.db.session.add(it)
++        # Un item serializado: es el que hace aparecer el boton "Seriales" de
++        # /stock, que es el unico [data-detail-url] de esa pantalla.
++        A.db.session.add(A.Item(code="SER-001", name="Equipo con serial",
++                                category_id=cat.id, is_active=True,
++                                trackable=True, serialized=True))
++        A.db.session.commit()
++        for it in A.Item.query.all():
++            # Los rastreables solo admiten 1 unidad en todo el sistema.
++            A.upsert_stock(it.id, jaula.id, 1 if it.trackable else 2)
++        A.db.session.commit()
++
++        s = A.Supplier(contact_name="Proveedor Uno")
++        A.db.session.add(s)
++        u = A.User(username="adm2", full_name="Admin Dos", role="ADMIN")
++        u.set_password("pass1234")
++        A.db.session.add(u)
++        A.db.session.commit()
++
++
++def main():
++    sembrar()
++    srv = make_server("127.0.0.1", 5098, A.app)
++    threading.Thread(target=srv.serve_forever, daemon=True).start()
++    time.sleep(0.6)
++    base = "http://127.0.0.1:5098"
++
++    from playwright.sync_api import sync_playwright
++
++    with sync_playwright() as pw:
++        nav = pw.chromium.launch(
++            executable_path="/opt/pw-browsers/chromium-1194/chrome-linux/chrome")
++        pag = nav.new_page()
++        errores = []
++        pag.on("pageerror", lambda e: errores.append(str(e)))
++        # Una violacion de CSP no lanza pageerror: aparece como mensaje de consola.
++        pag.on("console", lambda m: errores.append("CSP: " + m.text)
++               if "Content Security Policy" in m.text else None)
++
++        pag.goto(base + "/login")
++        pag.fill('input[name="username"]', "adm2")
++        pag.fill('input[name="password"]', "pass1234")
++        pag.click('button[type="submit"], input[type="submit"]')
++        pag.wait_for_load_state("networkidle")
++
++        # --- 1. todas las pantallas cargan sin error de JS ---
++        rutas = ["/", "/items", "/stock", "/movements", "/movements/bulk",
++                 "/item-usage", "/remitos", "/scrap", "/reparaciones",
++                 "/pending-deliveries", "/stock-alerts", "/solicitudes-compra",
++                 "/solicitudes-repuestos", "/ingresos-egresos", "/proveedores",
++                 "/users", "/locations", "/categories", "/conteo", "/admin",
++                 "/metricas", "/metricas/compras", "/metricas/inventario", "/perfil"]
++        for r in rutas:
++            del errores[:]
++            resp = pag.goto(base + r)
++            pag.wait_for_load_state("networkidle")
++            chequear(resp.status == 200 and not errores,
++                     "carga %-24s status=%s js=%s" % (r, resp.status, errores or "limpio"))
++
++        # --- 2. los modales abren y cierran por data-* ---
++        casos = [
++            ("/items", "[data-modal-open]", "modal-item-new"),
++            ("/categories", "[data-modal-open]", "modal-cat-new"),
++            ("/locations", "[data-modal-open]", "modal-loc-new"),
++            ("/solicitudes-compra", "[data-modal-open]", "modal-sc-new"),
++        ]
++        for ruta, sel, modal_id in casos:
++            del errores[:]
++            pag.goto(base + ruta)
++            pag.wait_for_load_state("networkidle")
++            btn = pag.query_selector(sel)
++            if not btn:
++                chequear(False, "%s: no hay boton [data-modal-open]" % ruta)
++                continue
++            btn.click()
++            pag.wait_for_timeout(250)
++            abierto = pag.evaluate(
++                "(function(id){var m=document.getElementById(id);"
++                "return !!m && (m.classList.contains('open') ||"
++                " getComputedStyle(m).display !== 'none');})('%s')" % modal_id)
++            chequear(abierto, "%s: abre el modal %s" % (ruta, modal_id))
++
++            cerrar = pag.query_selector('[data-modal-close="%s"]' % modal_id)
++            if cerrar:
++                cerrar.click()
++                pag.wait_for_timeout(250)
++                cerrado = pag.evaluate(
++                    "(function(id){var m=document.getElementById(id);"
++                    "return !!m && !m.classList.contains('open') &&"
++                    " getComputedStyle(m).display === 'none';})('%s')" % modal_id)
++                chequear(cerrado, "%s: cierra el modal %s" % (ruta, modal_id))
++            chequear(not errores, "%s: sin errores de JS (%s)" % (ruta, errores))
++
++        # --- 3. el panel de detalle (iframe) abre por data-detail-url ---
++        del errores[:]
++        pag.goto(base + "/stock")
++        pag.wait_for_load_state("networkidle")
++        det = pag.query_selector("[data-detail-url]")
++        if det:
++            det.click()
++            pag.wait_for_timeout(600)
++            abierto = pag.evaluate(
++                "(function(){var m=document.getElementById('detail-modal');"
++                "return !!m && m.classList.contains('open');})()")
++            chequear(abierto, "/stock: abre el panel de detalle")
++            pag.keyboard.press("Escape")
++            pag.wait_for_timeout(400)
++            chequear(pag.evaluate(
++                "(function(){var m=document.getElementById('detail-modal');"
++                "return !!m && !m.classList.contains('open');})()"),
++                "/stock: Escape cierra el panel de detalle")
++        else:
++            chequear(False, "/stock: no hay [data-detail-url]")
++        chequear(not errores, "/stock: sin errores de JS (%s)" % errores)
++
++        # --- 4. data-confirm: cancelar NO envia el formulario ---
++        del errores[:]
++        pag.goto(base + "/admin")
++        pag.wait_for_load_state("networkidle")
++        pag.on("dialog", lambda d: d.dismiss())
++        f = pag.query_selector("form[data-confirm]")
++        if f:
++            url_antes = pag.url
++            btn = f.query_selector('button[type="submit"], input[type="submit"], button')
++            if btn:
++                btn.click()
++                pag.wait_for_timeout(500)
++                chequear(pag.url == url_antes,
++                         "/admin: cancelar el confirm NO envia el formulario")
++        else:
++            chequear(False, "/admin: no hay form[data-confirm]")
++
++        # --- 5. no debe quedar JS inline ejecutable en el HTML servido ---
++        del errores[:]
++        for r in ["/", "/items", "/stock", "/users", "/categories", "/locations",
++                  "/admin", "/proveedores", "/conteo"]:
++            pag.goto(base + r)
++            html = pag.content()
++            import re as _re
++            inline = _re.findall(r"<script(?![^>]*\bsrc=)(?![^>]*application/json)[^>]*>",
++                                 html)
++            handlers = _re.findall(r'\son(?:click|change|submit)="', html)
++            chequear(not inline and not handlers,
++                     "%-14s sin JS inline (scripts=%d handlers=%d)"
++                     % (r, len(inline), len(handlers)))
++
++        # --- 6. los graficos de metricas se dibujan de verdad ---
++        for r in ["/metricas", "/metricas/compras", "/metricas/inventario",
++                  "/metricas/descartes"]:
++            del errores[:]
++            pag.goto(base + r)
++            pag.wait_for_load_state("networkidle")
++            pag.wait_for_timeout(700)
++            # Cada grafico declarado en la isla tiene que haber sido PROCESADO:
++            # o quedo un <canvas> con un Chart dibujado, o MX lo reemplazo por el
++            # cartel "Sin datos". Lo que no puede pasar es que quede el canvas
++            # vacio y sin Chart: eso significa que el JS no corrio.
++            resultado = pag.evaluate("""
++                (function () {
++                  var isla = document.getElementById('metricas-graficos');
++                  if (!isla) return {declarados: 0, resueltos: 0};
++                  var defs = JSON.parse(isla.textContent);
++                  var ok = 0;
++                  defs.forEach(function (d) {
++                    var c = document.getElementById(d.canvas);
++                    if (!c) { ok++; return; }              // reemplazado por "Sin datos"
++                    if (window.Chart && Chart.getChart && Chart.getChart(c)) ok++;
++                  });
++                  return {declarados: defs.length, resueltos: ok};
++                })()
++            """)
++            chequear(resultado["declarados"] > 0
++                     and resultado["resueltos"] == resultado["declarados"],
++                     "%-22s resuelve %d/%d graficos %s"
++                     % (r, resultado["resueltos"], resultado["declarados"], errores or ""))
++
++        nav.close()
++
++    print()
++    if FALLAS:
++        print("RESULTADO: %d FALLAS" % len(FALLAS))
++        sys.exit(1)
++    print("RESULTADO: todo OK")
++
++
++if __name__ == "__main__":
++    print("=== Verificacion de UI en navegador (Fase 4) ===")
++    main()

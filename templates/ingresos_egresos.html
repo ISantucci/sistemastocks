@@ -23,7 +23,7 @@
 
 {% if can_edit %}
 <div class="card">
-  <form method="post" id="io-form" action="{{ url_for('in_out') }}">
+  <form method="post" id="io-form" action="{{ url_for('in_out') }}" data-confirm-move="Confirmar ingreso / egreso">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="form-grid">
       <div class="field">
@@ -58,7 +58,7 @@
 </div>
 
 <template id="io-line-template">
-  <div class="io-line">
+  <div class="io-line" data-confirm-row>
     <div class="field">
       <label>Ítem</label>
       <select name="item_id[]" class="io-item" required>

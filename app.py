@@ -20,7 +20,7 @@ def now_ar():
 
 from flask import Flask, render_template, request, redirect, url_for, flash, Response, jsonify
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import func
+from sqlalchemy import func, case
 from flask import session
 from flask import g
 from flask import Response
@@ -949,11 +949,26 @@ class Movement(db.Model):
     # separarlos del listado de Movimientos sin tocar el historico.
     supplier_id = db.Column(db.Integer, db.ForeignKey("suppliers.id"), nullable=True)
 
+    # --- Reversión dentro de la ventana corta (ver movement_revert_blockers) ---
+    # Un movimiento NO se borra nunca: si se revierte, queda marcado acá y se
+    # genera un contra-movimiento con su propio número. Así el historial muestra
+    # el error y su corrección, que es justamente lo que da trazabilidad.
+    # Las tres columnas son nullable: las filas viejas quedan en NULL = "no
+    # revertido", y ensure_sqlite_schema() las agrega sola al reiniciar.
+    reverted_at = db.Column(db.DateTime, nullable=True)
+    reverted_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    # Si está seteado, ESTE movimiento es la reversión del que apunta.
+    reverses_movement_id = db.Column(db.Integer, db.ForeignKey("movements.id"), nullable=True)
+
     item = db.relationship("Item")
     supplier = db.relationship("Supplier")
     from_location = db.relationship("Location", foreign_keys=[from_location_id])
     to_location = db.relationship("Location", foreign_keys=[to_location_id])
-    user = db.relationship("User")
+    # foreign_keys explícito: desde que existe reverted_by_user_id hay DOS FK
+    # hacia users, y sin esto SQLAlchemy no puede resolver cuál usa cada relación.
+    user = db.relationship("User", foreign_keys=[user_id])
+    reverted_by = db.relationship("User", foreign_keys=[reverted_by_user_id])
+    reverses = db.relationship("Movement", remote_side=[id], foreign_keys=[reverses_movement_id])
 
 class PendingDelivery(db.Model):
     __tablename__ = "pending_deliveries"
@@ -1419,10 +1434,25 @@ def build_units_map(location_ids=None):
 
 
 def next_movement_number():
+    """Siguiente numero de movimiento. Formato: MOV-YYYY-0001.
+
+    El `seq` se reinicia cada anio. El numero DEBE llevar el anio: sin el, al
+    cambiar de anio el seq vuelve a 1 y el numero resultante ya existe, con lo
+    que el UNIQUE de `number` hace fallar el registro. Mismo formato que los
+    remitos (R-YYYY-0001) y las solicitudes (SR-YYYY-0001).
+
+    Los movimientos historicos con el formato viejo (MOV-001) NO se tocan: se
+    conservan tal cual para no romper el historial. Durante un tiempo van a
+    convivir los dos formatos, que es lo esperado.
+
+    Nota: bajo alta concurrencia dos requests podrian calcular el mismo seq
+    antes de commitear. El UNIQUE de `number` lo frena a nivel DB (el segundo
+    commit falla). Mismo riesgo menor ya documentado en next_remito_number().
+    """
     y = now_ar().year
     last = Movement.query.filter_by(year=y).order_by(Movement.seq.desc()).first()
     seq = (last.seq or 0) + 1 if last else 1
-    return y, seq, f"MOV-{seq:03d}"
+    return y, seq, f"MOV-{y}-{seq:04d}"
 
 
 def next_remito_number(year: int | None = None):
@@ -1527,7 +1557,10 @@ def _build_movements_query(filters: dict, include_supplier: bool = False):
     LISTADO de /movements muestre ingresos/egresos junto a los internos.
     Los movimientos internos historicos (supplier_id NULL) no se tocan.
     """
-    q = Movement.query.join(Item).join(User)
+    # onclause explícito: movements tiene DOS FK hacia users (user_id y
+    # reverted_by_user_id), así que el join implícito sería ambiguo. El
+    # responsable del movimiento sigue siendo user_id, igual que siempre.
+    q = Movement.query.join(Item).join(User, Movement.user_id == User.id)
     if not include_supplier:
         q = q.filter(Movement.supplier_id.is_(None))
 
@@ -1784,6 +1817,94 @@ def ensure_sqlite_schema() -> None:
 def location_is_external(location_id: int) -> bool:
     loc = Location.query.get(location_id)
     return bool(loc and loc.is_external)
+
+
+# ------------------ HELPERS: REVERSIÓN DE MOVIMIENTOS ------------------
+
+# Ventana durante la cual un movimiento recién cargado se puede revertir.
+# Configurable por entorno para poder ajustarla sin tocar código.
+MOVEMENT_REVERT_MINUTES = int(os.environ.get("MOVEMENT_REVERT_MINUTES", "60"))
+
+
+def movement_revert_blockers(m: "Movement") -> list[str]:
+    """Motivos por los que un movimiento NO se puede revertir.
+
+    Lista vacía = se puede revertir. Es la ÚNICA fuente de verdad: la usan
+    tanto el listado (para decidir si muestra el botón) como el endpoint POST
+    (para autorizar de verdad). Ocultar el botón no alcanza como control.
+
+    El criterio es conservador: ante cualquier duda sobre si la reversión deja
+    el sistema consistente, se bloquea y se explica el motivo.
+    """
+    reasons: list[str] = []
+
+    if m.reverses_movement_id:
+        reasons.append("Es la reversión de otro movimiento.")
+    if m.reverted_at:
+        reasons.append("Ya fue revertido.")
+
+    # Ventana de tiempo. now_ar() y created_at comparten zona horaria.
+    limite = now_ar() - timedelta(minutes=MOVEMENT_REVERT_MINUTES)
+    if m.created_at and m.created_at < limite:
+        reasons.append(f"Pasaron más de {MOVEMENT_REVERT_MINUTES} minutos.")
+
+    # Serializados: no existe un vínculo ItemUnit -> Movement, así que no hay
+    # forma confiable de saber qué unidades tocó este movimiento (los seriales
+    # sólo quedan como texto en la observación). Antes que adivinar, se bloquea.
+    if m.item and m.item.serialized:
+        reasons.append("El ítem es serializado: la reversión automática no está soportada.")
+
+    # Ya se emitió el papel: revertir dejaría el remito mintiendo.
+    if RemitoLine.query.filter_by(movement_id=m.id).first():
+        reasons.append("El movimiento ya está incluido en un remito.")
+
+    # Pendientes: si alguno ya se cerró, hay una cadena posterior colgando.
+    if PendingDelivery.query.filter_by(movement_id=m.id, returned=True).first():
+        reasons.append("El pendiente generado ya fue devuelto.")
+
+    # Reparación ya resuelta: generó sus propios movimientos.
+    rep_resuelta = (
+        Repair.query.filter(Repair.item_id == m.item_id)
+        .filter(Repair.source_location_id == m.from_location_id)
+        .filter(Repair.created_at >= m.created_at)
+        .filter(Repair.status != "EN_REPARACION")
+        .first()
+    )
+    if rep_resuelta:
+        reasons.append("La reparación asociada ya fue resuelta.")
+
+    # Stock: revertir devuelve la mercadería al origen, o sea la saca del
+    # destino. Si ya no está ahí (se movió de nuevo), la reversión no es válida.
+    if not location_is_external(m.to_location_id):
+        row = Stock.query.filter_by(item_id=m.item_id, location_id=m.to_location_id).first()
+        if not row or (row.quantity or 0) < m.qty:
+            reasons.append("El stock ya no está en la ubicación de destino.")
+
+    return reasons
+
+
+def movement_can_revert(m: "Movement") -> bool:
+    return not movement_revert_blockers(m)
+
+
+# Filtros del listado de movimientos que se conservan al ir y volver de una
+# acción. Lista blanca a propósito: pasar request.args entero permitiría que un
+# parámetro cualquiera de la URL choque con los de url_for y tire un error.
+_MOV_VIEW_ARGS = ("from_date", "to_date", "item_id", "user_id", "limit", "page", "sort_by", "sort_dir")
+
+
+def movements_view_args() -> dict:
+    args = {}
+    for key in _MOV_VIEW_ARGS:
+        val = (request.args.get(key) or "").strip()
+        if val:
+            args[key] = val
+    return args
+
+
+@app.context_processor
+def _movements_view_args():
+    return {"movements_view_args": movements_view_args}
 
 
 # ------------------ HELPERS: OPERACIONES DESTRUCTIVAS ------------------
@@ -3865,16 +3986,33 @@ def movements():
     # (comportamiento historico). _build_movements_query ya hace join a Item y User.
     sort_by = (request.args.get("sort_by") or "date").strip()
     sort_dir = (request.args.get("sort_dir") or "desc").strip().lower()
-    _mov_sortable = {
-        "date": Movement.created_at,
-        "qty": Movement.qty,
-        "item": Item.code,
-        "user": User.username,
-    }
-    _sort_col = _mov_sortable.get(sort_by, Movement.created_at)
-    _order = _sort_col.desc() if sort_dir == "desc" else _sort_col.asc()
+    # Estado de reversión como valor ordenable: normal (0) < revertido (1) <
+    # reversión (2). Se calcula en SQL para poder ordenar antes de paginar.
+    # OJO: "se puede revertir" NO entra acá y no se puede: depende de chequeos
+    # (stock actual, remitos, pendientes) que corren fila por fila DESPUÉS de
+    # traer la página, y además deja de ser cierto solo con el paso del tiempo.
+    _revert_state = case(
+        (Movement.reverses_movement_id.isnot(None), 2),
+        (Movement.reverted_at.isnot(None), 1),
+        else_=0,
+    )
 
-    logs_q = _build_movements_query(filters, include_supplier=True).order_by(_order)
+    # Cada clave puede mapear a varias columnas: la primera manda y el resto
+    # desempata. El ID que se ve en pantalla es el número (MOV-AAAA-NNNN), así
+    # que se ordena por año+secuencia y no por el texto, que ordenaría mal
+    # (MOV-1000 antes que MOV-999) y no existe en los movimientos históricos.
+    _mov_sortable = {
+        "date": [Movement.created_at],
+        "qty": [Movement.qty],
+        "item": [Item.code],
+        "user": [User.username],
+        "id": [Movement.year, Movement.seq, Movement.id],
+        "action": [_revert_state, Movement.created_at],
+    }
+    _sort_cols = _mov_sortable.get(sort_by, [Movement.created_at])
+    _order = [c.desc() if sort_dir == "desc" else c.asc() for c in _sort_cols]
+
+    logs_q = _build_movements_query(filters, include_supplier=True).order_by(*_order)
     if is_tecnico and tech_location_ids:
         logs_q = logs_q.filter(db.or_(
             Movement.from_location_id.in_(tech_location_ids),
@@ -3885,6 +4023,20 @@ def movements():
     logs = logs_page.items
 
     users_list = User.query.order_by(User.username).all()
+
+    # Qué movimientos de ESTA página se pueden revertir. Sólo se evalúan los
+    # candidatos obvios (recientes, no revertidos, no reversiones), así el
+    # chequeo caro corre sobre unas pocas filas y no sobre toda la página.
+    revertibles = set()
+    if current_user.role in ("ADMIN", "SUPERVISOR"):
+        _limite = now_ar() - timedelta(minutes=MOVEMENT_REVERT_MINUTES)
+        for _m in logs:
+            if _m.reverted_at or _m.reverses_movement_id:
+                continue
+            if not _m.created_at or _m.created_at < _limite:
+                continue
+            if movement_can_revert(_m):
+                revertibles.add(_m.id)
 
     # Mapa ubicacion -> items con stock (>0), para filtrar el selector "Item" segun "Desde"
     stock_map = {}
@@ -3932,7 +4084,108 @@ def movements():
         is_tecnico=is_tecnico,
         tech_locations=tech_locations,
         descartes_id=descartes_id,
+        revertibles=revertibles,
+        revert_minutes=MOVEMENT_REVERT_MINUTES,
     )
+
+@app.route("/movements/<int:movement_id>/revertir", methods=["POST"])
+@login_required
+@role_required("ADMIN", "SUPERVISOR")
+def movement_revert(movement_id: int):
+    """Revierte un movimiento reciente generando un CONTRA-MOVIMIENTO.
+
+    No borra ni edita el movimiento original: lo marca como revertido y crea uno
+    nuevo, inverso, con su propio número. El historial queda mostrando las dos
+    operaciones. Es alto impacto: sólo ADMIN/SUPERVISOR, dentro de la ventana de
+    MOVEMENT_REVERT_MINUTES, y sólo si movement_revert_blockers() está vacío.
+
+    La autorización se revalida acá entera: que el listado no muestre el botón
+    no es un control (alguien puede mandar el POST directo).
+    """
+    m = Movement.query.get_or_404(movement_id)
+
+    blockers = movement_revert_blockers(m)
+    if blockers:
+        flash("No se puede revertir: " + " ".join(blockers), "error")
+        return redirect(url_for("movements"))
+
+    try:
+        # El inverso exacto de lo que hizo el original: sale del destino y
+        # vuelve al origen. Las ubicaciones externas (Proveedor) no llevan
+        # stock propio, igual que al registrar el movimiento.
+        if not location_is_external(m.to_location_id):
+            upsert_stock(m.item_id, m.to_location_id, -m.qty)
+        if not location_is_external(m.from_location_id):
+            upsert_stock(m.item_id, m.from_location_id, m.qty)
+
+        detalle = []
+
+        # Pendientes abiertos: son deudas de devolución creadas por el
+        # movimiento que se está anulando. Si el movimiento no existió, la
+        # deuda tampoco. Los ya devueltos bloquean antes (ver blockers).
+        pendientes = PendingDelivery.query.filter_by(movement_id=m.id, returned=False).all()
+        for p in pendientes:
+            db.session.delete(p)
+        if pendientes:
+            detalle.append(f"{len(pendientes)} pendiente(s) anulado(s)")
+
+        # Scrap generado por un movimiento hacia Descartes: si no se elimina,
+        # las métricas de descartes siguen contando algo que se anuló.
+        scraps = (
+            Scrap.query.filter_by(item_id=m.item_id, location_id=m.from_location_id)
+            .filter(Scrap.created_at >= m.created_at)
+            .filter(Scrap.quantity == m.qty)
+            .all()
+        )
+        for s in scraps:
+            db.session.delete(s)
+        if scraps:
+            detalle.append(f"{len(scraps)} descarte(s) anulado(s)")
+
+        # Reparación abierta generada por un movimiento hacia "En reparación".
+        # Las ya resueltas bloquean antes (ver blockers).
+        repairs = (
+            Repair.query.filter_by(item_id=m.item_id, source_location_id=m.from_location_id)
+            .filter(Repair.created_at >= m.created_at)
+            .filter(Repair.status == "EN_REPARACION")
+            .all()
+        )
+        for r in repairs:
+            db.session.delete(r)
+        if repairs:
+            detalle.append(f"{len(repairs)} reparación(es) anulada(s)")
+
+        y, seq, number = next_movement_number()
+        obs = f"Reversión del movimiento {m.number or m.id}"
+        if detalle:
+            obs += " (" + ", ".join(detalle) + ")"
+
+        contra = Movement(
+            item_id=m.item_id,
+            qty=m.qty,
+            from_location_id=m.to_location_id,
+            to_location_id=m.from_location_id,
+            user_id=current_user.id,
+            observation=obs[:255],
+            year=y,
+            seq=seq,
+            number=number,
+            supplier_id=m.supplier_id,
+            reverses_movement_id=m.id,
+        )
+        db.session.add(contra)
+
+        m.reverted_at = now_ar()
+        m.reverted_by_user_id = current_user.id
+
+        db.session.commit()
+        flash(f"Movimiento {m.number or m.id} revertido con {number}.", "ok")
+    except Exception as e:
+        db.session.rollback()
+        flash(f"No se pudo revertir: {e}", "error")
+
+    return redirect(url_for("movements", **movements_view_args()))
+
 
 @app.route("/movements/bulk", methods=["GET", "POST"])
 @login_required
@@ -4421,7 +4674,8 @@ def item_usage():
             hq = hq.join(Item)
             _col = Item.code
         elif sort_by == "user":
-            hq = hq.join(User)
+            # onclause explícito: ver nota en _build_movements_query.
+            hq = hq.join(User, Movement.user_id == User.id)
             _col = User.username
         elif sort_by == "qty":
             _col = Movement.qty

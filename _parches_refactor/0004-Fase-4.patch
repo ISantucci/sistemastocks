@@ -1,0 +1,3695 @@
+From e50d76b977a8a7ad1e72ba638550b5f49cdb7395 Mon Sep 17 00:00:00 2001
+From: c <a@b>
+Date: Tue, 18 Aug 2026 13:30:22 +0000
+Subject: [PATCH 4/7] Fase 4: JS inline fuera de los templates + CSP script-src
+ sin unsafe-inline
+
+---
+ app.py                                 |  38 ++++-
+ static/js/app.js                       |  21 +++
+ static/js/detail_modal.js              |  56 +++++++
+ static/js/ingresos_egresos.js          | 201 +++++++++++++++++++++++
+ static/js/item_usage.js                | 119 ++++++++++++++
+ static/js/items.js                     |  69 ++++++++
+ static/js/metricas.js                  |  18 +++
+ static/js/movements.js                 | 137 ++++++++++++++++
+ static/js/movements_bulk.js            | 172 ++++++++++++++++++++
+ static/js/purchase_request.js          |  24 +++
+ static/js/remitos.js                   |  87 ++++++++++
+ static/js/repair_request_detail.js     |  25 +++
+ static/js/repair_requests.js           |  32 ++++
+ static/js/scrap_report.js              | 118 ++++++++++++++
+ static/js/ui.js                        | 138 ++++++++++++++++
+ templates/_pagination.html             |   2 +-
+ templates/admin.html                   |   8 +-
+ templates/base.html                    |  55 +------
+ templates/categories.html              |  12 +-
+ templates/conteo.html                  |   2 +-
+ templates/ingresos_egresos.html        | 215 ++-----------------------
+ templates/item_new.html                |  14 +-
+ templates/item_units.html              |  10 +-
+ templates/item_usage.html              | 113 ++-----------
+ templates/items.html                   |  67 ++------
+ templates/locations.html               |  12 +-
+ templates/metricas.html                |  12 +-
+ templates/metricas_camionetas.html     |  14 +-
+ templates/metricas_compras.html        |  16 +-
+ templates/metricas_consumo.html        |  16 +-
+ templates/metricas_descartes.html      |  18 ++-
+ templates/metricas_inventario.html     |  10 +-
+ templates/metricas_movimientos.html    |  14 +-
+ templates/metricas_reparaciones.html   |  12 +-
+ templates/movements.html               | 130 ++-------------
+ templates/movements_bulk.html          | 167 ++-----------------
+ templates/pending_deliveries.html      |  11 +-
+ templates/purchase_request_detail.html |  27 +---
+ templates/purchase_requests.html       |   8 +-
+ templates/remito_detail.html           |   4 +-
+ templates/remitos.html                 |  86 ++--------
+ templates/repair_request_detail.html   |  30 +---
+ templates/repair_requests.html         |  25 +--
+ templates/reparaciones.html            |  20 +--
+ templates/scrap_report.html            | 111 ++-----------
+ templates/stock.html                   |   2 +-
+ templates/suppliers.html               |  14 +-
+ templates/users.html                   |  14 +-
+ tests/conftest.py                      |  42 +++++
+ tests/test_csp_sin_js_inline.py        |  93 +++++++++++
+ tests/test_stock_map_remoto.py         |   9 +-
+ tests/test_tecnico_scope.py            |  11 +-
+ 52 files changed, 1618 insertions(+), 1063 deletions(-)
+ create mode 100644 static/js/detail_modal.js
+ create mode 100644 static/js/ingresos_egresos.js
+ create mode 100644 static/js/item_usage.js
+ create mode 100644 static/js/items.js
+ create mode 100644 static/js/movements.js
+ create mode 100644 static/js/movements_bulk.js
+ create mode 100644 static/js/purchase_request.js
+ create mode 100644 static/js/remitos.js
+ create mode 100644 static/js/repair_request_detail.js
+ create mode 100644 static/js/repair_requests.js
+ create mode 100644 static/js/scrap_report.js
+ create mode 100644 static/js/ui.js
+ create mode 100644 tests/test_csp_sin_js_inline.py
+
+diff --git a/app.py b/app.py
+index 16ac0cf..bede4b0 100644
+--- a/app.py
++++ b/app.py
+@@ -154,6 +154,25 @@ def _load_vendor_assets():
+ VENDOR_ASSETS = _load_vendor_assets()
+ 
+ 
++@app.template_global()
++def opciones_items(items, sin_serializados=False):
++    """Items listos para un <select> del front, como datos y no como HTML.
++
++    Los templates de carga (movimientos, utilizados, descartes, ingresos) armaban
++    su lista de opciones con un `{% for %}` DENTRO del <script>, concatenando
++    JavaScript a mano. Eso obligaba a tener JS inline y era el ultimo motivo por
++    el que la CSP no podia cerrarse.
++
++    Ahora el template publica el mismo dato en una isla JSON y el JS externo lo
++    lee. El contenido es identico: value = id, text = "codigo - nombre".
++    """
++    return [
++        {"value": str(it.id), "text": f"{it.code} - {it.name}"}
++        for it in items
++        if not (sin_serializados and getattr(it, "serialized", False))
++    ]
++
++
+ @app.template_global()
+ def vendor_asset(name):
+     """Datos de un asset de terceros para el template: url, integrity, es_local."""
+@@ -193,10 +212,19 @@ CDN_ORIGINS = (
+     else ""
+ ).strip()
+ 
+-# CSP en modo REPORT-ONLY por defecto: reporta lo que romperia pero NO bloquea
+-# nada. Los templates usan <script>/<style> inline, asi que una CSP en enforce
+-# sin 'unsafe-inline' los romperia. Para pasar a enforce (una vez validado en
+-# staging) poner CSP_ENFORCE=true.
++# CSP en modo REPORT-ONLY por defecto. Para pasar a enforce (una vez validado
++# en staging) poner CSP_ENFORCE=true.
++#
++# script-src YA NO lleva 'unsafe-inline': desde la Fase 4 no queda ni un
++# <script> ejecutable ni un onclick= dentro de los templates. Los datos que el
++# servidor le pasa al front viajan en islas
++# <script type="application/json">, que NO son codigo y por lo tanto script-src
++# no las alcanza. Hay un test (test_csp_sin_js_inline.py) que falla si alguien
++# vuelve a meter JS inline, para que la politica no se rompa en silencio.
++#
++# style-src SI conserva 'unsafe-inline': los templates todavia usan atributos
++# style="..." en muchos lugares. Sacarlo es otra tarea, con su propio riesgo, y
++# no aporta lo mismo: el vector clasico de XSS es el script, no el estilo.
+ # La tipografia Inter se carga desde Google Fonts (base.html). No se puede
+ # aplicar SRI porque el CSS que devuelve Google varia segun el navegador, asi
+ # que se declara explicitamente como origen permitido. Si en algun momento se
+@@ -210,7 +238,7 @@ def _csp_directive(name, *sources):
+ 
+ CSP_POLICY = "; ".join([
+     _csp_directive("default-src", "'self'"),
+-    _csp_directive("script-src", "'self'", "'unsafe-inline'", CDN_ORIGINS),
++    _csp_directive("script-src", "'self'", CDN_ORIGINS),
+     _csp_directive("style-src", "'self'", "'unsafe-inline'", CDN_ORIGINS, FONT_ORIGINS),
+     _csp_directive("img-src", "'self'", "data:"),
+     _csp_directive("font-src", "'self'", "data:", CDN_ORIGINS, FONT_ORIGINS),
+diff --git a/static/js/app.js b/static/js/app.js
+index 9b1b847..6fb1107 100644
+--- a/static/js/app.js
++++ b/static/js/app.js
+@@ -239,3 +239,24 @@ function makeStockLoader(stockMap, stockQtyMap, remote, url) {
+       .then(terminar, terminar);
+   };
+ }
++
++/* ---------- Datos del servidor, sin JS inline (Fase 4) ----------
++ *
++ * Los templates publican sus datos en una isla JSON:
++ *
++ *   <script type="application/json" id="mi-pantalla-datos">{{ cosas|tojson }}</script>
++ *
++ * Un <script type="application/json"> NO es codigo ejecutable, asi que no lo
++ * alcanza la directiva script-src de la CSP: se puede cerrar la politica sin
++ * 'unsafe-inline' y este bloque sigue funcionando.
++ */
++function leerDatos(id, porDefecto) {
++  var el = document.getElementById(id);
++  if (!el) return porDefecto === undefined ? {} : porDefecto;
++  try {
++    return JSON.parse(el.textContent || el.innerText || "null") ||
++      (porDefecto === undefined ? {} : porDefecto);
++  } catch (e) {
++    return porDefecto === undefined ? {} : porDefecto;
++  }
++}
+diff --git a/static/js/detail_modal.js b/static/js/detail_modal.js
+new file mode 100644
+index 0000000..9669dca
+--- /dev/null
++++ b/static/js/detail_modal.js
+@@ -0,0 +1,56 @@
++/* Panel de detalle (iframe modal) — antes vivia inline en base.html.
++ *
++ * Se movio a un archivo propio en la Fase 4: al no haber JS inline, la CSP puede
++ * pasar a enforce sin 'unsafe-inline'. No cambio ni una linea de logica.
++ *
++ * Las funciones quedan globales a proposito: ui.js las llama por nombre para
++ * resolver los atributos data-detail-url / data-detail / data-detail-dismiss.
++ */
++function openDetail(url) {
++    var f = document.getElementById('detail-frame');
++    var ov = document.getElementById('detail-modal');
++    if (!f || !ov) return;
++    f.src = url + (url.indexOf('?') > -1 ? '&' : '?') + 'embed=1';
++    ov.classList.add('open');
++    document.body.classList.add('modal-open');
++    history.pushState({ detail: true }, '', '#detalle');
++  }
++  function closeDetail() {
++    var f = document.getElementById('detail-frame');
++    var ov = document.getElementById('detail-modal');
++    if (!ov) return;
++    ov.classList.remove('open');
++    document.body.classList.remove('modal-open');
++    if (f) f.src = 'about:blank';
++  }
++  // Cierre manual (X, clic afuera, Escape): pasa por el historial para que
++  // el botón "atrás" quede consistente.
++  function dismissDetail() {
++    if (location.hash === '#detalle') history.back(); else closeDetail();
++  }
++  // Cerrar con el botón "atrás" del navegador.
++  window.addEventListener('popstate', function () {
++    var ov = document.getElementById('detail-modal');
++    if (ov && ov.classList.contains('open')) closeDetail();
++  });
++  // Cerrar con Escape.
++  document.addEventListener('keydown', function (e) {
++    var ov = document.getElementById('detail-modal');
++    if (e.key === 'Escape' && ov && ov.classList.contains('open')) dismissDetail();
++  });
++  // Cierre por clic en el fondo. Se exige que el gesto EMPIECE y TERMINE sobre
++  // el fondo: si se arrastra desde adentro (por ejemplo seleccionando texto) y
++  // se suelta afuera, el modal NO se cierra.
++  (function () {
++    var startedOnBackdrop = false;
++    var ov = document.getElementById('detail-modal');
++    if (!ov) return;
++    ov.addEventListener('mousedown', function (e) {
++      startedOnBackdrop = (e.button === 0 && e.target === ov);
++    });
++    ov.addEventListener('mouseup', function (e) {
++      var started = startedOnBackdrop;
++      startedOnBackdrop = false;
++      if (e.button === 0 && started && e.target === ov) dismissDetail();
++    });
++  })();
+diff --git a/static/js/ingresos_egresos.js b/static/js/ingresos_egresos.js
+new file mode 100644
+index 0000000..2d773dc
+--- /dev/null
++++ b/static/js/ingresos_egresos.js
+@@ -0,0 +1,201 @@
++/* Pantalla: Ingresos / Egresos
++ *
++ * Movido desde el <script> inline del template en la Fase 4. Misma logica;
++ * los datos ahora vienen de la isla JSON #inout-datos en vez de interpolarse con
++ * Jinja adentro del codigo.
++ */
++var D = leerDatos("inout-datos");
++  var IO_SERIALIZED = new Set(D.serializedItems || []);
++  var IO_JAULA_UNITS = D.jaulaUnits || {};  // { item_id: [[unit_id, serial], ...] }
++  var IO_JAULA_STOCK = D.jaulaStock || {};  // { item_id: cantidad en Jaula }
++  var IO_ALL_ITEMS = D.items || [];
++  var snCurrentLine = null;
++
++  function isSerial(itemId){ return IO_SERIALIZED.has(parseInt(itemId, 10)); }
++  function currentTipo(){ return document.getElementById('io-tipo').value; }
++
++  // En EGRESO solo se pueden mover ítems que la Jaula tiene en stock.
++  function allowedItems(){
++    if(currentTipo() === 'EGRESO'){
++      return IO_ALL_ITEMS.filter(function(o){ return (IO_JAULA_STOCK[o.value] || 0) > 0; });
++    }
++    return IO_ALL_ITEMS;
++  }
++
++  function applyItemsToLine(line){
++    var sel = line.querySelector('.io-item');
++    var ts = sel.tomselect;
++    if(!ts) return;
++    var allowed = allowedItems();
++    var cur = ts.getValue();
++    ts.clearOptions();
++    allowed.forEach(function(o){ ts.addOption(o); });
++    ts.refreshOptions(false);
++    if(cur && !allowed.some(function(o){ return o.value === cur; })){
++      ts.clear(true);   // el ítem elegido ya no aplica al tipo actual
++    } else if(cur){
++      ts.setValue(cur, true);
++    }
++  }
++
++  // Tope de cantidad: en EGRESO, la cantidad no puede superar el stock de la Jaula.
++  function maxForLine(line){
++    if(currentTipo() !== 'EGRESO') return null;   // ingreso: sin tope
++    var id = line.querySelector('.io-item').value;
++    if(!id) return null;
++    var m = IO_JAULA_STOCK[id] || 0;
++    return m > 0 ? m : null;
++  }
++
++  function clampQty(line){
++    var qty = line.querySelector('.io-qty');
++    var mx = maxForLine(line);
++    if(mx == null){ qty.removeAttribute('max'); return; }
++    qty.setAttribute('max', mx);
++    var v = parseInt(qty.value, 10);
++    if(!isNaN(v) && v > mx){ qty.value = mx; }   // si tipeó de más, al máximo posible
++  }
++
++  function serialsOf(line){
++    return line.querySelector('.io-serials').value.split('\n').map(function(s){return s.trim();}).filter(Boolean);
++  }
++
++  function refreshLine(line){
++    var itemSel = line.querySelector('.io-item');
++    var snWrap = line.querySelector('.io-sn-btn-wrap');
++    // El botón "Elegir S/N" aparece solo en EGRESO de un serializado (opcional).
++    // La cantidad queda SIEMPRE editable: podés egresar por cantidad, o elegir
++    // seriales puntuales (en cuyo caso la cantidad se ajusta a lo elegido).
++    var needSn = isSerial(itemSel.value) && currentTipo() === 'EGRESO';
++    // OJO: usar 'block' y no '' — con '' vuelve a la regla CSS display:none.
++    snWrap.style.display = needSn ? 'block' : 'none';
++    if(!needSn){ line.querySelector('.io-serials').value = ''; }
++    line.querySelector('.io-qty').readOnly = false;
++    clampQty(line);
++    updateSnBtn(line);
++  }
++
++  function updateSnBtn(line){
++    var btn = line.querySelector('.io-sn-btn');
++    if(!btn) return;
++    var n = serialsOf(line).length;
++    btn.textContent = n > 0 ? ('S/N: ' + n + ' elegido' + (n>1?'s':'')) : 'Elegir S/N';
++  }
++
++  function snUpdateCounter(){
++    if(!snCurrentLine) return;
++    var body = document.getElementById('sn-body');
++    var declared = parseInt(snCurrentLine.querySelector('.io-qty').value, 10) || 0;
++    var n = body.querySelectorAll('.sn-check:checked').length;
++    var avail = body.querySelectorAll('.sn-check').length;
++    var counter = document.getElementById('sn-counter');
++    if(counter){ counter.textContent = 'Seleccionados ' + n + ' de ' + declared + ' · disponibles en Jaula: ' + avail; }
++    document.getElementById('sn-confirm').disabled = (declared < 1 || n !== declared);
++  }
++
++  function openSn(line){
++    snCurrentLine = line;
++    var itemId = line.querySelector('.io-item').value;
++    var body = document.getElementById('sn-body');
++    body.innerHTML = '';
++    if(!itemId){ alert('Elegí primero el ítem.'); return; }
++    var declared = parseInt(line.querySelector('.io-qty').value, 10) || 0;
++    if(declared < 1){ alert('Poné primero la cantidad a egresar.'); return; }
++
++    var counter = document.createElement('p');
++    counter.className = 'muted'; counter.id = 'sn-counter';
++    counter.style.marginTop = '0';
++    body.appendChild(counter);
++
++    var current = serialsOf(line);
++    var units = IO_JAULA_UNITS[itemId] || [];
++    if(units.length === 0){
++      var p = document.createElement('p'); p.className = 'muted';
++      p.textContent = 'No hay seriales de este ítem en la Jaula. Etiquetalos primero desde la ficha del ítem.';
++      body.appendChild(p);
++    } else {
++      units.forEach(function(u){
++        var lab = document.createElement('label'); lab.className='sn-row';
++        var cb = document.createElement('input'); cb.type='checkbox'; cb.className='sn-check'; cb.value = u[1];
++        if(current.indexOf(u[1]) !== -1) cb.checked = true;
++        cb.addEventListener('change', snUpdateCounter);
++        var span = document.createElement('span'); span.textContent = u[1];
++        lab.appendChild(cb); lab.appendChild(span); body.appendChild(lab);
++      });
++    }
++    snUpdateCounter();
++    openModal('modal-sn');
++  }
++
++  function confirmSn(){
++    if(!snCurrentLine) return;
++    var body = document.getElementById('sn-body');
++    var declared = parseInt(snCurrentLine.querySelector('.io-qty').value, 10) || 0;
++    var vals = [];
++    body.querySelectorAll('.sn-check:checked').forEach(function(cb){ vals.push(cb.value); });
++    if(declared < 1 || vals.length !== declared){
++      alert('Elegí exactamente ' + declared + ' serial(es), acorde a la cantidad declarada.');
++      return;
++    }
++    snCurrentLine.querySelector('.io-serials').value = vals.join('\n');
++    updateSnBtn(snCurrentLine);
++    closeModal('modal-sn');
++  }
++
++  function wireLine(line){
++    var sel = line.querySelector('.io-item');
++    if(window.TomSelect && !sel.tomselect){
++      new TomSelect(sel, { create:false, sortField:{field:'text',direction:'asc'}, maxOptions:null,
++                           placeholder:'Buscá un ítem...', onChange:function(){ refreshLine(line); } });
++    }
++    sel.addEventListener('change', function(){ refreshLine(line); });
++    // Si cambia la cantidad: se limpian los seriales elegidos y se aplica el tope.
++    line.querySelector('.io-qty').addEventListener('input', function(){
++      line.querySelector('.io-serials').value = '';
++      clampQty(line);
++      updateSnBtn(line);
++    });
++    line.querySelector('.io-sn-btn').addEventListener('click', function(){ openSn(line); });
++    line.querySelector('.io-remove').addEventListener('click', function(){ line.remove(); });
++    applyItemsToLine(line);   // filtra ítems según el tipo actual
++    refreshLine(line);
++  }
++
++  function addLine(){
++    var tpl = document.getElementById('io-line-template');
++    var cont = document.getElementById('io-lines');
++    cont.appendChild(tpl.content.cloneNode(true));
++    wireLine(cont.lastElementChild);
++  }
++
++  // Al enviar: si hay una fila de egreso serializado sin seriales (o que no
++  // coinciden con la cantidad), se frena y se avisa.
++  function validateBeforeSubmit(ev){
++    var tipo = currentTipo();
++    var msg = null;
++    document.querySelectorAll('.io-line').forEach(function(line){
++      var itemSel = line.querySelector('.io-item');
++      if(!itemSel.value || msg) return;
++      if(isSerial(itemSel.value) && tipo === 'EGRESO'){
++        var n = serialsOf(line).length;
++        var q = parseInt(line.querySelector('.io-qty').value, 10) || 0;
++        if(n === 0){ msg = 'Hay un ítem serializado sin seriales elegidos. Usá «Elegir S/N».'; }
++        else if(n !== q){ msg = 'Los seriales elegidos no coinciden con la cantidad. Revisá «Elegir S/N».'; }
++      }
++    });
++    if(msg){ ev.preventDefault(); alert(msg); }
++  }
++
++  document.addEventListener('DOMContentLoaded', function(){
++    document.getElementById('io-add-line').addEventListener('click', addLine);
++    document.getElementById('sn-confirm').addEventListener('click', confirmSn);
++    document.getElementById('io-form').addEventListener('submit', validateBeforeSubmit);
++    // Al cambiar ingreso/egreso: se re-filtran los ítems (egreso = solo Jaula) y
++    // se re-evalúan las filas (S/N + tope de cantidad).
++    document.getElementById('io-tipo').addEventListener('change', function(){
++      document.querySelectorAll('.io-line').forEach(function(l){
++        applyItemsToLine(l); refreshLine(l);
++      });
++    });
++    addLine(); addLine(); addLine();
++  });
+diff --git a/static/js/item_usage.js b/static/js/item_usage.js
+new file mode 100644
+index 0000000..6b4b657
+--- /dev/null
++++ b/static/js/item_usage.js
+@@ -0,0 +1,119 @@
++/* Pantalla: Utilizados
++ *
++ * Movido desde el <script> inline del template en la Fase 4. Misma logica; los
++ * datos ahora vienen de la isla JSON #item-usage-datos en vez de interpolarse
++ * con Jinja adentro del codigo.
++ */
++document.addEventListener("DOMContentLoaded", function () {
++  // Filtros: en desktop siempre visibles; en mobile colapsados por defecto.
++  var usageFilters = document.getElementById("usageFilters");
++  if (usageFilters) {
++    var syncUsageFilters = function () {
++      if (window.matchMedia("(min-width:768px)").matches) { usageFilters.open = true; }
++    };
++    syncUsageFilters();
++    window.addEventListener("resize", syncUsageFilters);
++  }
++  var D = leerDatos("item-usage-datos");
++  var stockMap = D.stockMap || {};
++  var stockQtyMap = D.stockQtyMap || {};
++  // Fase 2: si el servidor decidio no embeber el mapa (inventario grande),
++  // ensureStock() lo pide por ubicacion antes de usarlo. Con el mapa embebido
++  // es un passthrough sincronico y el flujo es identico al historico.
++  //
++  // Se construye PEREZOSAMENTE a proposito: en algunas pantallas este bloque
++  // corre dentro del bloque de contenido, es decir ANTES de que base.html
++  // cargue app.js al final del body. Llamarlo aca arriba reventaba
++  // con "makeStockLoader is not defined". Difiriendolo al primer uso (que
++  // siempre ocurre despues de un evento del usuario o del DOMContentLoaded) el
++  // orden de carga deja de importar.
++  var STOCK_REMOTE = !!D.stockRemote;
++  var _stockLoader = null;
++  function ensureStock(locId, cb) {
++    if (!_stockLoader) {
++      _stockLoader = makeStockLoader(stockMap, stockQtyMap, STOCK_REMOTE);
++    }
++    return _stockLoader(locId, cb);
++  }
++  var serializedItems = (D.serializedItems || []).map(String);
++  var fromSel = document.getElementById("from_location_id");
++
++  // Lista de ítems seleccionables (excluye serializados: van por Movimientos).
++  var allUsageItems = D.items || [];
++
++  function allowedForCurrentFrom() {
++    var locId = fromSel ? String(fromSel.value || "") : "";
++    var allowed = stockMap[locId] || [];
++    var set = {};
++    allowed.forEach(function (id) { set[String(id)] = true; });
++    return { locId: locId, set: set };
++  }
++
++  function clampUsageQty(line) {
++    if (!line) return;
++    var loc = fromSel ? String(fromSel.value || "") : "";
++    var itemSel = line.querySelector(".usage-item");
++    var item = itemSel ? String(itemSel.value || "") : "";
++    var qty = line.querySelector('input[name="qty[]"]');
++    if (!qty) return;
++    if (!loc || !item) { qty.removeAttribute("max"); return; }
++    var mx = (stockQtyMap[loc] || {})[item];
++    if (mx == null) { qty.removeAttribute("max"); return; }
++    qty.setAttribute("max", mx);
++    var v = parseInt(qty.value, 10);
++    if (!isNaN(v) && v > mx) { qty.value = mx; }
++  }
++
++  function applyStockFilterToLine(el) {
++    if (!el || !el.tomselect) return;
++    var ts = el.tomselect;
++    var info = allowedForCurrentFrom();
++    ts.clear(true);
++    ts.clearOptions();
++    allUsageItems.forEach(function (o) { if (info.set[o.value]) ts.addOption(o); });
++    ts.refreshOptions(false);
++    if (!info.locId) { ts.disable(); } else { ts.enable(); }
++  }
++
++  function applyStockFilterAllLines() {
++    document.querySelectorAll(".usage-item").forEach(applyStockFilterToLine);
++  }
++
++  function initTomSelectFor(el) {
++    if (!el || el.tomselect) return;
++    new TomSelect(el, {
++      create: false,
++      sortField: { field: "text", direction: "asc" },
++      placeholder: "Elegí la ubicación de origen primero...",
++      closeAfterSelect: true,
++      onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
++      onChange: function () { this.blur(); clampUsageQty(el.closest(".usage-line")); }
++    });
++    applyStockFilterToLine(el);
++  }
++
++  function wireUsageLine(line) {
++    var itemSelect = line.querySelector(".usage-item");
++    var removeBtn = line.querySelector(".remove-line-btn");
++    initTomSelectFor(itemSelect);
++    var qtyEl = line.querySelector('input[name="qty[]"]');
++    if (qtyEl) { qtyEl.addEventListener("input", function () { clampUsageQty(line); }); }
++    if (removeBtn) { removeBtn.addEventListener("click", function () { line.remove(); }); }
++  }
++
++  function addUsageLine() {
++    var tpl = document.getElementById("usage-line-template");
++    var container = document.getElementById("usage-lines");
++    container.appendChild(tpl.content.cloneNode(true));
++    wireUsageLine(container.lastElementChild);
++  }
++
++  document.getElementById("add-line-btn").addEventListener("click", addUsageLine);
++  addUsageLine();
++
++  if (fromSel && fromSel.tagName === "SELECT") {
++    fromSel.addEventListener("change", function () {
++      ensureStock(fromSel.value, applyStockFilterAllLines);
++    });
++  }
++});
+diff --git a/static/js/items.js b/static/js/items.js
+new file mode 100644
+index 0000000..a9b154b
+--- /dev/null
++++ b/static/js/items.js
+@@ -0,0 +1,69 @@
++/* Pantallas de catalogo de items (/items y /items/new).
++ *
++ * Movido desde el <script> inline de items.html e item_new.html en la Fase 4.
++ * La logica es la misma; lo unico que cambio es como se engancha: antes por
++ * onchange="..." en el HTML, ahora por listener. Los datos que venian
++ * interpolados con Jinja viajan ahora en atributos data-* del propio form.
++ */
++(function () {
++  "use strict";
++
++  /* Previsualizacion del codigo segun la categoria elegida. Sirve a las dos
++   * pantallas: el modal de /items (#item_new_category) y el alta completa de
++   * /items/new (#category_id). */
++  function conectarPreview(idSelect, idSalida) {
++    var sel = document.getElementById(idSelect);
++    var out = document.getElementById(idSalida);
++    if (!sel || !out) return;
++
++    var actualizar = function () {
++      var opt = sel.options[sel.selectedIndex];
++      var next = opt ? (opt.getAttribute("data-next") || "") : "";
++      out.value = next || "(esta categoría no tiene prefijo asignado)";
++    };
++    sel.addEventListener("change", actualizar);
++  }
++
++  /* Alta de item por AJAX: si falla, el error se muestra DENTRO del modal sin
++   * recargar, para no perder lo que el usuario ya habia cargado. */
++  function conectarAltaAjax() {
++    var form = document.getElementById("form-item-new");
++    if (!form) return;
++    var errBox = document.getElementById("item-new-error");
++    var destino = form.getAttribute("data-redirect") || "/items";
++
++    form.addEventListener("submit", function (e) {
++      e.preventDefault();
++      if (errBox) { errBox.style.display = "none"; errBox.textContent = ""; }
++      var btn = form.querySelector('button[type="submit"]');
++      if (btn) btn.disabled = true;
++
++      fetch(form.action, {
++        method: "POST",
++        body: new FormData(form),
++        headers: { "X-Requested-With": "XMLHttpRequest" },
++        credentials: "same-origin"
++      }).then(function (r) {
++        return r.json().then(function (data) { return { ok: r.ok, data: data }; });
++      }).then(function (res) {
++        if (res.ok && res.data && res.data.ok) {
++          window.location = res.data.redirect || destino;
++          return;
++        }
++        if (btn) btn.disabled = false;
++        var msg = (res.data && res.data.error) || "No se pudo crear el ítem.";
++        if (errBox) { errBox.textContent = msg; errBox.style.display = ""; }
++      }).catch(function () {
++        // Si el fetch falla, se cae al envio tradicional del formulario.
++        if (btn) btn.disabled = false;
++        form.submit();
++      });
++    });
++  }
++
++  document.addEventListener("DOMContentLoaded", function () {
++    conectarPreview("item_new_category", "item_new_code_preview");
++    conectarPreview("category_id", "code_preview");
++    conectarAltaAjax();
++  });
++})();
+diff --git a/static/js/metricas.js b/static/js/metricas.js
+index 2919d6b..cb52cfe 100644
+--- a/static/js/metricas.js
++++ b/static/js/metricas.js
+@@ -148,3 +148,21 @@
+     return o;
+   }
+ })();
++
++/* ---------- Dibujado declarativo (Fase 4) ----------
++ *
++ * Antes cada pantalla de metricas traia un <script> inline con las llamadas a
++ * MX.<tipo>(...) y los datos interpolados por Jinja adentro del codigo. Ahora
++ * publica la misma informacion como datos en #metricas-graficos y este bloque
++ * las ejecuta. Mismos graficos; sin JS inline.
++ */
++document.addEventListener("DOMContentLoaded", function () {
++  var graficos = leerDatos("metricas-graficos", []);
++  if (!graficos || !graficos.length) return;
++
++  graficos.forEach(function (g) {
++    var fn = MX[g.tipo];
++    if (typeof fn !== "function") return;
++    fn(g.canvas, g.labels || [], g.valores || [], g.opts || {});
++  });
++});
+diff --git a/static/js/movements.js b/static/js/movements.js
+new file mode 100644
+index 0000000..06500df
+--- /dev/null
++++ b/static/js/movements.js
+@@ -0,0 +1,137 @@
++/* Pantalla de Movimientos.
++ *
++ * Movido desde el <script> inline de movements.html en la Fase 4. La logica es
++ * la misma: lo unico que cambio es de donde salen los datos (ahora de la isla
++ * JSON #movements-datos en vez de interpolarse con Jinja dentro del codigo).
++ */
++document.addEventListener("DOMContentLoaded", function () {
++  // Caja de "generar pendiente": solo existe si el rol puede generarlos.
++  var chkPend = document.getElementById("generate_pending");
++  var boxPend = document.getElementById("pending_box");
++  if (chkPend && boxPend) {
++    var togglePending = function () {
++      boxPend.style.display = chkPend.checked ? "block" : "none";
++    };
++    chkPend.addEventListener("change", togglePending);
++    togglePending();
++  }
++
++  // Filtros: en desktop siempre visibles; en mobile colapsados por defecto.
++  var movFilters = document.getElementById("movFilters");
++  if (movFilters) {
++    var syncFilters = function () {
++      if (window.matchMedia("(min-width:768px)").matches) { movFilters.open = true; }
++    };
++    syncFilters();
++    window.addEventListener("resize", syncFilters);
++  }
++  // Item dinamico segun "Desde": solo se ofrecen items con stock (>0) en esa ubicacion.
++  var D = leerDatos("movements-datos");
++  var stockMap = D.stockMap || {};
++  var stockQtyMap = D.stockQtyMap || {};
++  // Fase 2: si el servidor decidio no embeber el mapa (inventario grande),
++  // ensureStock() lo pide por ubicacion antes de usarlo. Con el mapa embebido
++  // es un passthrough sincronico y el flujo es identico al historico.
++  //
++  // Se construye PEREZOSAMENTE a proposito: en algunas pantallas este bloque
++  // corre dentro del bloque de contenido, es decir ANTES de que base.html
++  // cargue app.js al final del body. Llamarlo aca arriba reventaba
++  // con "makeStockLoader is not defined". Difiriendolo al primer uso (que
++  // siempre ocurre despues de un evento del usuario o del DOMContentLoaded) el
++  // orden de carga deja de importar.
++  var STOCK_REMOTE = !!D.stockRemote;
++  var _stockLoader = null;
++  function ensureStock(locId, cb) {
++    if (!_stockLoader) {
++      _stockLoader = makeStockLoader(stockMap, stockQtyMap, STOCK_REMOTE);
++    }
++    return _stockLoader(locId, cb);
++  }
++  var externalLocIds = (D.externalLocIds || []).map(String);
++  var fromSel = document.getElementById("from_location_id");
++  var itemEl = document.getElementById("item_id");
++  var qtyInputEl = document.getElementById("qty_input");
++
++  // Tope de cantidad: no se puede mover más de lo que hay en el origen.
++  // Origen externo (Proveedor/Baja) = sin tope. Si tipea de más, al máximo.
++  function clampMovQty() {
++    if (!qtyInputEl) return;
++    var loc = fromSel ? String(fromSel.value || "") : "";
++    var item = itemEl ? String(itemEl.value || "") : "";
++    var isExternal = externalLocIds.indexOf(loc) !== -1;
++    if (isExternal || !loc || !item) { qtyInputEl.removeAttribute("max"); return; }
++    var mx = (stockQtyMap[loc] || {})[item];
++    if (mx == null) { qtyInputEl.removeAttribute("max"); return; }
++    qtyInputEl.setAttribute("max", mx);
++    var v = parseInt(qtyInputEl.value, 10);
++    if (!isNaN(v) && v > mx) { qtyInputEl.value = mx; }
++  }
++  if (qtyInputEl) { qtyInputEl.addEventListener("input", clampMovQty); }
++
++  // Selector de seriales (auto/elegir) compartido.
++  var refreshSerialUI = initSerialPicker({
++    unitsMap: D.unitsMap || {},
++    serializedItems: D.serializedItems || [],
++    itemEl: itemEl,
++    fromSel: fromSel,
++    qtyInput: document.getElementById("qty_input"),
++    pickBox: document.getElementById("serial_pick_box"),
++    pickList: document.getElementById("serial_pick_list"),
++    pickStatus: document.getElementById("serial_pick_status"),
++    autoHint: document.getElementById("serial_auto_hint"),
++    autoText: document.getElementById("serial_auto_text")
++  });
++
++  if (itemEl && !itemEl.tomselect) {
++    var allItems = [];
++    Array.from(itemEl.options).forEach(function (o) {
++      if (o.value) allItems.push({ value: o.value, text: o.text });
++    });
++
++    var tsItem = new TomSelect(itemEl, {
++      create: false,
++      sortField: { field: "text", direction: "asc" },
++      placeholder: "Elegí la ubicación de origen primero...",
++      closeAfterSelect: true,
++      onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
++      onChange: function () { this.blur(); refreshSerialUI(); clampMovQty(); }
++    });
++
++    var refreshItems = function () {
++      var locId = fromSel ? String(fromSel.value || "") : "";
++      var isExternal = externalLocIds.indexOf(locId) !== -1;
++      tsItem.clear(true);
++      tsItem.clearOptions();
++      if (isExternal) {
++        // Ubicación externa (Proveedor/Baja): puede mover cualquier ítem.
++        allItems.forEach(function (o) { tsItem.addOption(o); });
++      } else {
++        var allowed = stockMap[locId] || [];
++        var allowedSet = {};
++        allowed.forEach(function (id) { allowedSet[String(id)] = true; });
++        allItems.forEach(function (o) { if (allowedSet[o.value]) tsItem.addOption(o); });
++      }
++      tsItem.refreshOptions(false);
++      if (!locId) { tsItem.disable(); } else { tsItem.enable(); }
++      refreshSerialUI();
++      clampMovQty();
++    };
++
++    var refreshItemsConStock = function () {
++      ensureStock(fromSel ? fromSel.value : "", refreshItems);
++    };
++
++    if (fromSel && fromSel.tagName === "SELECT") {
++      fromSel.addEventListener("change", refreshItemsConStock);
++    }
++    refreshItemsConStock();
++  }
++
++  var toSel = document.getElementById("to_location_id");
++  var scrapBox = document.getElementById("scrap_reason_box");
++  var descartes_id = D.descartesId || "";
++  function toggleScrap() {
++    scrapBox.style.display = (toSel.value === descartes_id) ? "block" : "none";
++  }
++  if (toSel) { toSel.addEventListener("change", toggleScrap); toggleScrap(); }
++});
+diff --git a/static/js/movements_bulk.js b/static/js/movements_bulk.js
+new file mode 100644
+index 0000000..f5b289e
+--- /dev/null
++++ b/static/js/movements_bulk.js
+@@ -0,0 +1,172 @@
++/* Pantalla: Movimientos en lote
++ *
++ * Movido desde el <script> inline del template en la Fase 4. Misma logica; los
++ * datos ahora vienen de la isla JSON #movements-bulk-datos en vez de interpolarse
++ * con Jinja adentro del codigo.
++ */
++var D = leerDatos("movements-bulk-datos");
++  var descartes_id = D.descartesId || "";
++  var stockMap = D.stockMap || {};
++  var stockQtyMap = D.stockQtyMap || {};
++  // Fase 2: si el servidor decidio no embeber el mapa (inventario grande),
++  // ensureStock() lo pide por ubicacion antes de usarlo. Con el mapa embebido
++  // es un passthrough sincronico y el flujo es identico al historico.
++  //
++  // Se construye PEREZOSAMENTE a proposito: en algunas pantallas este bloque
++  // corre dentro del bloque de contenido, es decir ANTES de que base.html
++  // cargue app.js al final del body. Llamarlo aca arriba reventaba
++  // con "makeStockLoader is not defined". Difiriendolo al primer uso (que
++  // siempre ocurre despues de un evento del usuario o del DOMContentLoaded) el
++  // orden de carga deja de importar.
++  var STOCK_REMOTE = !!D.stockRemote;
++  var _stockLoader = null;
++  function ensureStock(locId, cb) {
++    if (!_stockLoader) {
++      _stockLoader = makeStockLoader(stockMap, stockQtyMap, STOCK_REMOTE);
++    }
++    return _stockLoader(locId, cb);
++  }
++  var externalLocIds = (D.externalLocIds || []).map(String);
++
++  // Tope de cantidad por fila: no se puede mover más de lo que hay en el origen.
++  function clampBulkQty(line) {
++    if (!line) return;
++    var fromSel = document.getElementById("bulk_from_location_id");
++    var loc = fromSel ? String(fromSel.value || "") : "";
++    var itemSel = line.querySelector(".bulk-item");
++    var item = itemSel ? String(itemSel.value || "") : "";
++    var qty = line.querySelector('input[name="qty[]"]');
++    if (!qty) return;
++    var isExternal = externalLocIds.indexOf(loc) !== -1;
++    if (isExternal || !loc || !item) { qty.removeAttribute("max"); return; }
++    var mx = (stockQtyMap[loc] || {})[item];
++    if (mx == null) { qty.removeAttribute("max"); return; }
++    qty.setAttribute("max", mx);
++    var v = parseInt(qty.value, 10);
++    if (!isNaN(v) && v > mx) { qty.value = mx; }
++  }
++  function clampBulkAll() {
++    document.querySelectorAll(".bulk-line").forEach(clampBulkQty);
++  }
++
++  // Lista completa de items (para reconstruir opciones por ubicacion)
++  var allBulkItems = D.items || [];
++
++  function allowedForCurrentFrom() {
++    var fromSel = document.getElementById("bulk_from_location_id");
++    var locId = fromSel ? String(fromSel.value || "") : "";
++    var isExternal = externalLocIds.indexOf(locId) !== -1;
++    var allowed = stockMap[locId] || [];
++    var set = {};
++    allowed.forEach(function (id) { set[String(id)] = true; });
++    return { locId: locId, set: set, all: isExternal };
++  }
++
++  function applyStockFilterToLine(el) {
++    if (!el || !el.tomselect) return;
++    var ts = el.tomselect;
++    var info = allowedForCurrentFrom();
++    ts.clear(true);
++    ts.clearOptions();
++    // Externa (Proveedor/Baja): todos los ítems; interna: solo con stock.
++    allBulkItems.forEach(function (o) { if (info.all || info.set[o.value]) ts.addOption(o); });
++    ts.refreshOptions(false);
++    if (!info.locId) { ts.disable(); } else { ts.enable(); }
++  }
++
++  function applyStockFilterAllLines() {
++    document.querySelectorAll(".bulk-item").forEach(applyStockFilterToLine);
++  }
++
++  function initTomSelectFor(el) {
++    if (!el) return;
++    if (el.tomselect) return;
++    new TomSelect(el, {
++      create: false,
++      sortField: { field: "text", direction: "asc" },
++      placeholder: "Elegí la ubicación de origen primero...",
++      closeAfterSelect: true,
++      onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
++      onChange: function () { this.blur(); clampBulkQty(el.closest(".bulk-line")); }
++    });
++    applyStockFilterToLine(el);
++  }
++
++  function applyDescartes(isDescartes) {
++    document.querySelectorAll(".scrap-reason-wrap").forEach(function(el) {
++      el.style.display = isDescartes ? "block" : "none";
++    });
++  }
++
++  function wireBulkLine(line) {
++    var itemSelect = line.querySelector(".bulk-item");
++    var pendingFlag = line.querySelector(".pending-flag");
++    var commentWrap = line.querySelector(".pending-comment-wrap");
++    var removeBtn = line.querySelector(".remove-line-btn");
++
++    initTomSelectFor(itemSelect);
++
++    // Selector "qué deben devolver" buscable (no se filtra por stock de origen:
++    // puede volver cualquier ítem, ej. entregás domo y deben traer Onvif).
++    var returnItemSel = line.querySelector(".pending-return-item");
++    if (returnItemSel && window.TomSelect && !returnItemSel.tomselect) {
++      new TomSelect(returnItemSel, window.TS_SINGLE_OPTS);
++    }
++
++    var qtyEl = line.querySelector('input[name="qty[]"]');
++    if (qtyEl) { qtyEl.addEventListener("input", function () { clampBulkQty(line); }); }
++
++    function togglePendingComment() {
++      if (pendingFlag.value === "1") {
++        commentWrap.style.display = "block";
++        // Autorellenar la devolución con el mismo ítem y cantidad seleccionados
++        // en la línea (el usuario puede cambiarlos después).
++        var itemVal = itemSelect ? String(itemSelect.value || "") : "";
++        if (itemVal) {
++          if (returnItemSel && returnItemSel.tomselect) { returnItemSel.tomselect.setValue(itemVal, true); }
++          else if (returnItemSel) { returnItemSel.value = itemVal; }
++        }
++        var rqty = commentWrap.querySelector('input[name="pending_return_qty[]"]');
++        if (rqty && !rqty.value && qtyEl) { rqty.value = qtyEl.value; }
++      } else {
++        commentWrap.style.display = "none";
++        var input = commentWrap.querySelector('input[name="pending_comment[]"]');
++        if (input) input.value = "";
++        var rqty = commentWrap.querySelector('input[name="pending_return_qty[]"]');
++        if (rqty) rqty.value = "";
++        if (returnItemSel && returnItemSel.tomselect) { returnItemSel.tomselect.clear(true); }
++        else if (returnItemSel) { returnItemSel.value = ""; }
++      }
++    }
++    pendingFlag.addEventListener("change", togglePendingComment);
++    togglePendingComment();
++
++    removeBtn.addEventListener("click", function () { line.remove(); });
++  }
++
++  function addBulkLine() {
++    var tpl = document.getElementById("bulk-line-template");
++    var container = document.getElementById("bulk-lines");
++    var fragment = tpl.content.cloneNode(true);
++    container.appendChild(fragment);
++    wireBulkLine(container.lastElementChild);
++    var toSel = document.getElementById("bulk_to_location_id");
++    applyDescartes(toSel.value === descartes_id);
++  }
++
++  document.addEventListener("DOMContentLoaded", function () {
++    document.getElementById("add-line-btn").addEventListener("click", addBulkLine);
++    addBulkLine();
++    var bulkToSel = document.getElementById("bulk_to_location_id");
++    bulkToSel.addEventListener("change", function () {
++      applyDescartes(this.value === descartes_id);
++    });
++    var bulkFromSel = document.getElementById("bulk_from_location_id");
++    if (bulkFromSel) {
++      bulkFromSel.addEventListener("change", function () {
++        ensureStock(bulkFromSel.value, function () {
++          applyStockFilterAllLines(); clampBulkAll();
++        });
++      });
++    }
++  });
+diff --git a/static/js/purchase_request.js b/static/js/purchase_request.js
+new file mode 100644
+index 0000000..369887b
+--- /dev/null
++++ b/static/js/purchase_request.js
+@@ -0,0 +1,24 @@
++/* Detalle de solicitud de compra — copiar el cuerpo del mail al portapapeles.
++ * Movido desde el <script> inline en la Fase 4. Misma logica. */
++(function () {
++  "use strict";
++  document.addEventListener("click", function (e) {
++    var btn = e.target.closest ? e.target.closest("[data-copy-pr]") : null;
++    if (!btn) return;
++
++    var ta = document.getElementById("sc-body");
++    var out = document.getElementById("sc-copied");
++    if (!ta) return;
++
++    ta.select();
++    try {
++      navigator.clipboard.writeText(ta.value);
++    } catch (err) {
++      document.execCommand("copy");
++    }
++    if (out) {
++      out.textContent = "Copiado.";
++      setTimeout(function () { out.textContent = ""; }, 2000);
++    }
++  });
++})();
+diff --git a/static/js/remitos.js b/static/js/remitos.js
+new file mode 100644
+index 0000000..84bc9c1
+--- /dev/null
++++ b/static/js/remitos.js
+@@ -0,0 +1,87 @@
++/* Pantalla: Remitos
++ *
++ * Movido desde el <script> inline del template en la Fase 4. Misma logica;
++ * los datos ahora vienen de la isla JSON #remitos-datos en vez de interpolarse con
++ * Jinja adentro del codigo.
++ */
++var D = leerDatos("remitos-datos");
++  var REMITO_MOVS_URL = D.movsUrl || "/remitos/movimientos";
++  var REMITO_RESP_URL = D.respUrl || "/remitos/responsables";
++
++  function openRemitoModal() { openModal('modal-remito-new'); }
++
++  function onLocChange(which) {
++    loadResponsables(which);
++    loadRemitoMovs();
++  }
++
++  function loadResponsables(which) {
++    var locSel = document.getElementById(which === 'from' ? 'rm-from' : 'rm-to');
++    var respSel = document.getElementById(which === 'from' ? 'rm-resp-from' : 'rm-resp-to');
++    var loc = locSel.value;
++    respSel.disabled = false;
++    respSel.innerHTML = '<option value="">Cargando...</option>';
++    if (!loc) { respSel.innerHTML = '<option value="" disabled selected>Elegí la ubicación...</option>'; return; }
++    fetch(REMITO_RESP_URL + '?location_id=' + encodeURIComponent(loc))
++      .then(function (r) { return r.json(); })
++      .then(function (data) {
++        if (data.external) {
++          respSel.innerHTML = '<option value="">Proveedor — se completa a mano</option>';
++          respSel.disabled = true;
++          return;
++        }
++        var opts = data.responsibles || [];
++        if (opts.length === 0) {
++          respSel.innerHTML = '<option value="" disabled selected>Sin responsables cargados</option>';
++          return;
++        }
++        var html = '';
++        if (opts.length > 1) { html += '<option value="" disabled selected>Elegí responsable...</option>'; }
++        opts.forEach(function (o) { html += '<option value="' + o.id + '">' + o.name + '</option>'; });
++        respSel.innerHTML = html;
++        if (opts.length === 1) { respSel.value = String(opts[0].id); }
++      })
++      .catch(function () { respSel.innerHTML = '<option value="" disabled selected>Error al cargar</option>'; });
++  }
++
++  function loadRemitoMovs() {
++    var from = document.getElementById('rm-from').value;
++    var to = document.getElementById('rm-to').value;
++    var dFrom = document.getElementById('rm-date-from').value;
++    var dTo = document.getElementById('rm-date-to').value;
++    var body = document.getElementById('rm-mov-body');
++    var chkAll = document.getElementById('rm-check-all');
++    if (chkAll) chkAll.checked = false;
++    if (!from || !to) return;
++    body.innerHTML = '<tr><td colspan="6" class="muted">Cargando...</td></tr>';
++    fetch(REMITO_MOVS_URL + '?from_location_id=' + encodeURIComponent(from) + '&to_location_id=' + encodeURIComponent(to)
++          + '&date_from=' + encodeURIComponent(dFrom) + '&date_to=' + encodeURIComponent(dTo))
++      .then(function (r) { return r.text(); })
++      .then(function (html) { body.innerHTML = html; })
++      .catch(function () { body.innerHTML = '<tr><td colspan="6" class="muted">No se pudieron cargar los movimientos.</td></tr>'; });
++  }
++
++  function toggleAllRemitoMovs(master) {
++    document.querySelectorAll('#rm-mov-body input[name="movement_id"]').forEach(function (c) {
++      c.checked = master.checked;
++    });
++  }
++
++/* Enganche de los controles de la pantalla.
++ *
++ * Antes cada <select> traia su onchange="onLocChange('from')" escrito en el
++ * HTML. Ahora el HTML solo declara el atributo y el enganche vive aca, por
++ * delegacion (asi sirve tambien para el contenido que se recarga por fetch).
++ */
++document.addEventListener("change", function (e) {
++  var el = e.target.closest ? e.target.closest("[data-remito-loc]") : null;
++  if (el) { onLocChange(el.getAttribute("data-remito-loc")); return; }
++
++  el = e.target.closest ? e.target.closest("[data-remito-reload]") : null;
++  if (el) { loadRemitoMovs(); }
++});
++
++document.addEventListener("click", function (e) {
++  var el = e.target.closest ? e.target.closest("[data-remito-toggle-all]") : null;
++  if (el) toggleAllRemitoMovs(el);
++});
+diff --git a/static/js/repair_request_detail.js b/static/js/repair_request_detail.js
+new file mode 100644
+index 0000000..c909893
+--- /dev/null
++++ b/static/js/repair_request_detail.js
+@@ -0,0 +1,25 @@
++/* Pantalla: Detalle de solicitud de repuestos
++ *
++ * Movido tal cual desde el <script> inline del template en la Fase 4.
++ * No tenia datos interpolados con Jinja, asi que la logica no cambio en
++ * nada: solo dejo de ir inline para que la CSP pueda cerrarse.
++ */
++// Limita la selección de seriales por línea a la cantidad pedida.
++document.addEventListener("DOMContentLoaded", function () {
++  document.querySelectorAll('input[type="checkbox"][data-line]:not(.rr-pending-flag)').forEach(function (cb) {
++    cb.addEventListener("change", function () {
++      var line = cb.getAttribute("data-line");
++      var max = parseInt(cb.getAttribute("data-max"), 10) || 0;
++      var checked = document.querySelectorAll('input[data-line="' + line + '"]:not(.rr-pending-flag):checked');
++      if (checked.length > max) { cb.checked = false; }
++    });
++  });
++  // Mostrar/ocultar el detalle del pendiente por línea.
++  document.querySelectorAll(".rr-pending-flag").forEach(function (flag) {
++    flag.addEventListener("change", function () {
++      var line = flag.getAttribute("data-line");
++      var box = document.querySelector('.rr-pending-box[data-line="' + line + '"]');
++      if (box) box.style.display = flag.checked ? "block" : "none";
++    });
++  });
++});
+diff --git a/static/js/repair_requests.js b/static/js/repair_requests.js
+new file mode 100644
+index 0000000..9c87627
+--- /dev/null
++++ b/static/js/repair_requests.js
+@@ -0,0 +1,32 @@
++/* Pantalla: Solicitudes de repuestos
++ *
++ * Movido tal cual desde el <script> inline del template en la Fase 4.
++ * No tenia datos interpolados con Jinja, asi que la logica no cambio en
++ * nada: solo dejo de ir inline para que la CSP pueda cerrarse.
++ */
++document.addEventListener("DOMContentLoaded", function () {
++  function wireLine(line) {
++    var rm = line.querySelector(".remove-line-btn");
++    if (rm) rm.addEventListener("click", function () { line.remove(); });
++    // Selector de repuesto buscable/tipeable (las lineas se clonan, el init
++    // global de TomSelect no las alcanza, asi que lo inicializamos por linea).
++    var sel = line.querySelector('select[name="item_id[]"]');
++    if (sel && window.TomSelect && !sel.tomselect) {
++      new TomSelect(sel, window.TS_SINGLE_OPTS);
++    }
++  }
++  function addLine() {
++    var tpl = document.getElementById("rr-line-template");
++    var cont = document.getElementById("rr-lines");
++    cont.appendChild(tpl.content.cloneNode(true));
++    wireLine(cont.lastElementChild);
++  }
++  // El formulario de alta solo existe para el rol que puede crear solicitudes.
++  // Antes este script vivia dentro del condicional del
++  // template, asi que nunca corria para los demas roles; ahora el archivo se
++  // carga siempre y hay que chequear.
++  var btnAdd = document.getElementById("add-line-btn");
++  if (!btnAdd) return;
++  btnAdd.addEventListener("click", addLine);
++  addLine();
++});
+diff --git a/static/js/scrap_report.js b/static/js/scrap_report.js
+new file mode 100644
+index 0000000..c7416f1
+--- /dev/null
++++ b/static/js/scrap_report.js
+@@ -0,0 +1,118 @@
++/* Pantalla: Descartes
++ *
++ * Movido desde el <script> inline del template en la Fase 4. Misma logica;
++ * los datos ahora vienen de la isla JSON #scrap-datos en vez de interpolarse con
++ * Jinja adentro del codigo.
++ */
++document.addEventListener("DOMContentLoaded", function () {
++  // Filtros: en desktop siempre visibles; en mobile colapsados por defecto.
++  var scrapFilters = document.getElementById("scrapFilters");
++  if (scrapFilters) {
++    var syncScrapFilters = function () {
++      if (window.matchMedia("(min-width:768px)").matches) { scrapFilters.open = true; }
++    };
++    syncScrapFilters();
++    window.addEventListener("resize", syncScrapFilters);
++  }
++  var D = leerDatos("scrap-datos");
++  var stockMap = D.stockMap || {};
++  var stockQtyMap = D.stockQtyMap || {};
++  // Fase 2: si el servidor decidio no embeber el mapa (inventario grande),
++  // ensureStock() lo pide por ubicacion antes de usarlo. Con el mapa embebido
++  // es un passthrough sincronico y el flujo es identico al historico.
++  //
++  // Se construye PEREZOSAMENTE a proposito: en algunas pantallas este bloque
++  // corre dentro del bloque de contenido, es decir ANTES de que base.html
++  // cargue app.js al final del body. Llamarlo aca arriba reventaba
++  // con "makeStockLoader is not defined". Difiriendolo al primer uso (que
++  // siempre ocurre despues de un evento del usuario o del DOMContentLoaded) el
++  // orden de carga deja de importar.
++  var STOCK_REMOTE = !!D.stockRemote;
++  var _stockLoader = null;
++  function ensureStock(locId, cb) {
++    if (!_stockLoader) {
++      _stockLoader = makeStockLoader(stockMap, stockQtyMap, STOCK_REMOTE);
++    }
++    return _stockLoader(locId, cb);
++  }
++  var fromSel = document.getElementById("from_location_id");
++
++  // Lista de ítems seleccionables (excluye serializados: van por Movimientos).
++  var allScrapItems = D.items || [];
++
++  function allowedForCurrentFrom() {
++    var locId = fromSel ? String(fromSel.value || "") : "";
++    var allowed = stockMap[locId] || [];
++    var set = {};
++    allowed.forEach(function (id) { set[String(id)] = true; });
++    return { locId: locId, set: set };
++  }
++
++  function clampScrapQty(line) {
++    if (!line) return;
++    var loc = fromSel ? String(fromSel.value || "") : "";
++    var itemSel = line.querySelector(".scrap-item");
++    var item = itemSel ? String(itemSel.value || "") : "";
++    var qty = line.querySelector('input[name="qty[]"]');
++    if (!qty) return;
++    if (!loc || !item) { qty.removeAttribute("max"); return; }
++    var mx = (stockQtyMap[loc] || {})[item];
++    if (mx == null) { qty.removeAttribute("max"); return; }
++    qty.setAttribute("max", mx);
++    var v = parseInt(qty.value, 10);
++    if (!isNaN(v) && v > mx) { qty.value = mx; }
++  }
++
++  function applyStockFilterToLine(el) {
++    if (!el || !el.tomselect) return;
++    var ts = el.tomselect;
++    var info = allowedForCurrentFrom();
++    ts.clear(true);
++    ts.clearOptions();
++    allScrapItems.forEach(function (o) { if (info.set[o.value]) ts.addOption(o); });
++    ts.refreshOptions(false);
++    if (!info.locId) { ts.disable(); } else { ts.enable(); }
++  }
++
++  function applyStockFilterAllLines() {
++    document.querySelectorAll(".scrap-item").forEach(applyStockFilterToLine);
++  }
++
++  function initTomSelectFor(el) {
++    if (!el || el.tomselect) return;
++    new TomSelect(el, {
++      create: false,
++      sortField: { field: "text", direction: "asc" },
++      placeholder: "Elegí la ubicación de origen primero...",
++      closeAfterSelect: true,
++      onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
++      onChange: function () { this.blur(); clampScrapQty(el.closest(".scrap-line")); }
++    });
++    applyStockFilterToLine(el);
++  }
++
++  function wireScrapLine(line) {
++    var itemSelect = line.querySelector(".scrap-item");
++    var removeBtn = line.querySelector(".remove-line-btn");
++    initTomSelectFor(itemSelect);
++    var qtyEl = line.querySelector('input[name="qty[]"]');
++    if (qtyEl) { qtyEl.addEventListener("input", function () { clampScrapQty(line); }); }
++    if (removeBtn) { removeBtn.addEventListener("click", function () { line.remove(); }); }
++  }
++
++  function addScrapLine() {
++    var tpl = document.getElementById("scrap-line-template");
++    var container = document.getElementById("scrap-lines");
++    container.appendChild(tpl.content.cloneNode(true));
++    wireScrapLine(container.lastElementChild);
++  }
++
++  document.getElementById("add-line-btn").addEventListener("click", addScrapLine);
++  addScrapLine();
++
++  if (fromSel && fromSel.tagName === "SELECT") {
++    fromSel.addEventListener("change", function () {
++      ensureStock(fromSel.value, applyStockFilterAllLines);
++    });
++  }
++});
+diff --git a/static/js/ui.js b/static/js/ui.js
+new file mode 100644
+index 0000000..79f52ba
+--- /dev/null
++++ b/static/js/ui.js
+@@ -0,0 +1,138 @@
++/* Comportamientos de UI declarativos, por delegacion de eventos.
++ *
++ * Por que existe este archivo (Fase 4):
++ * antes cada boton traia su propio `onclick="openModal('x')"` escrito en el
++ * HTML. Eso son ~70 handlers inline repartidos en 20 templates. Dos problemas:
++ *
++ *   1. Obligan a mantener 'unsafe-inline' en la CSP, que es justo la directiva
++ *      que hace que una CSP sirva de poco. Sin handlers inline la politica se
++ *      puede cerrar de verdad.
++ *   2. No se pueden testear ni linter-ear, y se duplican en cada template.
++ *
++ * Ahora el HTML solo declara QUE quiere (data-modal-open="x") y el
++ * comportamiento vive aca, una sola vez, enganchado por delegacion en document.
++ * Al ser delegado funciona tambien para nodos agregados despues (filas nuevas,
++ * lineas de un formulario dinamico), sin re-enganchar nada.
++ *
++ * Atributos soportados:
++ *   data-modal-open="id"     abre el modal
++ *   data-modal-close="id"    lo cierra
++ *   data-detail-url="url"    abre el panel de detalle con esa url
++ *   data-detail             (en un <a>) abre el detalle con su propio href
++ *   data-detail-dismiss      cierra el panel de detalle
++ *   data-toggle="id"         alterna display none/block de ese elemento
++ *   data-print               window.print()
++ *   data-toggle-pw="id"      alterna mostrar/ocultar de un input de contrasena
++ *   data-select-all          selecciona todo el texto del input al hacer clic
++ *   data-submit-on-change    envia el formulario al cambiar (selects de filtro)
++ *   data-confirm="texto"     (en un <form>) pide confirmacion antes de enviar
++ */
++(function () {
++  "use strict";
++
++  function cerca(destino, attr) {
++    return destino && destino.closest ? destino.closest("[" + attr + "]") : null;
++  }
++
++  document.addEventListener("click", function (e) {
++    var el;
++
++    el = cerca(e.target, "data-modal-open");
++    if (el) { openModal(el.getAttribute("data-modal-open")); return; }
++
++    el = cerca(e.target, "data-modal-close");
++    if (el) { closeModal(el.getAttribute("data-modal-close")); return; }
++
++    el = cerca(e.target, "data-detail-url");
++    if (el && typeof openDetail === "function") {
++      e.preventDefault();
++      openDetail(el.getAttribute("data-detail-url"));
++      return;
++    }
++
++    el = cerca(e.target, "data-detail");
++    if (el && el.href && typeof openDetail === "function") {
++      e.preventDefault();
++      openDetail(el.href);
++      return;
++    }
++
++    el = cerca(e.target, "data-detail-dismiss");
++    if (el && typeof dismissDetail === "function") { dismissDetail(); return; }
++
++    el = cerca(e.target, "data-toggle");
++    if (el) {
++      var obj = document.getElementById(el.getAttribute("data-toggle"));
++      if (obj) obj.style.display = (obj.style.display === "none" || !obj.style.display)
++        ? "block" : "none";
++      return;
++    }
++
++    el = cerca(e.target, "data-print");
++    if (el) { window.print(); return; }
++
++    el = cerca(e.target, "data-toggle-pw");
++    if (el && typeof togglePw === "function") {
++      togglePw(el.getAttribute("data-toggle-pw"), el);
++      return;
++    }
++
++    if (e.target && e.target.hasAttribute && e.target.hasAttribute("data-select-all")) {
++      if (e.target.select) e.target.select();
++    }
++  });
++
++  document.addEventListener("change", function (e) {
++    var el = cerca(e.target, "data-submit-on-change");
++    if (el && el.form) el.form.submit();
++  });
++
++  // Confirmacion antes de enviar. Se hace en 'submit' y no en el click del boton
++  // para que tambien cubra el Enter dentro del formulario.
++  document.addEventListener("submit", function (e) {
++    var f = e.target;
++    if (!f || !f.hasAttribute || !f.hasAttribute("data-confirm")) return;
++    if (!window.confirm(f.getAttribute("data-confirm"))) {
++      e.preventDefault();
++    }
++  });
++})();
++
++/* ---------- Bloques que aparecen segun un radio (data-show-when) ----------
++ *
++ * Reemplaza los <script> que iban DENTRO del bucle de filas en Pendientes y
++ * Reparaciones: uno por fila, con el id interpolado por Jinja. Con 40 filas eso
++ * eran 40 scripts inline identicos salvo el numero.
++ *
++ * Ahora el bloque declara cuando quiere mostrarse:
++ *   <div data-show-when="return_action=scrap">
++ * y se resuelve contra el radio de ESE mismo formulario, asi que sirve igual
++ * para una fila que para cien.
++ */
++(function () {
++  "use strict";
++
++  function aplicar(form) {
++    if (!form) return;
++    form.querySelectorAll("[data-show-when]").forEach(function (bloque) {
++      var partes = (bloque.getAttribute("data-show-when") || "").split("=");
++      var campo = partes[0];
++      var valor = partes.slice(1).join("=");
++      if (!campo) return;
++      var marcado = form.querySelector('input[name="' + campo + '"]:checked');
++      bloque.style.display = (marcado && marcado.value === valor) ? "block" : "none";
++    });
++  }
++
++  document.addEventListener("change", function (e) {
++    if (!e.target || e.target.type !== "radio") return;
++    var form = e.target.form || (e.target.closest && e.target.closest("form"));
++    if (form && form.querySelector("[data-show-when]")) aplicar(form);
++  });
++
++  document.addEventListener("DOMContentLoaded", function () {
++    document.querySelectorAll("[data-show-when]").forEach(function (b) {
++      aplicar(b.form || (b.closest && b.closest("form")));
++    });
++  });
++})();
+diff --git a/templates/_pagination.html b/templates/_pagination.html
+index 289d862..fa83617 100644
+--- a/templates/_pagination.html
++++ b/templates/_pagination.html
+@@ -12,7 +12,7 @@
+ 
+ {% macro per_page_selector(page_obj, label="Filas por página") %}
+   <label class="pagination-perpage">{{ label }}
+-    <select name="limit" onchange="this.form.submit()">
++    <select name="limit" data-submit-on-change">
+       {% for n in PER_PAGE_CHOICES %}
+         <option value="{{ n }}" {% if page_obj.per_page == n %}selected{% endif %}>{{ n }}</option>
+       {% endfor %}
+diff --git a/templates/admin.html b/templates/admin.html
+index dadcb22..34324c5 100644
+--- a/templates/admin.html
++++ b/templates/admin.html
+@@ -15,7 +15,7 @@
+   <div style="display:flex; flex-wrap:wrap; gap:12px;">
+     <a href="{{ url_for('admin_adjust_stock') }}" class="btn btn-secondary">Ajustar stock (+ / -)</a>
+     <a href="{{ url_for('import_items') }}" class="btn btn-secondary">Importar ítems (CSV)</a>
+-    <form method="post" action="{{ url_for('admin_backup_db') }}" onsubmit="return confirm('Se generará un backup de la base actual. ¿Continuar?');" style="margin:0;">
++    <form method="post" action="{{ url_for('admin_backup_db') }}" data-confirm="Se generará un backup de la base actual. ¿Continuar?"" style="margin:0;">
+       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+       <button type="submit" class="btn btn-secondary">Backup base</button>
+     </form>
+@@ -27,7 +27,7 @@
+ <div class="danger-card">
+   <h3>Limpiar stock</h3>
+   <p class="muted">Conserva items, categorías, usuarios y ubicaciones. Elimina stock, movimientos, remitos y pendientes.</p>
+-  <form method="post" action="{{ url_for('admin_clear_stock') }}" onsubmit="return confirm('Esto eliminará stock, movimientos, remitos y pendientes. ¿Continuar?');">
++  <form method="post" action="{{ url_for('admin_clear_stock') }}" data-confirm="Esto eliminará stock, movimientos, remitos y pendientes. ¿Continuar?"">
+       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+     <div class="field" style="max-width:320px;">
+       <label>Para confirmar, escribí <span class="confirm-key">BORRAR-STOCK</span>:</label>
+@@ -40,7 +40,7 @@
+ <div class="danger-card">
+   <h3>Limpiar items</h3>
+   <p class="muted">Además del stock, borra el catálogo de items.</p>
+-  <form method="post" action="{{ url_for('admin_clear_items') }}" onsubmit="return confirm('Esto eliminará items, stock, movimientos, remitos y pendientes. ¿Continuar?');">
++  <form method="post" action="{{ url_for('admin_clear_items') }}" data-confirm="Esto eliminará items, stock, movimientos, remitos y pendientes. ¿Continuar?"">
+       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+     <div class="field" style="max-width:320px;">
+       <label>Para confirmar, escribí <span class="confirm-key">BORRAR-ITEMS</span>:</label>
+@@ -53,7 +53,7 @@
+ <div class="danger-card" style="border-color:#c77;">
+   <h3>Reiniciar base</h3>
+   <p class="muted">Destruye todo: items, stock, movimientos, usuarios, ubicaciones. Requiere <code>ENABLE_RESET_DB=true</code> en el entorno.</p>
+-  <form method="post" action="{{ url_for('admin_reset_db') }}" onsubmit="return confirm('¿Seguro que querés reiniciar la base? Se perderán datos.');">
++  <form method="post" action="{{ url_for('admin_reset_db') }}" data-confirm="¿Seguro que querés reiniciar la base? Se perderán datos."">
+       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+     <div class="field" style="max-width:320px;">
+       <label>Para confirmar, escribí <span class="confirm-key">RESET-DB</span>:</label>
+diff --git a/templates/base.html b/templates/base.html
+index dc2a7bc..b770a43 100644
+--- a/templates/base.html
++++ b/templates/base.html
+@@ -198,7 +198,7 @@
+ <!-- Modal global de detalle (remitos, solicitudes) -->
+ <div class="modal-overlay detail-overlay" id="detail-modal">
+   <div class="detail-box">
+-    <button type="button" class="detail-close" onclick="dismissDetail()" aria-label="Cerrar">&times;</button>
++    <button type="button" class="detail-close" data-detail-dismiss" aria-label="Cerrar">&times;</button>
+     <iframe id="detail-frame" class="detail-frame" title="Detalle"></iframe>
+   </div>
+ </div>
+@@ -211,58 +211,11 @@
+ <script src="{{ _ts_js.url }}"{% if _ts_js.integrity %} integrity="{{ _ts_js.integrity }}"{% endif %}{% if not _ts_js.is_local %} crossorigin="anonymous" referrerpolicy="no-referrer"{% endif %}></script>
+ <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+ <script src="{{ url_for('static', filename='js/serial_picker.js') }}"></script>
++<script src="{{ url_for('static', filename='js/ui.js') }}"></script>
+ {% if current_user.is_authenticated and not embed %}
+-<script>
+-  function openDetail(url) {
+-    var f = document.getElementById('detail-frame');
+-    var ov = document.getElementById('detail-modal');
+-    if (!f || !ov) return;
+-    f.src = url + (url.indexOf('?') > -1 ? '&' : '?') + 'embed=1';
+-    ov.classList.add('open');
+-    document.body.classList.add('modal-open');
+-    history.pushState({ detail: true }, '', '#detalle');
+-  }
+-  function closeDetail() {
+-    var f = document.getElementById('detail-frame');
+-    var ov = document.getElementById('detail-modal');
+-    if (!ov) return;
+-    ov.classList.remove('open');
+-    document.body.classList.remove('modal-open');
+-    if (f) f.src = 'about:blank';
+-  }
+-  // Cierre manual (X, clic afuera, Escape): pasa por el historial para que
+-  // el botón "atrás" quede consistente.
+-  function dismissDetail() {
+-    if (location.hash === '#detalle') history.back(); else closeDetail();
+-  }
+-  // Cerrar con el botón "atrás" del navegador.
+-  window.addEventListener('popstate', function () {
+-    var ov = document.getElementById('detail-modal');
+-    if (ov && ov.classList.contains('open')) closeDetail();
+-  });
+-  // Cerrar con Escape.
+-  document.addEventListener('keydown', function (e) {
+-    var ov = document.getElementById('detail-modal');
+-    if (e.key === 'Escape' && ov && ov.classList.contains('open')) dismissDetail();
+-  });
+-  // Cierre por clic en el fondo. Se exige que el gesto EMPIECE y TERMINE sobre
+-  // el fondo: si se arrastra desde adentro (por ejemplo seleccionando texto) y
+-  // se suelta afuera, el modal NO se cierra.
+-  (function () {
+-    var startedOnBackdrop = false;
+-    var ov = document.getElementById('detail-modal');
+-    if (!ov) return;
+-    ov.addEventListener('mousedown', function (e) {
+-      startedOnBackdrop = (e.button === 0 && e.target === ov);
+-    });
+-    ov.addEventListener('mouseup', function (e) {
+-      var started = startedOnBackdrop;
+-      startedOnBackdrop = false;
+-      if (e.button === 0 && started && e.target === ov) dismissDetail();
+-    });
+-  })();
+-</script>
++<script src="{{ url_for('static', filename='js/detail_modal.js') }}"></script>
+ {% endif %}
++
+ {% block extra_scripts %}{% endblock %}
+ </body>
+ </html>
+diff --git a/templates/categories.html b/templates/categories.html
+index f6a199e..50c6f90 100644
+--- a/templates/categories.html
++++ b/templates/categories.html
+@@ -5,7 +5,7 @@
+ <div class="page-header">
+   <div><h2>Categorías</h2><p>Agrupación de ítems del catálogo.</p></div>
+   {% if me and me.role == "ADMIN" %}
+-    <button type="button" class="btn btn-primary" onclick="openModal('modal-cat-new')">+ Nueva categoría</button>
++    <button type="button" class="btn btn-primary" data-modal-open="modal-cat-new"">+ Nueva categoría</button>
+   {% endif %}
+ </div>
+ 
+@@ -29,7 +29,7 @@
+           <td>{{ c.description or "—" }}</td>
+           <td>{{ c.prefix or "—" }}</td>
+           {% if me and me.role == "ADMIN" %}
+-          <td class="actions-cell"><button type="button" class="btn btn-secondary btn-sm" onclick="openModal('modal-cat-{{ c.id }}')">Editar</button></td>
++          <td class="actions-cell"><button type="button" class="btn btn-secondary btn-sm" data-modal-open="modal-cat-{{ c.id }}"">Editar</button></td>
+           {% endif %}
+         </tr>
+         {% else %}
+@@ -44,7 +44,7 @@
+ <!-- Modal: nueva categoría -->
+ <div class="modal-overlay" id="modal-cat-new">
+   <div class="modal">
+-    <div class="modal-header"><span class="modal-title">Nueva categoría</span><button type="button" class="modal-close" onclick="closeModal('modal-cat-new')">&times;</button></div>
++    <div class="modal-header"><span class="modal-title">Nueva categoría</span><button type="button" class="modal-close" data-modal-close="modal-cat-new"">&times;</button></div>
+     <form method="post" action="{{ url_for('categories') }}">
+       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+       <div class="modal-body">
+@@ -56,7 +56,7 @@
+         <div class="field"><label>Descripción (opcional)</label><input name="description"></div>
+       </div>
+       <div class="modal-footer">
+-        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-cat-new')">Cancelar</button>
++        <button type="button" class="btn btn-secondary" data-modal-close="modal-cat-new"">Cancelar</button>
+         <button type="submit" class="btn btn-primary">Guardar</button>
+       </div>
+     </form>
+@@ -69,7 +69,7 @@
+ {% for c in categories %}
+ <div class="modal-overlay" id="modal-cat-{{ c.id }}">
+   <div class="modal">
+-    <div class="modal-header"><span class="modal-title">Editar categoría</span><button type="button" class="modal-close" onclick="closeModal('modal-cat-{{ c.id }}')">&times;</button></div>
++    <div class="modal-header"><span class="modal-title">Editar categoría</span><button type="button" class="modal-close" data-modal-close="modal-cat-{{ c.id }}"">&times;</button></div>
+     <form method="post" action="{{ url_for('category_edit', cat_id=c.id) }}">
+       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+       <div class="modal-body">
+@@ -86,7 +86,7 @@
+         <div class="field"><label>Descripción (opcional)</label><input name="description" value="{{ c.description or '' }}"></div>
+       </div>
+       <div class="modal-footer">
+-        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-cat-{{ c.id }}')">Cancelar</button>
++        <button type="button" class="btn btn-secondary" data-modal-close="modal-cat-{{ c.id }}"">Cancelar</button>
+         <button type="submit" class="btn btn-primary">Guardar cambios</button>
+       </div>
+     </form>
+diff --git a/templates/conteo.html b/templates/conteo.html
+index 8cc37ea..b6b8ac0 100644
+--- a/templates/conteo.html
++++ b/templates/conteo.html
+@@ -84,7 +84,7 @@
+       </tbody>
+     </table>
+   </div>
+-  <form method="post" action="{{ url_for('conteo') }}" style="margin-top:12px;" onsubmit="return confirm('Se registrarán los ajustes de conteo. ¿Confirmar?');">
++  <form method="post" action="{{ url_for('conteo') }}" style="margin-top:12px;" data-confirm="Se registrarán los ajustes de conteo. ¿Confirmar?"">
+     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+     <input type="hidden" name="location_id" value="{{ location.id }}">
+     <input type="hidden" name="motivo" value="{{ motivo }}">
+diff --git a/templates/ingresos_egresos.html b/templates/ingresos_egresos.html
+index e73b896..b32b360 100644
+--- a/templates/ingresos_egresos.html
++++ b/templates/ingresos_egresos.html
+@@ -86,214 +86,15 @@
+ <!-- Popup S/N (solo egreso serializado: elegir cuáles salen de la Jaula) -->
+ <div class="modal-overlay" id="modal-sn">
+   <div class="modal">
+-    <div class="modal-header"><span class="modal-title">Elegí los seriales a egresar (Jaula)</span><button type="button" class="modal-close" onclick="closeModal('modal-sn')">&times;</button></div>
++    <div class="modal-header"><span class="modal-title">Elegí los seriales a egresar (Jaula)</span><button type="button" class="modal-close" data-modal-close="modal-sn"">&times;</button></div>
+     <div class="modal-body" id="sn-body" style="max-height:60vh; overflow:auto;"></div>
+     <div class="modal-footer">
+-      <button type="button" class="btn btn-secondary" onclick="closeModal('modal-sn')">Cancelar</button>
++      <button type="button" class="btn btn-secondary" data-modal-close="modal-sn"">Cancelar</button>
+       <button type="button" class="btn btn-primary" id="sn-confirm">Confirmar</button>
+     </div>
+   </div>
+ </div>
+ 
+-<script>
+-  var IO_SERIALIZED = new Set({{ serialized_item_ids|tojson }});
+-  var IO_JAULA_UNITS = {{ jaula_units|tojson }};  // { item_id: [[unit_id, serial], ...] }
+-  var IO_JAULA_STOCK = {{ jaula_stock|tojson }};  // { item_id: cantidad en Jaula }
+-  var IO_ALL_ITEMS = [
+-    {% for i in items %}{ value: "{{ i.id }}", text: "{{ (i.code ~ ' - ' ~ i.name)|e }}" },
+-    {% endfor %}
+-  ];
+-  var snCurrentLine = null;
+-
+-  function isSerial(itemId){ return IO_SERIALIZED.has(parseInt(itemId, 10)); }
+-  function currentTipo(){ return document.getElementById('io-tipo').value; }
+-
+-  // En EGRESO solo se pueden mover ítems que la Jaula tiene en stock.
+-  function allowedItems(){
+-    if(currentTipo() === 'EGRESO'){
+-      return IO_ALL_ITEMS.filter(function(o){ return (IO_JAULA_STOCK[o.value] || 0) > 0; });
+-    }
+-    return IO_ALL_ITEMS;
+-  }
+-
+-  function applyItemsToLine(line){
+-    var sel = line.querySelector('.io-item');
+-    var ts = sel.tomselect;
+-    if(!ts) return;
+-    var allowed = allowedItems();
+-    var cur = ts.getValue();
+-    ts.clearOptions();
+-    allowed.forEach(function(o){ ts.addOption(o); });
+-    ts.refreshOptions(false);
+-    if(cur && !allowed.some(function(o){ return o.value === cur; })){
+-      ts.clear(true);   // el ítem elegido ya no aplica al tipo actual
+-    } else if(cur){
+-      ts.setValue(cur, true);
+-    }
+-  }
+-
+-  // Tope de cantidad: en EGRESO, la cantidad no puede superar el stock de la Jaula.
+-  function maxForLine(line){
+-    if(currentTipo() !== 'EGRESO') return null;   // ingreso: sin tope
+-    var id = line.querySelector('.io-item').value;
+-    if(!id) return null;
+-    var m = IO_JAULA_STOCK[id] || 0;
+-    return m > 0 ? m : null;
+-  }
+-
+-  function clampQty(line){
+-    var qty = line.querySelector('.io-qty');
+-    var mx = maxForLine(line);
+-    if(mx == null){ qty.removeAttribute('max'); return; }
+-    qty.setAttribute('max', mx);
+-    var v = parseInt(qty.value, 10);
+-    if(!isNaN(v) && v > mx){ qty.value = mx; }   // si tipeó de más, al máximo posible
+-  }
+-
+-  function serialsOf(line){
+-    return line.querySelector('.io-serials').value.split('\n').map(function(s){return s.trim();}).filter(Boolean);
+-  }
+-
+-  function refreshLine(line){
+-    var itemSel = line.querySelector('.io-item');
+-    var snWrap = line.querySelector('.io-sn-btn-wrap');
+-    // El botón "Elegir S/N" aparece solo en EGRESO de un serializado (opcional).
+-    // La cantidad queda SIEMPRE editable: podés egresar por cantidad, o elegir
+-    // seriales puntuales (en cuyo caso la cantidad se ajusta a lo elegido).
+-    var needSn = isSerial(itemSel.value) && currentTipo() === 'EGRESO';
+-    // OJO: usar 'block' y no '' — con '' vuelve a la regla CSS display:none.
+-    snWrap.style.display = needSn ? 'block' : 'none';
+-    if(!needSn){ line.querySelector('.io-serials').value = ''; }
+-    line.querySelector('.io-qty').readOnly = false;
+-    clampQty(line);
+-    updateSnBtn(line);
+-  }
+-
+-  function updateSnBtn(line){
+-    var btn = line.querySelector('.io-sn-btn');
+-    if(!btn) return;
+-    var n = serialsOf(line).length;
+-    btn.textContent = n > 0 ? ('S/N: ' + n + ' elegido' + (n>1?'s':'')) : 'Elegir S/N';
+-  }
+-
+-  function snUpdateCounter(){
+-    if(!snCurrentLine) return;
+-    var body = document.getElementById('sn-body');
+-    var declared = parseInt(snCurrentLine.querySelector('.io-qty').value, 10) || 0;
+-    var n = body.querySelectorAll('.sn-check:checked').length;
+-    var avail = body.querySelectorAll('.sn-check').length;
+-    var counter = document.getElementById('sn-counter');
+-    if(counter){ counter.textContent = 'Seleccionados ' + n + ' de ' + declared + ' · disponibles en Jaula: ' + avail; }
+-    document.getElementById('sn-confirm').disabled = (declared < 1 || n !== declared);
+-  }
+-
+-  function openSn(line){
+-    snCurrentLine = line;
+-    var itemId = line.querySelector('.io-item').value;
+-    var body = document.getElementById('sn-body');
+-    body.innerHTML = '';
+-    if(!itemId){ alert('Elegí primero el ítem.'); return; }
+-    var declared = parseInt(line.querySelector('.io-qty').value, 10) || 0;
+-    if(declared < 1){ alert('Poné primero la cantidad a egresar.'); return; }
+-
+-    var counter = document.createElement('p');
+-    counter.className = 'muted'; counter.id = 'sn-counter';
+-    counter.style.marginTop = '0';
+-    body.appendChild(counter);
+-
+-    var current = serialsOf(line);
+-    var units = IO_JAULA_UNITS[itemId] || [];
+-    if(units.length === 0){
+-      var p = document.createElement('p'); p.className = 'muted';
+-      p.textContent = 'No hay seriales de este ítem en la Jaula. Etiquetalos primero desde la ficha del ítem.';
+-      body.appendChild(p);
+-    } else {
+-      units.forEach(function(u){
+-        var lab = document.createElement('label'); lab.className='sn-row';
+-        var cb = document.createElement('input'); cb.type='checkbox'; cb.className='sn-check'; cb.value = u[1];
+-        if(current.indexOf(u[1]) !== -1) cb.checked = true;
+-        cb.addEventListener('change', snUpdateCounter);
+-        var span = document.createElement('span'); span.textContent = u[1];
+-        lab.appendChild(cb); lab.appendChild(span); body.appendChild(lab);
+-      });
+-    }
+-    snUpdateCounter();
+-    openModal('modal-sn');
+-  }
+-
+-  function confirmSn(){
+-    if(!snCurrentLine) return;
+-    var body = document.getElementById('sn-body');
+-    var declared = parseInt(snCurrentLine.querySelector('.io-qty').value, 10) || 0;
+-    var vals = [];
+-    body.querySelectorAll('.sn-check:checked').forEach(function(cb){ vals.push(cb.value); });
+-    if(declared < 1 || vals.length !== declared){
+-      alert('Elegí exactamente ' + declared + ' serial(es), acorde a la cantidad declarada.');
+-      return;
+-    }
+-    snCurrentLine.querySelector('.io-serials').value = vals.join('\n');
+-    updateSnBtn(snCurrentLine);
+-    closeModal('modal-sn');
+-  }
+-
+-  function wireLine(line){
+-    var sel = line.querySelector('.io-item');
+-    if(window.TomSelect && !sel.tomselect){
+-      new TomSelect(sel, { create:false, sortField:{field:'text',direction:'asc'}, maxOptions:null,
+-                           placeholder:'Buscá un ítem...', onChange:function(){ refreshLine(line); } });
+-    }
+-    sel.addEventListener('change', function(){ refreshLine(line); });
+-    // Si cambia la cantidad: se limpian los seriales elegidos y se aplica el tope.
+-    line.querySelector('.io-qty').addEventListener('input', function(){
+-      line.querySelector('.io-serials').value = '';
+-      clampQty(line);
+-      updateSnBtn(line);
+-    });
+-    line.querySelector('.io-sn-btn').addEventListener('click', function(){ openSn(line); });
+-    line.querySelector('.io-remove').addEventListener('click', function(){ line.remove(); });
+-    applyItemsToLine(line);   // filtra ítems según el tipo actual
+-    refreshLine(line);
+-  }
+-
+-  function addLine(){
+-    var tpl = document.getElementById('io-line-template');
+-    var cont = document.getElementById('io-lines');
+-    cont.appendChild(tpl.content.cloneNode(true));
+-    wireLine(cont.lastElementChild);
+-  }
+-
+-  // Al enviar: si hay una fila de egreso serializado sin seriales (o que no
+-  // coinciden con la cantidad), se frena y se avisa.
+-  function validateBeforeSubmit(ev){
+-    var tipo = currentTipo();
+-    var msg = null;
+-    document.querySelectorAll('.io-line').forEach(function(line){
+-      var itemSel = line.querySelector('.io-item');
+-      if(!itemSel.value || msg) return;
+-      if(isSerial(itemSel.value) && tipo === 'EGRESO'){
+-        var n = serialsOf(line).length;
+-        var q = parseInt(line.querySelector('.io-qty').value, 10) || 0;
+-        if(n === 0){ msg = 'Hay un ítem serializado sin seriales elegidos. Usá «Elegir S/N».'; }
+-        else if(n !== q){ msg = 'Los seriales elegidos no coinciden con la cantidad. Revisá «Elegir S/N».'; }
+-      }
+-    });
+-    if(msg){ ev.preventDefault(); alert(msg); }
+-  }
+-
+-  document.addEventListener('DOMContentLoaded', function(){
+-    document.getElementById('io-add-line').addEventListener('click', addLine);
+-    document.getElementById('sn-confirm').addEventListener('click', confirmSn);
+-    document.getElementById('io-form').addEventListener('submit', validateBeforeSubmit);
+-    // Al cambiar ingreso/egreso: se re-filtran los ítems (egreso = solo Jaula) y
+-    // se re-evalúan las filas (S/N + tope de cantidad).
+-    document.getElementById('io-tipo').addEventListener('change', function(){
+-      document.querySelectorAll('.io-line').forEach(function(l){
+-        applyItemsToLine(l); refreshLine(l);
+-      });
+-    });
+-    addLine(); addLine(); addLine();
+-  });
+-</script>
+ {% endif %}
+ 
+ <div class="table-card">
+@@ -332,4 +133,16 @@
+   </div>
+   {{ pagination(page_obj) }}
+ </div>
++
++<script type="application/json" id="inout-datos">
++{
++  "serializedItems": {{ serialized_item_ids|tojson }},
++  "jaulaUnits": {{ jaula_units|tojson }},
++  "jaulaStock": {{ jaula_stock|tojson }},
++  "items": {{ opciones_items(items)|tojson }}
++}
++</script>
++{% endblock %}
++{% block extra_scripts %}
++  <script src="{{ url_for('static', filename='js/ingresos_egresos.js') }}"></script>
+ {% endblock %}
+diff --git a/templates/item_new.html b/templates/item_new.html
+index 2f73b67..695d981 100644
+--- a/templates/item_new.html
++++ b/templates/item_new.html
+@@ -6,7 +6,7 @@
+       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+     <div>
+       <label>Categoría</label><br />
+-      <select name="category_id" id="category_id" required onchange="updateCodePreview()">
++      <select name="category_id" id="category_id" required>
+         <option value="" selected disabled>Elegí...</option>
+         {% for c in categories %}
+           <option value="{{ c.id }}" data-next="{{ next_codes.get(c.id, '') }}">{{ c.name }}</option>
+@@ -51,13 +51,7 @@
+     <button type="submit">Guardar</button>
+   </form>
+ 
+-  <script>
+-    function updateCodePreview() {
+-      var sel = document.getElementById('category_id');
+-      var out = document.getElementById('code_preview');
+-      var opt = sel.options[sel.selectedIndex];
+-      var next = opt ? (opt.getAttribute('data-next') || '') : '';
+-      out.value = next || '(esta categoría no tiene prefijo asignado)';
+-    }
+-  </script>
++{% endblock %}
++{% block extra_scripts %}
++  <script src="{{ url_for('static', filename='js/items.js') }}"></script>
+ {% endblock %}
+diff --git a/templates/item_units.html b/templates/item_units.html
+index 108729c..ecd8936 100644
+--- a/templates/item_units.html
++++ b/templates/item_units.html
+@@ -84,9 +84,9 @@
+     {% if u.notes %}<div class="notes">{{ u.notes }}</div>{% endif %}
+     {% if can_edit_items %}
+     <div class="card-actions">
+-      <button type="button" class="btn btn-secondary btn-sm" onclick="toggleEdit('edit-{{ u.id }}')">Editar</button>
++      <button type="button" class="btn btn-secondary btn-sm" data-toggle="edit-{{ u.id }}"">Editar</button>
+       <form method="post" action="{{ url_for('item_unit_delete', unit_id=u.id) }}"
+-            onsubmit="return confirm('¿Quitar el serial {{ u.serial }}? No afecta el stock, solo la etiqueta.');" style="display:inline;">
++            data-confirm="¿Quitar el serial {{ u.serial }}? No afecta el stock, solo la etiqueta."" style="display:inline;">
+         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+         {% if embed %}<input type="hidden" name="embed" value="1">{% endif %}
+         <button type="submit" class="btn btn-danger btn-sm">Quitar</button>
+@@ -126,10 +126,4 @@
+ </div>
+ {% endif %}
+ 
+-<script>
+-  function toggleEdit(id){
+-    var el = document.getElementById(id);
+-    if (el) el.style.display = (el.style.display === "none" || !el.style.display) ? "block" : "none";
+-  }
+-</script>
+ {% endblock %}
+diff --git a/templates/item_usage.html b/templates/item_usage.html
+index 5e60197..7a1236c 100644
+--- a/templates/item_usage.html
++++ b/templates/item_usage.html
+@@ -170,107 +170,16 @@
+   {{ pagination(page_obj, "movimiento", "movimientos") }}
+ </div>
+ 
+-<script>
+-document.addEventListener("DOMContentLoaded", function () {
+-  // Filtros: en desktop siempre visibles; en mobile colapsados por defecto.
+-  var usageFilters = document.getElementById("usageFilters");
+-  if (usageFilters) {
+-    var syncUsageFilters = function () {
+-      if (window.matchMedia("(min-width:768px)").matches) { usageFilters.open = true; }
+-    };
+-    syncUsageFilters();
+-    window.addEventListener("resize", syncUsageFilters);
+-  }
+-  var stockMap = {{ stock_map|tojson }};
+-  var stockQtyMap = {{ stock_qty_map|tojson }};
+-  // Fase 2: si el servidor decidio no embeber el mapa (inventario grande),
+-  // ensureStock() lo pide por ubicacion antes de usarlo. Con el mapa embebido
+-  // es un passthrough sincronico y el flujo es identico al historico.
+-  var ensureStock = makeStockLoader(stockMap, stockQtyMap, {{ stock_remote|tojson }});
+-  var serializedItems = ({{ serialized_item_ids|tojson }} || []).map(String);
+-  var fromSel = document.getElementById("from_location_id");
+-
+-  // Lista de ítems seleccionables (excluye serializados: van por Movimientos).
+-  var allUsageItems = [
+-    {% for it in items %}{% if not it.serialized %}{ value: "{{ it.id }}", text: "{{ (it.code ~ ' - ' ~ it.name)|e }}" },
+-    {% endif %}{% endfor %}
+-  ];
+-
+-  function allowedForCurrentFrom() {
+-    var locId = fromSel ? String(fromSel.value || "") : "";
+-    var allowed = stockMap[locId] || [];
+-    var set = {};
+-    allowed.forEach(function (id) { set[String(id)] = true; });
+-    return { locId: locId, set: set };
+-  }
+-
+-  function clampUsageQty(line) {
+-    if (!line) return;
+-    var loc = fromSel ? String(fromSel.value || "") : "";
+-    var itemSel = line.querySelector(".usage-item");
+-    var item = itemSel ? String(itemSel.value || "") : "";
+-    var qty = line.querySelector('input[name="qty[]"]');
+-    if (!qty) return;
+-    if (!loc || !item) { qty.removeAttribute("max"); return; }
+-    var mx = (stockQtyMap[loc] || {})[item];
+-    if (mx == null) { qty.removeAttribute("max"); return; }
+-    qty.setAttribute("max", mx);
+-    var v = parseInt(qty.value, 10);
+-    if (!isNaN(v) && v > mx) { qty.value = mx; }
+-  }
+-
+-  function applyStockFilterToLine(el) {
+-    if (!el || !el.tomselect) return;
+-    var ts = el.tomselect;
+-    var info = allowedForCurrentFrom();
+-    ts.clear(true);
+-    ts.clearOptions();
+-    allUsageItems.forEach(function (o) { if (info.set[o.value]) ts.addOption(o); });
+-    ts.refreshOptions(false);
+-    if (!info.locId) { ts.disable(); } else { ts.enable(); }
+-  }
+-
+-  function applyStockFilterAllLines() {
+-    document.querySelectorAll(".usage-item").forEach(applyStockFilterToLine);
+-  }
+-
+-  function initTomSelectFor(el) {
+-    if (!el || el.tomselect) return;
+-    new TomSelect(el, {
+-      create: false,
+-      sortField: { field: "text", direction: "asc" },
+-      placeholder: "Elegí la ubicación de origen primero...",
+-      closeAfterSelect: true,
+-      onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
+-      onChange: function () { this.blur(); clampUsageQty(el.closest(".usage-line")); }
+-    });
+-    applyStockFilterToLine(el);
+-  }
+-
+-  function wireUsageLine(line) {
+-    var itemSelect = line.querySelector(".usage-item");
+-    var removeBtn = line.querySelector(".remove-line-btn");
+-    initTomSelectFor(itemSelect);
+-    var qtyEl = line.querySelector('input[name="qty[]"]');
+-    if (qtyEl) { qtyEl.addEventListener("input", function () { clampUsageQty(line); }); }
+-    if (removeBtn) { removeBtn.addEventListener("click", function () { line.remove(); }); }
+-  }
+-
+-  function addUsageLine() {
+-    var tpl = document.getElementById("usage-line-template");
+-    var container = document.getElementById("usage-lines");
+-    container.appendChild(tpl.content.cloneNode(true));
+-    wireUsageLine(container.lastElementChild);
+-  }
+-
+-  document.getElementById("add-line-btn").addEventListener("click", addUsageLine);
+-  addUsageLine();
+-
+-  if (fromSel && fromSel.tagName === "SELECT") {
+-    fromSel.addEventListener("change", function () {
+-      ensureStock(fromSel.value, applyStockFilterAllLines);
+-    });
+-  }
+-});
++<script type="application/json" id="item-usage-datos">
++{
++  "stockMap": {{ stock_map|tojson }},
++  "stockQtyMap": {{ stock_qty_map|tojson }},
++  "stockRemote": {{ stock_remote|tojson }},
++  "serializedItems": {{ serialized_item_ids|tojson }},
++  "items": {{ opciones_items(items, true)|tojson }}
++}
+ </script>
+ {% endblock %}
++{% block extra_scripts %}
++  <script src="{{ url_for('static', filename='js/item_usage.js') }}"></script>
++{% endblock %}
+diff --git a/templates/items.html b/templates/items.html
+index ea709ac..d9878a5 100644
+--- a/templates/items.html
++++ b/templates/items.html
+@@ -13,7 +13,7 @@
+       Exportar a Excel
+     </a>
+     {% if can_edit_items %}
+-      <button type="button" class="btn btn-primary" onclick="openModal('modal-item-new')">+ Nuevo ítem</button>
++      <button type="button" class="btn btn-primary" data-modal-open="modal-item-new"">+ Nuevo ítem</button>
+     {% endif %}
+   </div>
+ </div>
+@@ -92,7 +92,7 @@
+           <td>
+             {{ it.name }}
+             {% if it.serialized %}
+-              <button type="button" class="badge badge-ok" style="cursor:pointer;border:none;margin-left:6px;" onclick="openDetail('{{ url_for('item_units', item_id=it.id) }}')">Seriales</button>
++              <button type="button" class="badge badge-ok" style="cursor:pointer;border:none;margin-left:6px;" data-detail-url="{{ url_for('item_units', item_id=it.id) }}">Seriales</button>
+             {% endif %}
+           </td>
+           <td>{{ it.category.name }}</td>
+@@ -103,7 +103,7 @@
+           <td>{{ item_supplier_names(it) or "—" }}</td>
+           <td>{% if it.reference_link %}<a href="{{ it.reference_link }}" target="_blank" rel="noopener noreferrer">Abrir</a>{% else %}—{% endif %}</td>
+           {% if can_edit_items %}
+-          <td class="actions-cell"><button type="button" class="btn btn-secondary btn-sm" onclick="openModal('modal-item-{{ it.id }}')">Editar</button></td>
++          <td class="actions-cell"><button type="button" class="btn btn-secondary btn-sm" data-modal-open="modal-item-{{ it.id }}"">Editar</button></td>
+           {% endif %}
+         </tr>
+         {% else %}
+@@ -119,13 +119,13 @@
+ <!-- Modal: nuevo item -->
+ <div class="modal-overlay" id="modal-item-new">
+   <div class="modal">
+-    <div class="modal-header"><span class="modal-title">Nuevo ítem</span><button type="button" class="modal-close" onclick="closeModal('modal-item-new')">&times;</button></div>
+-    <form method="post" action="{{ url_for('item_new') }}" id="form-item-new">
++    <div class="modal-header"><span class="modal-title">Nuevo ítem</span><button type="button" class="modal-close" data-modal-close="modal-item-new"">&times;</button></div>
++    <form method="post" action="{{ url_for('item_new') }}" id="form-item-new" data-redirect="{{ url_for('items') }}">
+       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+       <div class="modal-body">
+         <div class="flash-error" id="item-new-error" style="display:none;margin-bottom:10px;"></div>
+         <div class="field"><label>Categoría</label>
+-          <select name="category_id" id="item_new_category" required onchange="updateItemCodePreview()">
++          <select name="category_id" id="item_new_category" required>
+             <option value="" selected disabled>Elegí...</option>
+             {% for c in categories %}<option value="{{ c.id }}" data-next="{{ next_codes.get(c.id, '') }}">{{ c.name }}</option>{% endfor %}
+           </select>
+@@ -158,7 +158,7 @@
+         <div class="field"><label>Stock de seguridad (solo NO rastreables)</label><input type="number" name="stock_min" min="0" value="0"><div class="muted">Si el ítem es rastreable, este valor se ignora.</div></div>
+       </div>
+       <div class="modal-footer">
+-        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-item-new')">Cancelar</button>
++        <button type="button" class="btn btn-secondary" data-modal-close="modal-item-new"">Cancelar</button>
+         <button type="submit" class="btn btn-primary">Guardar</button>
+       </div>
+     </form>
+@@ -169,7 +169,7 @@
+ {% for it in items %}
+ <div class="modal-overlay" id="modal-item-{{ it.id }}">
+   <div class="modal">
+-    <div class="modal-header"><span class="modal-title">Editar ítem</span><button type="button" class="modal-close" onclick="closeModal('modal-item-{{ it.id }}')">&times;</button></div>
++    <div class="modal-header"><span class="modal-title">Editar ítem</span><button type="button" class="modal-close" data-modal-close="modal-item-{{ it.id }}"">&times;</button></div>
+     <form method="post" action="{{ url_for('item_edit', item_id=it.id) }}">
+       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+       <div class="modal-body">
+@@ -223,13 +223,13 @@
+         <div class="field"><label class="check-inline"><input type="checkbox" name="is_active" {% if it.is_active %}checked{% endif %}> Activo</label><div class="muted">Si lo desactivás, no aparece en formularios pero queda en históricos.</div></div>
+       </div>
+       <div class="modal-footer">
+-        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-item-{{ it.id }}')">Cancelar</button>
++        <button type="button" class="btn btn-secondary" data-modal-close="modal-item-{{ it.id }}"">Cancelar</button>
+         <button type="submit" class="btn btn-primary">Guardar cambios</button>
+       </div>
+     </form>
+     {% if can_edit_items %}
+     <form method="post" action="{{ url_for('item_delete', item_id=it.id) }}"
+-          onsubmit="return confirm('¿Eliminar definitivamente el ítem {{ it.code }} - {{ it.name }}? No se puede deshacer. Solo funciona si el ítem no tiene historial (movimientos/pendientes/stock).');"
++          data-confirm="¿Eliminar definitivamente el ítem {{ it.code }} - {{ it.name }}? No se puede deshacer. Solo funciona si el ítem no tiene historial (movimientos/pendientes/stock).""
+           style="border-top:1px solid var(--border); padding:12px 16px;">
+       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+       <button type="submit" class="btn btn-danger btn-sm">Eliminar ítem</button>
+@@ -241,48 +241,7 @@
+ {% endfor %}
+ {% endif %}
+ 
+-<script>
+-  function updateItemCodePreview() {
+-    var sel = document.getElementById('item_new_category');
+-    var out = document.getElementById('item_new_code_preview');
+-    if (!sel || !out) return;
+-    var opt = sel.options[sel.selectedIndex];
+-    var next = opt ? (opt.getAttribute('data-next') || '') : '';
+-    out.value = next || '(esta categoría no tiene prefijo asignado)';
+-  }
+-
+-  // Alta de ítem por AJAX: si falla, el error se muestra dentro del modal
+-  // sin recargar la página, así no se pierde lo cargado.
+-  (function () {
+-    var form = document.getElementById('form-item-new');
+-    var errBox = document.getElementById('item-new-error');
+-    if (!form) return;
+-    form.addEventListener('submit', function (e) {
+-      e.preventDefault();
+-      if (errBox) { errBox.style.display = 'none'; errBox.textContent = ''; }
+-      var btn = form.querySelector('button[type="submit"]');
+-      if (btn) btn.disabled = true;
+-      fetch(form.action, {
+-        method: 'POST',
+-        body: new FormData(form),
+-        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+-        credentials: 'same-origin'
+-      }).then(function (r) {
+-        return r.json().then(function (data) { return { ok: r.ok, data: data }; });
+-      }).then(function (res) {
+-        if (res.ok && res.data && res.data.ok) {
+-          window.location = res.data.redirect || "{{ url_for('items') }}";
+-          return;
+-        }
+-        if (btn) btn.disabled = false;
+-        var msg = (res.data && res.data.error) || 'No se pudo crear el ítem.';
+-        if (errBox) { errBox.textContent = msg; errBox.style.display = ''; }
+-      }).catch(function () {
+-        // Si algo falla con el fetch, caemos al envío tradicional del form.
+-        if (btn) btn.disabled = false;
+-        form.submit();
+-      });
+-    });
+-  })();
+-</script>
++{% endblock %}
++{% block extra_scripts %}
++  <script src="{{ url_for('static', filename='js/items.js') }}"></script>
+ {% endblock %}
+diff --git a/templates/locations.html b/templates/locations.html
+index aa67f0f..ad897ff 100644
+--- a/templates/locations.html
++++ b/templates/locations.html
+@@ -5,7 +5,7 @@
+ <div class="page-header">
+   <div><h2>Ubicaciones</h2><p>Depósitos, camionetas, equipos y externas.</p></div>
+   {% if me and me.role == "ADMIN" %}
+-    <button type="button" class="btn btn-primary" onclick="openModal('modal-loc-new')">+ Nueva ubicación</button>
++    <button type="button" class="btn btn-primary" data-modal-open="modal-loc-new"">+ Nueva ubicación</button>
+   {% endif %}
+ </div>
+ 
+@@ -39,7 +39,7 @@
+             {% else %}-{% endif %}
+           </td>
+           {% if me and me.role == "ADMIN" %}
+-          <td class="actions-cell"><button type="button" class="btn btn-secondary btn-sm" onclick="openModal('modal-loc-{{ loc.id }}')">Editar</button></td>
++          <td class="actions-cell"><button type="button" class="btn btn-secondary btn-sm" data-modal-open="modal-loc-{{ loc.id }}"">Editar</button></td>
+           {% endif %}
+         </tr>
+         {% else %}
+@@ -54,7 +54,7 @@
+ <!-- Modal: nueva ubicacion -->
+ <div class="modal-overlay" id="modal-loc-new">
+   <div class="modal">
+-    <div class="modal-header"><span class="modal-title">Nueva ubicación</span><button type="button" class="modal-close" onclick="closeModal('modal-loc-new')">&times;</button></div>
++    <div class="modal-header"><span class="modal-title">Nueva ubicación</span><button type="button" class="modal-close" data-modal-close="modal-loc-new"">&times;</button></div>
+     <form method="post">
+       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+       <div class="modal-body">
+@@ -70,7 +70,7 @@
+         </div>
+       </div>
+       <div class="modal-footer">
+-        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-loc-new')">Cancelar</button>
++        <button type="button" class="btn btn-secondary" data-modal-close="modal-loc-new"">Cancelar</button>
+         <button type="submit" class="btn btn-primary">Guardar</button>
+       </div>
+     </form>
+@@ -82,7 +82,7 @@
+ {% set resp_ids = loc.responsibles|map(attribute='user.id')|list %}
+ <div class="modal-overlay" id="modal-loc-{{ loc.id }}">
+   <div class="modal">
+-    <div class="modal-header"><span class="modal-title">Editar ubicación</span><button type="button" class="modal-close" onclick="closeModal('modal-loc-{{ loc.id }}')">&times;</button></div>
++    <div class="modal-header"><span class="modal-title">Editar ubicación</span><button type="button" class="modal-close" data-modal-close="modal-loc-{{ loc.id }}"">&times;</button></div>
+     <form method="post" action="{{ url_for('location_edit', loc_id=loc.id) }}">
+       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+       <div class="modal-body">
+@@ -97,7 +97,7 @@
+         </div>
+       </div>
+       <div class="modal-footer">
+-        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-loc-{{ loc.id }}')">Cancelar</button>
++        <button type="button" class="btn btn-secondary" data-modal-close="modal-loc-{{ loc.id }}"">Cancelar</button>
+         <button type="submit" class="btn btn-primary">Guardar cambios</button>
+       </div>
+     </form>
+diff --git a/templates/metricas.html b/templates/metricas.html
+index d3355a9..241ede5 100644
+--- a/templates/metricas.html
++++ b/templates/metricas.html
+@@ -31,10 +31,12 @@
+ </div>
+ {% endblock %}
+ {% block extra_scripts %}
+-<script src="{{ url_for('static', filename='js/metricas.js') }}"></script>
+-<script>
+-MX.line('h_trend', {{ trend_rows|map(attribute='label')|list|tojson }}, {{ trend_rows|map(attribute='value')|list|tojson }}, {label:'Consumo', tone:''});
+-MX.doughnut('h_scrap', {{ descartes_loc|map(attribute='label')|list|tojson }}, {{ descartes_loc|map(attribute='value')|list|tojson }});
+-MX.barH('h_top', {{ top_consumo|map(attribute='label')|list|tojson }}, {{ top_consumo|map(attribute='value')|list|tojson }}, {tone:''});
++<script type="application/json" id="metricas-graficos">
++[
++    {"tipo": "line", "canvas": "h_trend", "labels": {{ trend_rows|map(attribute='label')|list|tojson }}, "valores": {{ trend_rows|map(attribute='value')|list|tojson }}, "opts": {"label":"Consumo", "tone":""}},
++    {"tipo": "doughnut", "canvas": "h_scrap", "labels": {{ descartes_loc|map(attribute='label')|list|tojson }}, "valores": {{ descartes_loc|map(attribute='value')|list|tojson }}},
++    {"tipo": "barH", "canvas": "h_top", "labels": {{ top_consumo|map(attribute='label')|list|tojson }}, "valores": {{ top_consumo|map(attribute='value')|list|tojson }}, "opts": {"tone":""}}
++]
+ </script>
++<script src="{{ url_for('static', filename='js/metricas.js') }}"></script>
+ {% endblock %}
+diff --git a/templates/metricas_camionetas.html b/templates/metricas_camionetas.html
+index 2ec8ec2..74a8a76 100644
+--- a/templates/metricas_camionetas.html
++++ b/templates/metricas_camionetas.html
+@@ -34,11 +34,13 @@
+ </div>
+ {% endblock %}
+ {% block extra_scripts %}
+-<script src="{{ url_for('static', filename='js/metricas.js') }}"></script>
+-<script>
+-MX.barH('v_stock', {{ stock_rows|map(attribute='label')|list|tojson }}, {{ stock_rows|map(attribute='value')|list|tojson }}, {tone:''});
+-MX.barH('v_cons', {{ cons_rows|map(attribute='label')|list|tojson }}, {{ cons_rows|map(attribute='value')|list|tojson }}, {tone:''});
+-MX.barH('v_scrap', {{ scrap_rows|map(attribute='label')|list|tojson }}, {{ scrap_rows|map(attribute='value')|list|tojson }}, {tone:'danger'});
+-MX.barH('v_pend', {{ pend_rows|map(attribute='label')|list|tojson }}, {{ pend_rows|map(attribute='value')|list|tojson }}, {tone:'warn'});
++<script type="application/json" id="metricas-graficos">
++[
++    {"tipo": "barH", "canvas": "v_stock", "labels": {{ stock_rows|map(attribute='label')|list|tojson }}, "valores": {{ stock_rows|map(attribute='value')|list|tojson }}, "opts": {"tone":""}},
++    {"tipo": "barH", "canvas": "v_cons", "labels": {{ cons_rows|map(attribute='label')|list|tojson }}, "valores": {{ cons_rows|map(attribute='value')|list|tojson }}, "opts": {"tone":""}},
++    {"tipo": "barH", "canvas": "v_scrap", "labels": {{ scrap_rows|map(attribute='label')|list|tojson }}, "valores": {{ scrap_rows|map(attribute='value')|list|tojson }}, "opts": {"tone":"danger"}},
++    {"tipo": "barH", "canvas": "v_pend", "labels": {{ pend_rows|map(attribute='label')|list|tojson }}, "valores": {{ pend_rows|map(attribute='value')|list|tojson }}, "opts": {"tone":"warn"}}
++]
+ </script>
++<script src="{{ url_for('static', filename='js/metricas.js') }}"></script>
+ {% endblock %}
+diff --git a/templates/metricas_compras.html b/templates/metricas_compras.html
+index c893b75..0b09c17 100644
+--- a/templates/metricas_compras.html
++++ b/templates/metricas_compras.html
+@@ -35,12 +35,14 @@
+ </div>
+ {% endblock %}
+ {% block extra_scripts %}
+-<script src="{{ url_for('static', filename='js/metricas.js') }}"></script>
+-<script>
+-MX.barV('c_trend', {{ trend_rows|map(attribute='label')|list|tojson }}, {{ trend_rows|map(attribute='value')|list|tojson }}, {tone:''});
+-MX.doughnut('c_estado', {{ estado_labels|tojson }}, {{ estado_values|tojson }});
+-MX.barH('c_items', {{ top_items|map(attribute='label')|list|tojson }}, {{ top_items|map(attribute='value')|list|tojson }}, {tone:''});
+-MX.barH('c_cats', {{ top_cats|map(attribute='label')|list|tojson }}, {{ top_cats|map(attribute='value')|list|tojson }}, {tone:'ok'});
+-MX.barH('c_user', {{ by_user|map(attribute='label')|list|tojson }}, {{ by_user|map(attribute='value')|list|tojson }}, {tone:''});
++<script type="application/json" id="metricas-graficos">
++[
++    {"tipo": "barV", "canvas": "c_trend", "labels": {{ trend_rows|map(attribute='label')|list|tojson }}, "valores": {{ trend_rows|map(attribute='value')|list|tojson }}, "opts": {"tone":""}},
++    {"tipo": "doughnut", "canvas": "c_estado", "labels": {{ estado_labels|tojson }}, "valores": {{ estado_values|tojson }}},
++    {"tipo": "barH", "canvas": "c_items", "labels": {{ top_items|map(attribute='label')|list|tojson }}, "valores": {{ top_items|map(attribute='value')|list|tojson }}, "opts": {"tone":""}},
++    {"tipo": "barH", "canvas": "c_cats", "labels": {{ top_cats|map(attribute='label')|list|tojson }}, "valores": {{ top_cats|map(attribute='value')|list|tojson }}, "opts": {"tone":"ok"}},
++    {"tipo": "barH", "canvas": "c_user", "labels": {{ by_user|map(attribute='label')|list|tojson }}, "valores": {{ by_user|map(attribute='value')|list|tojson }}, "opts": {"tone":""}}
++]
+ </script>
++<script src="{{ url_for('static', filename='js/metricas.js') }}"></script>
+ {% endblock %}
+diff --git a/templates/metricas_consumo.html b/templates/metricas_consumo.html
+index de23e6e..5a3de5d 100644
+--- a/templates/metricas_consumo.html
++++ b/templates/metricas_consumo.html
+@@ -34,12 +34,14 @@
+ </div>
+ {% endblock %}
+ {% block extra_scripts %}
+-<script src="{{ url_for('static', filename='js/metricas.js') }}"></script>
+-<script>
+-MX.line('u_trend', {{ trend_rows|map(attribute='label')|list|tojson }}, {{ trend_rows|map(attribute='value')|list|tojson }}, {label:'Consumo'});
+-MX.barH('u_items', {{ top_items|map(attribute='label')|list|tojson }}, {{ top_items|map(attribute='value')|list|tojson }});
+-MX.doughnut('u_cats', {{ by_cat|map(attribute='label')|list|tojson }}, {{ by_cat|map(attribute='value')|list|tojson }});
+-MX.barH('u_loc', {{ by_loc|map(attribute='label')|list|tojson }}, {{ by_loc|map(attribute='value')|list|tojson }});
+-MX.barH('u_user', {{ by_user|map(attribute='label')|list|tojson }}, {{ by_user|map(attribute='value')|list|tojson }});
++<script type="application/json" id="metricas-graficos">
++[
++    {"tipo": "line", "canvas": "u_trend", "labels": {{ trend_rows|map(attribute='label')|list|tojson }}, "valores": {{ trend_rows|map(attribute='value')|list|tojson }}, "opts": {"label":"Consumo"}},
++    {"tipo": "barH", "canvas": "u_items", "labels": {{ top_items|map(attribute='label')|list|tojson }}, "valores": {{ top_items|map(attribute='value')|list|tojson }}},
++    {"tipo": "doughnut", "canvas": "u_cats", "labels": {{ by_cat|map(attribute='label')|list|tojson }}, "valores": {{ by_cat|map(attribute='value')|list|tojson }}},
++    {"tipo": "barH", "canvas": "u_loc", "labels": {{ by_loc|map(attribute='label')|list|tojson }}, "valores": {{ by_loc|map(attribute='value')|list|tojson }}},
++    {"tipo": "barH", "canvas": "u_user", "labels": {{ by_user|map(attribute='label')|list|tojson }}, "valores": {{ by_user|map(attribute='value')|list|tojson }}}
++]
+ </script>
++<script src="{{ url_for('static', filename='js/metricas.js') }}"></script>
+ {% endblock %}
+diff --git a/templates/metricas_descartes.html b/templates/metricas_descartes.html
+index f779836..1ebfbab 100644
+--- a/templates/metricas_descartes.html
++++ b/templates/metricas_descartes.html
+@@ -34,13 +34,15 @@
+ </div>
+ {% endblock %}
+ {% block extra_scripts %}
+-<script src="{{ url_for('static', filename='js/metricas.js') }}"></script>
+-<script>
+-MX.barH('d_loc', {{ by_loc|map(attribute='label')|list|tojson }}, {{ by_loc|map(attribute='value')|list|tojson }}, {tone:'danger'});
+-MX.doughnut('d_reason', {{ by_reason|map(attribute='label')|list|tojson }}, {{ by_reason|map(attribute='value')|list|tojson }});
+-MX.barH('d_items', {{ top_items|map(attribute='label')|list|tojson }}, {{ top_items|map(attribute='value')|list|tojson }}, {tone:'danger'});
+-MX.barH('d_cats', {{ by_cat|map(attribute='label')|list|tojson }}, {{ by_cat|map(attribute='value')|list|tojson }}, {tone:'danger'});
+-MX.barH('d_user', {{ by_user|map(attribute='label')|list|tojson }}, {{ by_user|map(attribute='value')|list|tojson }}, {tone:'danger'});
+-MX.barV('d_trend', {{ trend_rows|map(attribute='label')|list|tojson }}, {{ trend_rows|map(attribute='value')|list|tojson }}, {tone:'danger'});
++<script type="application/json" id="metricas-graficos">
++[
++    {"tipo": "barH", "canvas": "d_loc", "labels": {{ by_loc|map(attribute='label')|list|tojson }}, "valores": {{ by_loc|map(attribute='value')|list|tojson }}, "opts": {"tone":"danger"}},
++    {"tipo": "doughnut", "canvas": "d_reason", "labels": {{ by_reason|map(attribute='label')|list|tojson }}, "valores": {{ by_reason|map(attribute='value')|list|tojson }}},
++    {"tipo": "barH", "canvas": "d_items", "labels": {{ top_items|map(attribute='label')|list|tojson }}, "valores": {{ top_items|map(attribute='value')|list|tojson }}, "opts": {"tone":"danger"}},
++    {"tipo": "barH", "canvas": "d_cats", "labels": {{ by_cat|map(attribute='label')|list|tojson }}, "valores": {{ by_cat|map(attribute='value')|list|tojson }}, "opts": {"tone":"danger"}},
++    {"tipo": "barH", "canvas": "d_user", "labels": {{ by_user|map(attribute='label')|list|tojson }}, "valores": {{ by_user|map(attribute='value')|list|tojson }}, "opts": {"tone":"danger"}},
++    {"tipo": "barV", "canvas": "d_trend", "labels": {{ trend_rows|map(attribute='label')|list|tojson }}, "valores": {{ trend_rows|map(attribute='value')|list|tojson }}, "opts": {"tone":"danger"}}
++]
+ </script>
++<script src="{{ url_for('static', filename='js/metricas.js') }}"></script>
+ {% endblock %}
+diff --git a/templates/metricas_inventario.html b/templates/metricas_inventario.html
+index 832c0b1..8b036da 100644
+--- a/templates/metricas_inventario.html
++++ b/templates/metricas_inventario.html
+@@ -28,9 +28,11 @@
+ </div>
+ {% endblock %}
+ {% block extra_scripts %}
+-<script src="{{ url_for('static', filename='js/metricas.js') }}"></script>
+-<script>
+-MX.doughnut('i_cats', {{ by_cat|map(attribute='label')|list|tojson }}, {{ by_cat|map(attribute='value')|list|tojson }});
+-MX.barH('i_loc', {{ by_loc|map(attribute='label')|list|tojson }}, {{ by_loc|map(attribute='value')|list|tojson }}, {tone:''});
++<script type="application/json" id="metricas-graficos">
++[
++    {"tipo": "doughnut", "canvas": "i_cats", "labels": {{ by_cat|map(attribute='label')|list|tojson }}, "valores": {{ by_cat|map(attribute='value')|list|tojson }}},
++    {"tipo": "barH", "canvas": "i_loc", "labels": {{ by_loc|map(attribute='label')|list|tojson }}, "valores": {{ by_loc|map(attribute='value')|list|tojson }}, "opts": {"tone":""}}
++]
+ </script>
++<script src="{{ url_for('static', filename='js/metricas.js') }}"></script>
+ {% endblock %}
+diff --git a/templates/metricas_movimientos.html b/templates/metricas_movimientos.html
+index 7c61407..486644e 100644
+--- a/templates/metricas_movimientos.html
++++ b/templates/metricas_movimientos.html
+@@ -34,11 +34,13 @@
+ </div>
+ {% endblock %}
+ {% block extra_scripts %}
+-<script src="{{ url_for('static', filename='js/metricas.js') }}"></script>
+-<script>
+-MX.line('m_trend', {{ trend_rows|map(attribute='label')|list|tojson }}, {{ trend_rows|map(attribute='value')|list|tojson }}, {label:'Movimientos'});
+-MX.barH('m_user', {{ by_user|map(attribute='label')|list|tojson }}, {{ by_user|map(attribute='value')|list|tojson }});
+-MX.barH('m_route', {{ by_route|map(attribute='label')|list|tojson }}, {{ by_route|map(attribute='value')|list|tojson }});
+-MX.barH('m_items', {{ top_items|map(attribute='label')|list|tojson }}, {{ top_items|map(attribute='value')|list|tojson }}, {tone:'ok'});
++<script type="application/json" id="metricas-graficos">
++[
++    {"tipo": "line", "canvas": "m_trend", "labels": {{ trend_rows|map(attribute='label')|list|tojson }}, "valores": {{ trend_rows|map(attribute='value')|list|tojson }}, "opts": {"label":"Movimientos"}},
++    {"tipo": "barH", "canvas": "m_user", "labels": {{ by_user|map(attribute='label')|list|tojson }}, "valores": {{ by_user|map(attribute='value')|list|tojson }}},
++    {"tipo": "barH", "canvas": "m_route", "labels": {{ by_route|map(attribute='label')|list|tojson }}, "valores": {{ by_route|map(attribute='value')|list|tojson }}},
++    {"tipo": "barH", "canvas": "m_items", "labels": {{ top_items|map(attribute='label')|list|tojson }}, "valores": {{ top_items|map(attribute='value')|list|tojson }}, "opts": {"tone":"ok"}}
++]
+ </script>
++<script src="{{ url_for('static', filename='js/metricas.js') }}"></script>
+ {% endblock %}
+diff --git a/templates/metricas_reparaciones.html b/templates/metricas_reparaciones.html
+index a29b9b7..919407e 100644
+--- a/templates/metricas_reparaciones.html
++++ b/templates/metricas_reparaciones.html
+@@ -31,10 +31,12 @@
+ </div>
+ {% endblock %}
+ {% block extra_scripts %}
+-<script src="{{ url_for('static', filename='js/metricas.js') }}"></script>
+-<script>
+-MX.doughnut('r_estado', {{ estado_labels|tojson }}, {{ estado_values|tojson }});
+-MX.barH('r_item', {{ by_item|map(attribute='label')|list|tojson }}, {{ by_item|map(attribute='value')|list|tojson }}, {tone:'warn'});
+-MX.barH('r_pend', {{ pend_by_user|map(attribute='label')|list|tojson }}, {{ pend_by_user|map(attribute='value')|list|tojson }}, {tone:'danger'});
++<script type="application/json" id="metricas-graficos">
++[
++    {"tipo": "doughnut", "canvas": "r_estado", "labels": {{ estado_labels|tojson }}, "valores": {{ estado_values|tojson }}},
++    {"tipo": "barH", "canvas": "r_item", "labels": {{ by_item|map(attribute='label')|list|tojson }}, "valores": {{ by_item|map(attribute='value')|list|tojson }}, "opts": {"tone":"warn"}},
++    {"tipo": "barH", "canvas": "r_pend", "labels": {{ pend_by_user|map(attribute='label')|list|tojson }}, "valores": {{ pend_by_user|map(attribute='value')|list|tojson }}, "opts": {"tone":"danger"}}
++]
+ </script>
++<script src="{{ url_for('static', filename='js/metricas.js') }}"></script>
+ {% endblock %}
+diff --git a/templates/movements.html b/templates/movements.html
+index a5f9dc3..7eaf8cb 100644
+--- a/templates/movements.html
++++ b/templates/movements.html
+@@ -122,17 +122,6 @@
+         <input type="number" name="pending_return_qty" id="pending_return_qty" min="1" placeholder="Igual a la entregada">
+       </div>
+     </div>
+-    <script>
+-    document.addEventListener("DOMContentLoaded", function () {
+-        const checkbox = document.getElementById("generate_pending");
+-        const box = document.getElementById("pending_box");
+-        function togglePending() {
+-            box.style.display = checkbox.checked ? "block" : "none";
+-        }
+-        checkbox.addEventListener("change", togglePending);
+-        togglePending();
+-    });
+-    </script>
+     {% endif %}
+ 
+     <div style="margin-top:16px;">
+@@ -244,111 +233,18 @@
+   {{ pagination(page_obj, "movimiento", "movimientos") }}
+ </div>
+ 
+-<script>
+-document.addEventListener("DOMContentLoaded", function () {
+-  // Filtros: en desktop siempre visibles; en mobile colapsados por defecto.
+-  var movFilters = document.getElementById("movFilters");
+-  if (movFilters) {
+-    var syncFilters = function () {
+-      if (window.matchMedia("(min-width:768px)").matches) { movFilters.open = true; }
+-    };
+-    syncFilters();
+-    window.addEventListener("resize", syncFilters);
+-  }
+-  // Item dinamico segun "Desde": solo se ofrecen items con stock (>0) en esa ubicacion.
+-  var stockMap = {{ stock_map|tojson }};
+-  var stockQtyMap = {{ stock_qty_map|tojson }};
+-  // Fase 2: si el servidor decidio no embeber el mapa (inventario grande),
+-  // ensureStock() lo pide por ubicacion antes de usarlo. Con el mapa embebido
+-  // es un passthrough sincronico y el flujo es identico al historico.
+-  var ensureStock = makeStockLoader(stockMap, stockQtyMap, {{ stock_remote|tojson }});
+-  var externalLocIds = ({{ external_location_ids|tojson }} || []).map(String);
+-  var fromSel = document.getElementById("from_location_id");
+-  var itemEl = document.getElementById("item_id");
+-  var qtyInputEl = document.getElementById("qty_input");
+-
+-  // Tope de cantidad: no se puede mover más de lo que hay en el origen.
+-  // Origen externo (Proveedor/Baja) = sin tope. Si tipea de más, al máximo.
+-  function clampMovQty() {
+-    if (!qtyInputEl) return;
+-    var loc = fromSel ? String(fromSel.value || "") : "";
+-    var item = itemEl ? String(itemEl.value || "") : "";
+-    var isExternal = externalLocIds.indexOf(loc) !== -1;
+-    if (isExternal || !loc || !item) { qtyInputEl.removeAttribute("max"); return; }
+-    var mx = (stockQtyMap[loc] || {})[item];
+-    if (mx == null) { qtyInputEl.removeAttribute("max"); return; }
+-    qtyInputEl.setAttribute("max", mx);
+-    var v = parseInt(qtyInputEl.value, 10);
+-    if (!isNaN(v) && v > mx) { qtyInputEl.value = mx; }
+-  }
+-  if (qtyInputEl) { qtyInputEl.addEventListener("input", clampMovQty); }
+-
+-  // Selector de seriales (auto/elegir) compartido.
+-  var refreshSerialUI = initSerialPicker({
+-    unitsMap: {{ units_map|tojson }},
+-    serializedItems: {{ serialized_item_ids|tojson }},
+-    itemEl: itemEl,
+-    fromSel: fromSel,
+-    qtyInput: document.getElementById("qty_input"),
+-    pickBox: document.getElementById("serial_pick_box"),
+-    pickList: document.getElementById("serial_pick_list"),
+-    pickStatus: document.getElementById("serial_pick_status"),
+-    autoHint: document.getElementById("serial_auto_hint"),
+-    autoText: document.getElementById("serial_auto_text")
+-  });
+-
+-  if (itemEl && !itemEl.tomselect) {
+-    var allItems = [];
+-    Array.from(itemEl.options).forEach(function (o) {
+-      if (o.value) allItems.push({ value: o.value, text: o.text });
+-    });
+-
+-    var tsItem = new TomSelect(itemEl, {
+-      create: false,
+-      sortField: { field: "text", direction: "asc" },
+-      placeholder: "Elegí la ubicación de origen primero...",
+-      closeAfterSelect: true,
+-      onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
+-      onChange: function () { this.blur(); refreshSerialUI(); clampMovQty(); }
+-    });
+-
+-    var refreshItems = function () {
+-      var locId = fromSel ? String(fromSel.value || "") : "";
+-      var isExternal = externalLocIds.indexOf(locId) !== -1;
+-      tsItem.clear(true);
+-      tsItem.clearOptions();
+-      if (isExternal) {
+-        // Ubicación externa (Proveedor/Baja): puede mover cualquier ítem.
+-        allItems.forEach(function (o) { tsItem.addOption(o); });
+-      } else {
+-        var allowed = stockMap[locId] || [];
+-        var allowedSet = {};
+-        allowed.forEach(function (id) { allowedSet[String(id)] = true; });
+-        allItems.forEach(function (o) { if (allowedSet[o.value]) tsItem.addOption(o); });
+-      }
+-      tsItem.refreshOptions(false);
+-      if (!locId) { tsItem.disable(); } else { tsItem.enable(); }
+-      refreshSerialUI();
+-      clampMovQty();
+-    };
+-
+-    var refreshItemsConStock = function () {
+-      ensureStock(fromSel ? fromSel.value : "", refreshItems);
+-    };
+-
+-    if (fromSel && fromSel.tagName === "SELECT") {
+-      fromSel.addEventListener("change", refreshItemsConStock);
+-    }
+-    refreshItemsConStock();
+-  }
+-
+-  var toSel = document.getElementById("to_location_id");
+-  var scrapBox = document.getElementById("scrap_reason_box");
+-  var descartes_id = "{{ descartes_id or '' }}";
+-  function toggleScrap() {
+-    scrapBox.style.display = (toSel.value === descartes_id) ? "block" : "none";
+-  }
+-  if (toSel) { toSel.addEventListener("change", toggleScrap); toggleScrap(); }
+-});
++<script type="application/json" id="movements-datos">
++{
++  "stockMap": {{ stock_map|tojson }},
++  "stockQtyMap": {{ stock_qty_map|tojson }},
++  "stockRemote": {{ stock_remote|tojson }},
++  "externalLocIds": {{ external_location_ids|tojson }},
++  "unitsMap": {{ units_map|tojson }},
++  "serializedItems": {{ serialized_item_ids|tojson }},
++  "descartesId": {{ (descartes_id or '')|string|tojson }}
++}
+ </script>
+ {% endblock %}
++{% block extra_scripts %}
++  <script src="{{ url_for('static', filename='js/movements.js') }}"></script>
++{% endblock %}
+diff --git a/templates/movements_bulk.html b/templates/movements_bulk.html
+index 17bf50b..81fd00c 100644
+--- a/templates/movements_bulk.html
++++ b/templates/movements_bulk.html
+@@ -103,160 +103,17 @@
+   </div>
+ </template>
+ 
+-<script>
+-  var descartes_id = "{{ descartes_id or '' }}";
+-  var stockMap = {{ stock_map|tojson }};
+-  var stockQtyMap = {{ stock_qty_map|tojson }};
+-  // Fase 2: si el servidor decidio no embeber el mapa (inventario grande),
+-  // ensureStock() lo pide por ubicacion antes de usarlo. Con el mapa embebido
+-  // es un passthrough sincronico y el flujo es identico al historico.
+-  var ensureStock = makeStockLoader(stockMap, stockQtyMap, {{ stock_remote|tojson }});
+-  var externalLocIds = ({{ external_location_ids|tojson }} || []).map(String);
+-
+-  // Tope de cantidad por fila: no se puede mover más de lo que hay en el origen.
+-  function clampBulkQty(line) {
+-    if (!line) return;
+-    var fromSel = document.getElementById("bulk_from_location_id");
+-    var loc = fromSel ? String(fromSel.value || "") : "";
+-    var itemSel = line.querySelector(".bulk-item");
+-    var item = itemSel ? String(itemSel.value || "") : "";
+-    var qty = line.querySelector('input[name="qty[]"]');
+-    if (!qty) return;
+-    var isExternal = externalLocIds.indexOf(loc) !== -1;
+-    if (isExternal || !loc || !item) { qty.removeAttribute("max"); return; }
+-    var mx = (stockQtyMap[loc] || {})[item];
+-    if (mx == null) { qty.removeAttribute("max"); return; }
+-    qty.setAttribute("max", mx);
+-    var v = parseInt(qty.value, 10);
+-    if (!isNaN(v) && v > mx) { qty.value = mx; }
+-  }
+-  function clampBulkAll() {
+-    document.querySelectorAll(".bulk-line").forEach(clampBulkQty);
+-  }
+-
+-  // Lista completa de items (para reconstruir opciones por ubicacion)
+-  var allBulkItems = [
+-    {% for i in items %}{ value: "{{ i.id }}", text: "{{ (i.code ~ ' - ' ~ i.name)|e }}" },
+-    {% endfor %}
+-  ];
+-
+-  function allowedForCurrentFrom() {
+-    var fromSel = document.getElementById("bulk_from_location_id");
+-    var locId = fromSel ? String(fromSel.value || "") : "";
+-    var isExternal = externalLocIds.indexOf(locId) !== -1;
+-    var allowed = stockMap[locId] || [];
+-    var set = {};
+-    allowed.forEach(function (id) { set[String(id)] = true; });
+-    return { locId: locId, set: set, all: isExternal };
+-  }
+-
+-  function applyStockFilterToLine(el) {
+-    if (!el || !el.tomselect) return;
+-    var ts = el.tomselect;
+-    var info = allowedForCurrentFrom();
+-    ts.clear(true);
+-    ts.clearOptions();
+-    // Externa (Proveedor/Baja): todos los ítems; interna: solo con stock.
+-    allBulkItems.forEach(function (o) { if (info.all || info.set[o.value]) ts.addOption(o); });
+-    ts.refreshOptions(false);
+-    if (!info.locId) { ts.disable(); } else { ts.enable(); }
+-  }
+-
+-  function applyStockFilterAllLines() {
+-    document.querySelectorAll(".bulk-item").forEach(applyStockFilterToLine);
+-  }
+-
+-  function initTomSelectFor(el) {
+-    if (!el) return;
+-    if (el.tomselect) return;
+-    new TomSelect(el, {
+-      create: false,
+-      sortField: { field: "text", direction: "asc" },
+-      placeholder: "Elegí la ubicación de origen primero...",
+-      closeAfterSelect: true,
+-      onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
+-      onChange: function () { this.blur(); clampBulkQty(el.closest(".bulk-line")); }
+-    });
+-    applyStockFilterToLine(el);
+-  }
+-
+-  function applyDescartes(isDescartes) {
+-    document.querySelectorAll(".scrap-reason-wrap").forEach(function(el) {
+-      el.style.display = isDescartes ? "block" : "none";
+-    });
+-  }
+-
+-  function wireBulkLine(line) {
+-    var itemSelect = line.querySelector(".bulk-item");
+-    var pendingFlag = line.querySelector(".pending-flag");
+-    var commentWrap = line.querySelector(".pending-comment-wrap");
+-    var removeBtn = line.querySelector(".remove-line-btn");
+-
+-    initTomSelectFor(itemSelect);
+-
+-    // Selector "qué deben devolver" buscable (no se filtra por stock de origen:
+-    // puede volver cualquier ítem, ej. entregás domo y deben traer Onvif).
+-    var returnItemSel = line.querySelector(".pending-return-item");
+-    if (returnItemSel && window.TomSelect && !returnItemSel.tomselect) {
+-      new TomSelect(returnItemSel, window.TS_SINGLE_OPTS);
+-    }
+-
+-    var qtyEl = line.querySelector('input[name="qty[]"]');
+-    if (qtyEl) { qtyEl.addEventListener("input", function () { clampBulkQty(line); }); }
+-
+-    function togglePendingComment() {
+-      if (pendingFlag.value === "1") {
+-        commentWrap.style.display = "block";
+-        // Autorellenar la devolución con el mismo ítem y cantidad seleccionados
+-        // en la línea (el usuario puede cambiarlos después).
+-        var itemVal = itemSelect ? String(itemSelect.value || "") : "";
+-        if (itemVal) {
+-          if (returnItemSel && returnItemSel.tomselect) { returnItemSel.tomselect.setValue(itemVal, true); }
+-          else if (returnItemSel) { returnItemSel.value = itemVal; }
+-        }
+-        var rqty = commentWrap.querySelector('input[name="pending_return_qty[]"]');
+-        if (rqty && !rqty.value && qtyEl) { rqty.value = qtyEl.value; }
+-      } else {
+-        commentWrap.style.display = "none";
+-        var input = commentWrap.querySelector('input[name="pending_comment[]"]');
+-        if (input) input.value = "";
+-        var rqty = commentWrap.querySelector('input[name="pending_return_qty[]"]');
+-        if (rqty) rqty.value = "";
+-        if (returnItemSel && returnItemSel.tomselect) { returnItemSel.tomselect.clear(true); }
+-        else if (returnItemSel) { returnItemSel.value = ""; }
+-      }
+-    }
+-    pendingFlag.addEventListener("change", togglePendingComment);
+-    togglePendingComment();
+-
+-    removeBtn.addEventListener("click", function () { line.remove(); });
+-  }
+-
+-  function addBulkLine() {
+-    var tpl = document.getElementById("bulk-line-template");
+-    var container = document.getElementById("bulk-lines");
+-    var fragment = tpl.content.cloneNode(true);
+-    container.appendChild(fragment);
+-    wireBulkLine(container.lastElementChild);
+-    var toSel = document.getElementById("bulk_to_location_id");
+-    applyDescartes(toSel.value === descartes_id);
+-  }
+-
+-  document.addEventListener("DOMContentLoaded", function () {
+-    document.getElementById("add-line-btn").addEventListener("click", addBulkLine);
+-    addBulkLine();
+-    var bulkToSel = document.getElementById("bulk_to_location_id");
+-    bulkToSel.addEventListener("change", function () {
+-      applyDescartes(this.value === descartes_id);
+-    });
+-    var bulkFromSel = document.getElementById("bulk_from_location_id");
+-    if (bulkFromSel) {
+-      bulkFromSel.addEventListener("change", function () {
+-        ensureStock(bulkFromSel.value, function () {
+-          applyStockFilterAllLines(); clampBulkAll();
+-        });
+-      });
+-    }
+-  });
++<script type="application/json" id="movements-bulk-datos">
++{
++  "stockMap": {{ stock_map|tojson }},
++  "stockQtyMap": {{ stock_qty_map|tojson }},
++  "stockRemote": {{ stock_remote|tojson }},
++  "externalLocIds": {{ external_location_ids|tojson }},
++  "descartesId": {{ (descartes_id or '')|string|tojson }},
++  "items": {{ opciones_items(items)|tojson }}
++}
+ </script>
+ {% endblock %}
++{% block extra_scripts %}
++  <script src="{{ url_for('static', filename='js/movements_bulk.js') }}"></script>
++{% endblock %}
+diff --git a/templates/pending_deliveries.html b/templates/pending_deliveries.html
+index 1ff68b2..da87ab9 100644
+--- a/templates/pending_deliveries.html
++++ b/templates/pending_deliveries.html
+@@ -125,7 +125,7 @@
+                 <label class="check-inline"><input type="radio" name="return_action" value="repair"> A reparación</label>
+                 <label class="check-inline"><input type="radio" name="return_action" value="scrap" id="scrap_radio_{{ p.id }}"> Enviar a Descartes</label>
+               </div>
+-              <div id="scrap_opts_{{ p.id }}" style="display:none; margin-top:6px;">
++              <div id="scrap_opts_{{ p.id }}" data-show-when="return_action=scrap" style="display:none; margin-top:6px;">
+                 <select name="scrap_reason">
+                   <option value="">Motivo...</option>
+                   <option value="Irrecuperable">Irrecuperable</option>
+@@ -137,15 +137,6 @@
+               </div>
+               <input type="text" name="return_observation" placeholder="Observación (opcional)" style="margin-top:6px;">
+               <div style="margin-top:6px;"><button class="btn btn-primary btn-sm">Confirmar</button></div>
+-              <script>
+-              (function(){
+-                var radio = document.getElementById("scrap_radio_{{ p.id }}");
+-                var opts  = document.getElementById("scrap_opts_{{ p.id }}");
+-                radio.closest("form").querySelectorAll("input[name=return_action]").forEach(function(r){
+-                  r.addEventListener("change", function(){ opts.style.display = radio.checked ? "block" : "none"; });
+-                });
+-              })();
+-              </script>
+             </form>
+             {% endif %}
+           </td>
+diff --git a/templates/purchase_request_detail.html b/templates/purchase_request_detail.html
+index 32a2d13..48615fa 100644
+--- a/templates/purchase_request_detail.html
++++ b/templates/purchase_request_detail.html
+@@ -46,25 +46,25 @@
+   <p class="muted">Copiá y pegá en tu cliente de correo. El envío por ahora es manual.</p>
+   <div class="field">
+     <label>Para</label>
+-    <input id="sc-to" value="{{ email.to }}" readonly onclick="this.select();">
++    <input id="sc-to" value="{{ email.to }}" readonly data-select-all">
+     {% if not email.to %}<p class="muted" style="margin:4px 0 0;">No se seleccionaron destinatarios al crear esta solicitud.</p>{% endif %}
+   </div>
+   <div class="field">
+     <label>Asunto</label>
+-    <input id="sc-subject" value="{{ email.subject }}" readonly onclick="this.select();">
++    <input id="sc-subject" value="{{ email.subject }}" readonly data-select-all">
+   </div>
+   <div class="field">
+     <label>Cuerpo</label>
+-    <textarea id="sc-body" rows="10" readonly onclick="this.select();">{{ email.body }}</textarea>
++    <textarea id="sc-body" rows="10" readonly data-select-all">{{ email.body }}</textarea>
+   </div>
+-  <button type="button" class="btn btn-secondary" onclick="copyPRBody()">Copiar cuerpo</button>
++  <button type="button" class="btn btn-secondary" data-copy-pr>Copiar cuerpo</button>
+   <span id="sc-copied" class="muted" style="margin-left:8px;"></span>
+ </div>
+ 
+ {% if me and me.role in ["ADMIN","SUPERVISOR"] and pr.status != "REALIZADA" %}
+ <div class="card">
+   <form method="post" action="{{ url_for('purchase_request_mark_done', pr_id=pr.id) }}"
+-        onsubmit="return confirm('¿Marcar la solicitud {{ pr.number }} como realizada? Los ítems quedarán como Solicitado=Sí en Alertas de Stock.');">
++        data-confirm="¿Marcar la solicitud {{ pr.number }} como realizada? Los ítems quedarán como Solicitado=Sí en Alertas de Stock."">
+       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+     <button type="submit" class="btn btn-primary">Marcar como realizada</button>
+     <span class="muted" style="margin-left:8px;">Marcala una vez que hayas enviado el mail.</span>
+@@ -72,18 +72,7 @@
+ </div>
+ {% endif %}
+ 
+-<script>
+-  function copyPRBody() {
+-    var ta = document.getElementById('sc-body');
+-    var out = document.getElementById('sc-copied');
+-    if (!ta) return;
+-    ta.select();
+-    try {
+-      navigator.clipboard.writeText(ta.value);
+-    } catch (e) {
+-      document.execCommand('copy');
+-    }
+-    if (out) { out.textContent = 'Copiado.'; setTimeout(function(){ out.textContent=''; }, 2000); }
+-  }
+-</script>
++{% endblock %}
++{% block extra_scripts %}
++  <script src="{{ url_for('static', filename='js/purchase_request.js') }}"></script>
+ {% endblock %}
+diff --git a/templates/purchase_requests.html b/templates/purchase_requests.html
+index 8fc09e4..06bd2cc 100644
+--- a/templates/purchase_requests.html
++++ b/templates/purchase_requests.html
+@@ -9,7 +9,7 @@
+     <p>Pedidos de compra de ítems que entraron en alerta de stock.</p>
+   </div>
+   {% if me and me.role in ["ADMIN","SUPERVISOR"] %}
+-    <button type="button" class="btn btn-primary" onclick="openModal('modal-sc-new')">+ Nueva solicitud</button>
++    <button type="button" class="btn btn-primary" data-modal-open="modal-sc-new"">+ Nueva solicitud</button>
+   {% endif %}
+ </div>
+ 
+@@ -24,7 +24,7 @@
+       <tbody>
+         {% for r in requests %}
+         <tr>
+-          <td><a href="{{ url_for('purchase_request_detail', pr_id=r.id) }}" onclick="openDetail(this.href); return false;">{{ r.number }}</a></td>
++          <td><a href="{{ url_for('purchase_request_detail', pr_id=r.id) }}" data-detail">{{ r.number }}</a></td>
+           <td>{{ r.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+           <td>
+             {% if r.status == "REALIZADA" %}
+@@ -52,7 +52,7 @@
+   <div class="modal" style="max-width:860px;">
+     <div class="modal-header">
+       <span class="modal-title">Nueva solicitud de compra</span>
+-      <button type="button" class="modal-close" onclick="closeModal('modal-sc-new')">&times;</button>
++      <button type="button" class="modal-close" data-modal-close="modal-sc-new"">&times;</button>
+     </div>
+     <form method="post" action="{{ url_for('purchase_request_new') }}">
+       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+@@ -114,7 +114,7 @@
+         {% endif %}
+       </div>
+       <div class="modal-footer">
+-        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-sc-new')">Cancelar</button>
++        <button type="button" class="btn btn-secondary" data-modal-close="modal-sc-new"">Cancelar</button>
+         {% if alert_items %}
+         <button type="submit" class="btn btn-primary">Guardar solicitud</button>
+         {% endif %}
+diff --git a/templates/remito_detail.html b/templates/remito_detail.html
+index b1b2ce1..0585a08 100644
+--- a/templates/remito_detail.html
++++ b/templates/remito_detail.html
+@@ -10,9 +10,9 @@
+     </p>
+   </div>
+   <div style="display:flex; gap:10px;">
+-    <button type="button" class="btn btn-secondary" onclick="window.print()"
++    <button type="button" class="btn btn-secondary" data-print"
+             title="Se abre el diálogo de impresión: elegí 'Guardar como PDF' como destino.">Guardar PDF</button>
+-    <button type="button" class="btn btn-primary" onclick="window.print()">Imprimir</button>
++    <button type="button" class="btn btn-primary" data-print">Imprimir</button>
+     {% if remito.print_pending and me and me.role in ["ADMIN","SUPERVISOR"] %}
+     <form method="post" action="{{ url_for('remito_mark_printed', remito_id=remito.id) }}" style="display:inline;">
+       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+diff --git a/templates/remitos.html b/templates/remitos.html
+index 109bb54..183c9e5 100644
+--- a/templates/remitos.html
++++ b/templates/remitos.html
+@@ -9,7 +9,7 @@
+     <p>Agrupá movimientos ya realizados en un remito imprimible.</p>
+   </div>
+   {% if me and me.role in ["ADMIN", "SUPERVISOR"] %}
+-  <button type="button" class="btn btn-primary" onclick="openRemitoModal()">+ Nuevo remito</button>
++  <button type="button" class="btn btn-primary" data-modal-open="modal-remito-new"">+ Nuevo remito</button>
+   {% endif %}
+ </div>
+ 
+@@ -48,7 +48,7 @@
+       <tbody>
+         {% for r in remitos %}
+         <tr>
+-          <td><a href="{{ url_for('remito_detail', remito_id=r.id) }}" onclick="openDetail(this.href); return false;">{{ r.number }}</a></td>
++          <td><a href="{{ url_for('remito_detail', remito_id=r.id) }}" data-detail">{{ r.number }}</a></td>
+           <td>{{ r.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+           <td>{{ r.responsible_from.full_name if r.responsible_from else "—" }}</td>
+           <td>{{ r.responsible_to.full_name if r.responsible_to else "—" }}</td>
+@@ -70,7 +70,7 @@
+   <div class="modal" style="max-width:900px;">
+     <div class="modal-header">
+       <span class="modal-title">Nuevo remito</span>
+-      <button type="button" class="modal-close" onclick="closeModal('modal-remito-new')">&times;</button>
++      <button type="button" class="modal-close" data-modal-close="modal-remito-new"">&times;</button>
+     </div>
+     <form method="post" action="{{ url_for('remito_new') }}">
+       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+@@ -81,7 +81,7 @@
+             <div class="col-title">Entrega (origen)</div>
+             <div class="field">
+               <label>Desde (ubicación)</label>
+-              <select name="from_location_id" id="rm-from" onchange="onLocChange('from')" required>
++              <select name="from_location_id" id="rm-from" data-remito-loc="from" required>
+                 <option value="" selected disabled>Seleccionar ubicación...</option>
+                 {% for l in locations %}
+                   <option value="{{ l.id }}">{{ l.name }}</option>
+@@ -90,7 +90,7 @@
+             </div>
+             <div class="field">
+               <label>Fecha desde</label>
+-              <input type="date" id="rm-date-from" value="{{ today }}" onchange="loadRemitoMovs()">
++              <input type="date" id="rm-date-from" value="{{ today }}" data-remito-reload>
+             </div>
+             <div class="field">
+               <label>Responsable entrega</label>
+@@ -104,7 +104,7 @@
+             <div class="col-title">Recibe (destino)</div>
+             <div class="field">
+               <label>Hacia (ubicación)</label>
+-              <select name="to_location_id" id="rm-to" onchange="onLocChange('to')" required>
++              <select name="to_location_id" id="rm-to" data-remito-loc="to" required>
+                 <option value="" selected disabled>Seleccionar ubicación...</option>
+                 {% for l in locations %}
+                   <option value="{{ l.id }}">{{ l.name }}</option>
+@@ -113,7 +113,7 @@
+             </div>
+             <div class="field">
+               <label>Fecha hasta</label>
+-              <input type="date" id="rm-date-to" value="{{ today }}" onchange="loadRemitoMovs()">
++              <input type="date" id="rm-date-to" value="{{ today }}" data-remito-reload>
+             </div>
+             <div class="field">
+               <label>Responsable recibe</label>
+@@ -128,7 +128,7 @@
+           <table class="data-table">
+             <thead>
+               <tr>
+-                <th style="width:34px;"><input type="checkbox" id="rm-check-all" onclick="toggleAllRemitoMovs(this)"></th>
++                <th style="width:34px;"><input type="checkbox" id="rm-check-all" data-remito-toggle-all></th>
+                 <th>Fecha</th><th>Ítem</th><th class="num">Qty</th><th>Responsable mov.</th><th>Obs.</th>
+               </tr>
+             </thead>
+@@ -144,7 +144,7 @@
+         </div>
+       </div>
+       <div class="modal-footer">
+-        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-remito-new')">Cancelar</button>
++        <button type="button" class="btn btn-secondary" data-modal-close="modal-remito-new"">Cancelar</button>
+         <button type="submit" class="btn btn-primary">Crear remito</button>
+       </div>
+     </form>
+@@ -155,68 +155,12 @@
+ 
+ {% block extra_scripts %}
+ {% if me and me.role in ["ADMIN", "SUPERVISOR"] %}
+-<script>
+-  var REMITO_MOVS_URL = "{{ url_for('remito_movimientos') }}";
+-  var REMITO_RESP_URL = "{{ url_for('remito_responsables') }}";
+-
+-  function openRemitoModal() { openModal('modal-remito-new'); }
+-
+-  function onLocChange(which) {
+-    loadResponsables(which);
+-    loadRemitoMovs();
+-  }
+-
+-  function loadResponsables(which) {
+-    var locSel = document.getElementById(which === 'from' ? 'rm-from' : 'rm-to');
+-    var respSel = document.getElementById(which === 'from' ? 'rm-resp-from' : 'rm-resp-to');
+-    var loc = locSel.value;
+-    respSel.disabled = false;
+-    respSel.innerHTML = '<option value="">Cargando...</option>';
+-    if (!loc) { respSel.innerHTML = '<option value="" disabled selected>Elegí la ubicación...</option>'; return; }
+-    fetch(REMITO_RESP_URL + '?location_id=' + encodeURIComponent(loc))
+-      .then(function (r) { return r.json(); })
+-      .then(function (data) {
+-        if (data.external) {
+-          respSel.innerHTML = '<option value="">Proveedor — se completa a mano</option>';
+-          respSel.disabled = true;
+-          return;
+-        }
+-        var opts = data.responsibles || [];
+-        if (opts.length === 0) {
+-          respSel.innerHTML = '<option value="" disabled selected>Sin responsables cargados</option>';
+-          return;
+-        }
+-        var html = '';
+-        if (opts.length > 1) { html += '<option value="" disabled selected>Elegí responsable...</option>'; }
+-        opts.forEach(function (o) { html += '<option value="' + o.id + '">' + o.name + '</option>'; });
+-        respSel.innerHTML = html;
+-        if (opts.length === 1) { respSel.value = String(opts[0].id); }
+-      })
+-      .catch(function () { respSel.innerHTML = '<option value="" disabled selected>Error al cargar</option>'; });
+-  }
+-
+-  function loadRemitoMovs() {
+-    var from = document.getElementById('rm-from').value;
+-    var to = document.getElementById('rm-to').value;
+-    var dFrom = document.getElementById('rm-date-from').value;
+-    var dTo = document.getElementById('rm-date-to').value;
+-    var body = document.getElementById('rm-mov-body');
+-    var chkAll = document.getElementById('rm-check-all');
+-    if (chkAll) chkAll.checked = false;
+-    if (!from || !to) return;
+-    body.innerHTML = '<tr><td colspan="6" class="muted">Cargando...</td></tr>';
+-    fetch(REMITO_MOVS_URL + '?from_location_id=' + encodeURIComponent(from) + '&to_location_id=' + encodeURIComponent(to)
+-          + '&date_from=' + encodeURIComponent(dFrom) + '&date_to=' + encodeURIComponent(dTo))
+-      .then(function (r) { return r.text(); })
+-      .then(function (html) { body.innerHTML = html; })
+-      .catch(function () { body.innerHTML = '<tr><td colspan="6" class="muted">No se pudieron cargar los movimientos.</td></tr>'; });
+-  }
+-
+-  function toggleAllRemitoMovs(master) {
+-    document.querySelectorAll('#rm-mov-body input[name="movement_id"]').forEach(function (c) {
+-      c.checked = master.checked;
+-    });
+-  }
++<script type="application/json" id="remitos-datos">
++{
++  "movsUrl": {{ url_for('remito_movimientos')|tojson }},
++  "respUrl": {{ url_for('remito_responsables')|tojson }}
++}
+ </script>
++<script src="{{ url_for('static', filename='js/remitos.js') }}"></script>
+ {% endif %}
+ {% endblock %}
+diff --git a/templates/repair_request_detail.html b/templates/repair_request_detail.html
+index 56e6965..a0a0874 100644
+--- a/templates/repair_request_detail.html
++++ b/templates/repair_request_detail.html
+@@ -73,7 +73,7 @@
+     CANCELADA y deja de aparecer como pendiente para el depósito. No afecta el stock.
+   </p>
+   <form method="post" action="{{ url_for('repair_request_cancel', rr_id=rr.id) }}"
+-        onsubmit="return confirm('¿Cancelar la solicitud {{ rr.number }}? No se puede deshacer.');">
++        data-confirm="¿Cancelar la solicitud {{ rr.number }}? No se puede deshacer."">
+     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+     <div class="field" style="max-width:520px;">
+       <label>Motivo <span class="muted">(obligatorio)</span></label>
+@@ -92,7 +92,7 @@
+     No genera movimientos ni afecta el stock.
+   </p>
+   <form method="post" action="{{ url_for('repair_request_reject', rr_id=rr.id) }}"
+-        onsubmit="return confirm('¿Rechazar la solicitud {{ rr.number }}? No se puede deshacer.');">
++        data-confirm="¿Rechazar la solicitud {{ rr.number }}? No se puede deshacer."">
+     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+     <div class="field" style="max-width:520px;">
+       <label>Motivo <span class="muted">(obligatorio)</span></label>
+@@ -112,7 +112,7 @@
+     Si no vas a entregar <b>nada</b>, no cierres con 0: usá «Rechazar solicitud» más abajo.
+   </p>
+   <form method="post" action="{{ url_for('repair_request_close', rr_id=rr.id) }}"
+-        onsubmit="return confirm('¿Cerrar la solicitud {{ rr.number }} y generar los movimientos de entrega?');">
++        data-confirm="¿Cerrar la solicitud {{ rr.number }} y generar los movimientos de entrega?"">
+     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+ 
+     {% for ln in rr.lines %}
+@@ -176,26 +176,8 @@
+   </form>
+ </div>
+ 
+-<script>
+-// Limita la selección de seriales por línea a la cantidad pedida.
+-document.addEventListener("DOMContentLoaded", function () {
+-  document.querySelectorAll('input[type="checkbox"][data-line]:not(.rr-pending-flag)').forEach(function (cb) {
+-    cb.addEventListener("change", function () {
+-      var line = cb.getAttribute("data-line");
+-      var max = parseInt(cb.getAttribute("data-max"), 10) || 0;
+-      var checked = document.querySelectorAll('input[data-line="' + line + '"]:not(.rr-pending-flag):checked');
+-      if (checked.length > max) { cb.checked = false; }
+-    });
+-  });
+-  // Mostrar/ocultar el detalle del pendiente por línea.
+-  document.querySelectorAll(".rr-pending-flag").forEach(function (flag) {
+-    flag.addEventListener("change", function () {
+-      var line = flag.getAttribute("data-line");
+-      var box = document.querySelector('.rr-pending-box[data-line="' + line + '"]');
+-      if (box) box.style.display = flag.checked ? "block" : "none";
+-    });
+-  });
+-});
+-</script>
+ {% endif %}
+ {% endblock %}
++{% block extra_scripts %}
++  <script src="{{ url_for('static', filename='js/repair_request_detail.js') }}"></script>
++{% endblock %}
+diff --git a/templates/repair_requests.html b/templates/repair_requests.html
+index 2d87815..96c0ab7 100644
+--- a/templates/repair_requests.html
++++ b/templates/repair_requests.html
+@@ -122,27 +122,8 @@
+ </div>
+ 
+ {% if me and me.role == "TECNICO" and trucks and items %}
+-<script>
+-document.addEventListener("DOMContentLoaded", function () {
+-  function wireLine(line) {
+-    var rm = line.querySelector(".remove-line-btn");
+-    if (rm) rm.addEventListener("click", function () { line.remove(); });
+-    // Selector de repuesto buscable/tipeable (las lineas se clonan, el init
+-    // global de TomSelect no las alcanza, asi que lo inicializamos por linea).
+-    var sel = line.querySelector('select[name="item_id[]"]');
+-    if (sel && window.TomSelect && !sel.tomselect) {
+-      new TomSelect(sel, window.TS_SINGLE_OPTS);
+-    }
+-  }
+-  function addLine() {
+-    var tpl = document.getElementById("rr-line-template");
+-    var cont = document.getElementById("rr-lines");
+-    cont.appendChild(tpl.content.cloneNode(true));
+-    wireLine(cont.lastElementChild);
+-  }
+-  document.getElementById("add-line-btn").addEventListener("click", addLine);
+-  addLine();
+-});
+-</script>
+ {% endif %}
+ {% endblock %}
++{% block extra_scripts %}
++  <script src="{{ url_for('static', filename='js/repair_requests.js') }}"></script>
++{% endblock %}
+diff --git a/templates/reparaciones.html b/templates/reparaciones.html
+index 6a9b734..3ea5ee3 100644
+--- a/templates/reparaciones.html
++++ b/templates/reparaciones.html
+@@ -43,7 +43,7 @@
+                 <label class="check-inline"><input type="radio" name="repair_action" value="descartado" id="disc_radio_{{ r.id }}"> Descartado</label>
+                 <label class="check-inline"><input type="radio" name="repair_action" value="enviar_proveedor" id="prov_radio_{{ r.id }}"> Enviar a proveedor</label>
+               </div>
+-              <div id="disc_opts_{{ r.id }}" style="display:none; margin-top:6px;">
++              <div id="disc_opts_{{ r.id }}" data-show-when="repair_action=descartado" style="display:none; margin-top:6px;">
+                 <select name="scrap_reason">
+                   <option value="">Motivo...</option>
+                   <option value="Irreparable">Irreparable</option>
+@@ -53,7 +53,7 @@
+                   <option value="Otro">Otro</option>
+                 </select>
+               </div>
+-              <div id="prov_opts_{{ r.id }}" style="display:none; margin-top:6px;">
++              <div id="prov_opts_{{ r.id }}" data-show-when="repair_action=enviar_proveedor" style="display:none; margin-top:6px;">
+                 <select name="supplier_id">
+                   <option value="">Proveedor...</option>
+                   {% for s in suppliers %}
+@@ -63,20 +63,6 @@
+               </div>
+               <input type="text" name="observation" placeholder="Observación (opcional)" style="margin-top:6px;">
+               <div style="margin-top:6px;"><button class="btn btn-primary btn-sm">Confirmar</button></div>
+-              <script>
+-              (function(){
+-                var form = document.currentScript.closest("form");
+-                var disc = document.getElementById("disc_opts_{{ r.id }}");
+-                var prov = document.getElementById("prov_opts_{{ r.id }}");
+-                form.querySelectorAll("input[name=repair_action]").forEach(function(x){
+-                  x.addEventListener("change", function(){
+-                    var v = form.querySelector("input[name=repair_action]:checked").value;
+-                    disc.style.display = (v === "descartado") ? "block" : "none";
+-                    prov.style.display = (v === "enviar_proveedor") ? "block" : "none";
+-                  });
+-                });
+-              })();
+-              </script>
+             </form>
+             {% endif %}
+           </td>
+@@ -147,7 +133,7 @@
+           <td>{{ g.item.name }}</td>
+           <td>{{ g.qty }}</td>
+           <td>
+-            <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('serials_{{ g.item.id }}').style.display = (document.getElementById('serials_{{ g.item.id }}').style.display === 'none' ? 'block' : 'none');">Ver seriales ({{ g.qty }})</button>
++            <button type="button" class="btn btn-secondary btn-sm" data-toggle="serials_{{ g.item.id }}"">Ver seriales ({{ g.qty }})</button>
+             <div id="serials_{{ g.item.id }}" style="display:none; margin-top:6px;">
+               <ul style="margin:0; padding-left:18px;">
+                 {% for sn in g.serials %}<li>{{ sn }}</li>{% endfor %}
+diff --git a/templates/scrap_report.html b/templates/scrap_report.html
+index 6ae7879..63640f3 100644
+--- a/templates/scrap_report.html
++++ b/templates/scrap_report.html
+@@ -175,106 +175,15 @@
+   {{ pagination(page_obj, "descarte", "descartes") }}
+ </div>
+ 
+-<script>
+-document.addEventListener("DOMContentLoaded", function () {
+-  // Filtros: en desktop siempre visibles; en mobile colapsados por defecto.
+-  var scrapFilters = document.getElementById("scrapFilters");
+-  if (scrapFilters) {
+-    var syncScrapFilters = function () {
+-      if (window.matchMedia("(min-width:768px)").matches) { scrapFilters.open = true; }
+-    };
+-    syncScrapFilters();
+-    window.addEventListener("resize", syncScrapFilters);
+-  }
+-  var stockMap = {{ stock_map|tojson }};
+-  var stockQtyMap = {{ stock_qty_map|tojson }};
+-  // Fase 2: si el servidor decidio no embeber el mapa (inventario grande),
+-  // ensureStock() lo pide por ubicacion antes de usarlo. Con el mapa embebido
+-  // es un passthrough sincronico y el flujo es identico al historico.
+-  var ensureStock = makeStockLoader(stockMap, stockQtyMap, {{ stock_remote|tojson }});
+-  var fromSel = document.getElementById("from_location_id");
+-
+-  // Lista de ítems seleccionables (excluye serializados: van por Movimientos).
+-  var allScrapItems = [
+-    {% for it in items %}{% if not it.serialized %}{ value: "{{ it.id }}", text: "{{ (it.code ~ ' - ' ~ it.name)|e }}" },
+-    {% endif %}{% endfor %}
+-  ];
+-
+-  function allowedForCurrentFrom() {
+-    var locId = fromSel ? String(fromSel.value || "") : "";
+-    var allowed = stockMap[locId] || [];
+-    var set = {};
+-    allowed.forEach(function (id) { set[String(id)] = true; });
+-    return { locId: locId, set: set };
+-  }
+-
+-  function clampScrapQty(line) {
+-    if (!line) return;
+-    var loc = fromSel ? String(fromSel.value || "") : "";
+-    var itemSel = line.querySelector(".scrap-item");
+-    var item = itemSel ? String(itemSel.value || "") : "";
+-    var qty = line.querySelector('input[name="qty[]"]');
+-    if (!qty) return;
+-    if (!loc || !item) { qty.removeAttribute("max"); return; }
+-    var mx = (stockQtyMap[loc] || {})[item];
+-    if (mx == null) { qty.removeAttribute("max"); return; }
+-    qty.setAttribute("max", mx);
+-    var v = parseInt(qty.value, 10);
+-    if (!isNaN(v) && v > mx) { qty.value = mx; }
+-  }
+-
+-  function applyStockFilterToLine(el) {
+-    if (!el || !el.tomselect) return;
+-    var ts = el.tomselect;
+-    var info = allowedForCurrentFrom();
+-    ts.clear(true);
+-    ts.clearOptions();
+-    allScrapItems.forEach(function (o) { if (info.set[o.value]) ts.addOption(o); });
+-    ts.refreshOptions(false);
+-    if (!info.locId) { ts.disable(); } else { ts.enable(); }
+-  }
+-
+-  function applyStockFilterAllLines() {
+-    document.querySelectorAll(".scrap-item").forEach(applyStockFilterToLine);
+-  }
+-
+-  function initTomSelectFor(el) {
+-    if (!el || el.tomselect) return;
+-    new TomSelect(el, {
+-      create: false,
+-      sortField: { field: "text", direction: "asc" },
+-      placeholder: "Elegí la ubicación de origen primero...",
+-      closeAfterSelect: true,
+-      onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
+-      onChange: function () { this.blur(); clampScrapQty(el.closest(".scrap-line")); }
+-    });
+-    applyStockFilterToLine(el);
+-  }
+-
+-  function wireScrapLine(line) {
+-    var itemSelect = line.querySelector(".scrap-item");
+-    var removeBtn = line.querySelector(".remove-line-btn");
+-    initTomSelectFor(itemSelect);
+-    var qtyEl = line.querySelector('input[name="qty[]"]');
+-    if (qtyEl) { qtyEl.addEventListener("input", function () { clampScrapQty(line); }); }
+-    if (removeBtn) { removeBtn.addEventListener("click", function () { line.remove(); }); }
+-  }
+-
+-  function addScrapLine() {
+-    var tpl = document.getElementById("scrap-line-template");
+-    var container = document.getElementById("scrap-lines");
+-    container.appendChild(tpl.content.cloneNode(true));
+-    wireScrapLine(container.lastElementChild);
+-  }
+-
+-  document.getElementById("add-line-btn").addEventListener("click", addScrapLine);
+-  addScrapLine();
+-
+-  if (fromSel && fromSel.tagName === "SELECT") {
+-    fromSel.addEventListener("change", function () {
+-      ensureStock(fromSel.value, applyStockFilterAllLines);
+-    });
+-  }
+-});
++<script type="application/json" id="scrap-datos">
++{
++  "stockMap": {{ stock_map|tojson }},
++  "stockQtyMap": {{ stock_qty_map|tojson }},
++  "stockRemote": {{ stock_remote|tojson }},
++  "items": {{ opciones_items(items, true)|tojson }}
++}
+ </script>
+ {% endblock %}
++{% block extra_scripts %}
++  <script src="{{ url_for('static', filename='js/scrap_report.js') }}"></script>
++{% endblock %}
+diff --git a/templates/stock.html b/templates/stock.html
+index 2ce599b..af00ab9 100644
+--- a/templates/stock.html
++++ b/templates/stock.html
+@@ -106,7 +106,7 @@
+           <td>
+             {{ row.item.name }}
+             {% if row.item.serialized %}
+-              <button type="button" class="badge badge-ok" style="cursor:pointer;border:none;margin-left:6px;" onclick="openDetail('{{ url_for('item_units', item_id=row.item.id, loc=row.location.id) }}')">Seriales</button>
++              <button type="button" class="badge badge-ok" style="cursor:pointer;border:none;margin-left:6px;" data-detail-url="{{ url_for('item_units', item_id=row.item.id, loc=row.location.id) }}">Seriales</button>
+             {% endif %}
+           </td>
+           <td>{{ row.item.category.name }}</td>
+diff --git a/templates/suppliers.html b/templates/suppliers.html
+index da7e9e9..84f3f38 100644
+--- a/templates/suppliers.html
++++ b/templates/suppliers.html
+@@ -4,13 +4,13 @@
+ {% block content %}
+ <div class="page-header">
+   <div><h2>Proveedores</h2><p>Carta de proveedores para Ingresos/Egresos.</p></div>
+-  <button type="button" class="btn btn-primary" onclick="openModal('modal-sup-new')">+ Nuevo proveedor</button>
++  <button type="button" class="btn btn-primary" data-modal-open="modal-sup-new"">+ Nuevo proveedor</button>
+ </div>
+ 
+ <div class="card">
+   <form method="get" class="filters-grid">
+     <label style="display:flex; align-items:center; gap:8px;">
+-      <input type="checkbox" name="inactivos" value="1" {% if show_inactive %}checked{% endif %} onchange="this.form.submit()">
++      <input type="checkbox" name="inactivos" value="1" {% if show_inactive %}checked{% endif %} data-submit-on-change">
+       Mostrar dados de baja
+     </label>
+   </form>
+@@ -33,7 +33,7 @@
+           <td>{{ s.phone or "" }}</td>
+           <td>{% if s.is_active %}<span class="badge badge-ok">Activo</span>{% else %}<span class="badge badge-neutral">Baja</span>{% endif %}</td>
+           <td class="actions-cell">
+-            <button type="button" class="btn btn-secondary btn-sm" onclick="openModal('modal-sup-{{ s.id }}')">Editar</button>
++            <button type="button" class="btn btn-secondary btn-sm" data-modal-open="modal-sup-{{ s.id }}"">Editar</button>
+           </td>
+         </tr>
+         {% else %}
+@@ -47,7 +47,7 @@
+ <!-- Modal: nuevo proveedor -->
+ <div class="modal-overlay" id="modal-sup-new">
+   <div class="modal">
+-    <div class="modal-header"><span class="modal-title">Nuevo proveedor</span><button type="button" class="modal-close" onclick="closeModal('modal-sup-new')">&times;</button></div>
++    <div class="modal-header"><span class="modal-title">Nuevo proveedor</span><button type="button" class="modal-close" data-modal-close="modal-sup-new"">&times;</button></div>
+     <form method="post" action="{{ url_for('suppliers') }}">
+       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+       <div class="modal-body">
+@@ -59,7 +59,7 @@
+         <div class="field"><label>Teléfono</label><input name="phone"></div>
+       </div>
+       <div class="modal-footer">
+-        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-sup-new')">Cancelar</button>
++        <button type="button" class="btn btn-secondary" data-modal-close="modal-sup-new"">Cancelar</button>
+         <button type="submit" class="btn btn-primary">Guardar</button>
+       </div>
+     </form>
+@@ -69,7 +69,7 @@
+ {% for s in suppliers %}
+ <div class="modal-overlay" id="modal-sup-{{ s.id }}">
+   <div class="modal">
+-    <div class="modal-header"><span class="modal-title">Editar proveedor</span><button type="button" class="modal-close" onclick="closeModal('modal-sup-{{ s.id }}')">&times;</button></div>
++    <div class="modal-header"><span class="modal-title">Editar proveedor</span><button type="button" class="modal-close" data-modal-close="modal-sup-{{ s.id }}"">&times;</button></div>
+     <form method="post" action="{{ url_for('supplier_edit', supplier_id=s.id) }}">
+       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+       <div class="modal-body">
+@@ -85,7 +85,7 @@
+       </div>
+     </form>
+     <form method="post" action="{{ url_for('supplier_toggle', supplier_id=s.id) }}"
+-          onsubmit="return confirm('¿Confirmás cambiar el estado de este proveedor?');">
++          data-confirm="¿Confirmás cambiar el estado de este proveedor?"">
+       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+       <div class="modal-body" style="border-top:1px solid var(--border); padding-top:14px;">
+         <button type="submit" class="btn btn-secondary">{% if s.is_active %}Dar de baja{% else %}Reactivar{% endif %}</button>
+diff --git a/templates/users.html b/templates/users.html
+index deb4c51..6923301 100644
+--- a/templates/users.html
++++ b/templates/users.html
+@@ -4,7 +4,7 @@
+ {% block content %}
+ <div class="page-header">
+   <div><h2>Usuarios</h2><p>Cuentas y roles del sistema.</p></div>
+-  <button type="button" class="btn btn-primary" onclick="openModal('modal-user-new')">+ Nuevo usuario</button>
++  <button type="button" class="btn btn-primary" data-modal-open="modal-user-new"">+ Nuevo usuario</button>
+ </div>
+ 
+ <div class="card">
+@@ -41,7 +41,7 @@
+           <td><span class="badge role-{{ u.role|lower }}">{{ u.role }}</span></td>
+           <td class="actions-cell">
+             {% if u.id in manageable_ids %}
+-              <button type="button" class="btn btn-secondary btn-sm" onclick="openModal('modal-user-{{ u.id }}')">Editar</button>
++              <button type="button" class="btn btn-secondary btn-sm" data-modal-open="modal-user-{{ u.id }}"">Editar</button>
+             {% endif %}
+           </td>
+         </tr>
+@@ -56,7 +56,7 @@
+ <!-- Modal: nuevo usuario -->
+ <div class="modal-overlay" id="modal-user-new">
+   <div class="modal">
+-    <div class="modal-header"><span class="modal-title">Nuevo usuario</span><button type="button" class="modal-close" onclick="closeModal('modal-user-new')">&times;</button></div>
++    <div class="modal-header"><span class="modal-title">Nuevo usuario</span><button type="button" class="modal-close" data-modal-close="modal-user-new"">&times;</button></div>
+     <form method="post" action="{{ url_for('users') }}">
+       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+       <div class="modal-body">
+@@ -72,7 +72,7 @@
+         <div class="field"><label>Contraseña</label><input name="password" type="password" minlength="8" required></div>
+       </div>
+       <div class="modal-footer">
+-        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-user-new')">Cancelar</button>
++        <button type="button" class="btn btn-secondary" data-modal-close="modal-user-new"">Cancelar</button>
+         <button type="submit" class="btn btn-primary">Guardar</button>
+       </div>
+     </form>
+@@ -84,7 +84,7 @@
+ <!-- Modal: editar usuario -->
+ <div class="modal-overlay" id="modal-user-{{ u.id }}">
+   <div class="modal">
+-    <div class="modal-header"><span class="modal-title">Editar usuario</span><button type="button" class="modal-close" onclick="closeModal('modal-user-{{ u.id }}')">&times;</button></div>
++    <div class="modal-header"><span class="modal-title">Editar usuario</span><button type="button" class="modal-close" data-modal-close="modal-user-{{ u.id }}"">&times;</button></div>
+     <form method="post" action="{{ url_for('user_edit', user_id=u.id) }}">
+       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+       <div class="modal-body">
+@@ -98,7 +98,7 @@
+         </div>
+       </div>
+       <div class="modal-footer">
+-        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-user-{{ u.id }}')">Cancelar</button>
++        <button type="button" class="btn btn-secondary" data-modal-close="modal-user-{{ u.id }}"">Cancelar</button>
+         <button type="submit" class="btn btn-primary">Guardar cambios</button>
+       </div>
+     </form>
+@@ -112,7 +112,7 @@
+           <div class="pw-wrap">
+             <input name="password" type="password" id="pw-{{ u.id }}" minlength="8" required>
+             {% if can_see_passwords %}
+-            <button type="button" class="pw-eye" onclick="togglePw('pw-{{ u.id }}', this)" aria-label="Ver contraseña">&#128065;</button>
++            <button type="button" class="pw-eye" data-toggle-pw="pw-{{ u.id }}" aria-label="Ver contraseña">&#128065;</button>
+             {% endif %}
+           </div>
+         </div>
+diff --git a/tests/conftest.py b/tests/conftest.py
+index d808b46..d7d5a4c 100644
+--- a/tests/conftest.py
++++ b/tests/conftest.py
+@@ -99,3 +99,45 @@ def csrf_from(client, path):
+     html = client.get(path).get_data(as_text=True)
+     m = re.search(r'name="csrf_token" value="([^"]+)"', html)
+     return m.group(1) if m else None
++
++
++# ------------------ helpers de lectura del HTML ------------------
++
++def datos_de_pantalla(html, isla=None):
++    """Datos que el servidor le pasa al JS de una pantalla.
++
++    Desde la Fase 4 viajan en una isla JSON
++    (<script type="application/json" id="...-datos">) en vez de interpolarse
++    dentro del codigo. Esta funcion acepta las dos formas para que un test no
++    dependa del envoltorio, solo del contenido.
++    """
++    import json as _json
++
++    if isla:
++        m = re.search(
++            r'<script type="application/json" id="%s">\s*(.*?)\s*</script>' % isla,
++            html, re.S)
++        if m:
++            return _json.loads(m.group(1))
++
++    m = re.search(r'<script type="application/json" id="[\w-]+-datos">\s*(.*?)\s*</script>',
++                  html, re.S)
++    if m:
++        return _json.loads(m.group(1))
++    return None
++
++
++def var_js(html, nombre):
++    """Valor de una variable del JS de la pantalla.
++
++    Busca primero en la isla JSON (nombre en camelCase, tal como lo publica el
++    template) y si no esta, cae al viejo `var nombre = ...;` inline.
++    """
++    import json as _json
++
++    d = datos_de_pantalla(html)
++    if d is not None and nombre in d:
++        return d[nombre]
++
++    m = re.search(r"var %s = (.*?);\n" % nombre, html, re.S)
++    return _json.loads(m.group(1)) if m else None
+diff --git a/tests/test_csp_sin_js_inline.py b/tests/test_csp_sin_js_inline.py
+new file mode 100644
+index 0000000..5ac9c55
+--- /dev/null
++++ b/tests/test_csp_sin_js_inline.py
+@@ -0,0 +1,93 @@
++"""Guarda de la Fase 4: que no vuelva el JavaScript inline.
++
++Por que existe: sacar las 928 lineas de JS inline y los ~70 handlers `onclick=`
++fue lo que permitio quitar 'unsafe-inline' de script-src. Si alguien vuelve a
++escribir un <script> con codigo adentro de un template, la CSP lo bloquea en
++produccion y la pantalla se rompe **en silencio** (no hay error de servidor,
++solo deja de andar el JS).
++
++Estos tests fallan en el momento de escribirlo, no seis meses despues.
++"""
++import glob
++import os
++import re
++
++import pytest
++
++RAIZ = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
++TEMPLATES = sorted(glob.glob(os.path.join(RAIZ, "templates", "*.html")))
++
++# <script> con codigo: ni src= (archivo externo) ni type="application/json" (datos)
++RX_SCRIPT_EJECUTABLE = re.compile(
++    r'<script(?![^>]*\bsrc=)(?![^>]*application/json)[^>]*>(.*?)</script>', re.S)
++RX_HANDLER = re.compile(
++    r'\son(click|change|submit|input|blur|focus|keyup|keydown|load|error)\s*=\s*"')
++
++
++def _nombre(p):
++    return os.path.basename(p)
++
++
++@pytest.mark.parametrize("ruta", TEMPLATES, ids=_nombre)
++def test_template_sin_script_inline(ruta):
++    encontrados = RX_SCRIPT_EJECUTABLE.findall(open(ruta, encoding="utf-8").read())
++    assert not encontrados, (
++        f"{_nombre(ruta)} volvio a tener JS inline. Movelo a static/js/ y, si "
++        f"necesita datos del servidor, publicalos en una isla "
++        f'<script type="application/json" id="...-datos">.'
++    )
++
++
++@pytest.mark.parametrize("ruta", TEMPLATES, ids=_nombre)
++def test_template_sin_handlers_inline(ruta):
++    hallados = RX_HANDLER.findall(open(ruta, encoding="utf-8").read())
++    assert not hallados, (
++        f"{_nombre(ruta)} volvio a tener handlers inline (on{hallados[0]}=). "
++        f"Usa un atributo data-* y engancharlo desde static/js/ui.js."
++    )
++
++
++def test_csp_no_permite_scripts_inline(client):
++    r = client.get("/login")
++    csp = (r.headers.get("Content-Security-Policy")
++           or r.headers.get("Content-Security-Policy-Report-Only") or "")
++    assert csp, "no se esta emitiendo ninguna CSP"
++
++    script = next((d.strip() for d in csp.split(";") if d.strip().startswith("script-src")), "")
++    assert script, "la CSP no declara script-src"
++    assert "'unsafe-inline'" not in script, (
++        "script-src volvio a permitir 'unsafe-inline': la CSP deja de proteger "
++        "contra XSS. Revisar por que se reabrio."
++    )
++
++
++def test_csp_sigue_declarando_lo_basico(client):
++    csp = (client.get("/login").headers.get("Content-Security-Policy")
++           or client.get("/login").headers.get("Content-Security-Policy-Report-Only") or "")
++    for directiva in ("default-src", "object-src 'none'", "base-uri", "frame-ancestors"):
++        assert directiva in csp, f"falta {directiva} en la CSP"
++
++
++def test_las_islas_de_datos_son_json_valido(client, A):
++    """Una isla mal formada rompe la pantalla sin dar error de servidor."""
++    import json
++
++    A.app.config["WTF_CSRF_ENABLED"] = False
++    from conftest import make_user, login
++
++    make_user(A, "adm_csp", "ADMIN")
++    c = A.app.test_client()
++    login(c, "adm_csp")
++
++    rutas = ["/movements", "/movements/bulk", "/item-usage", "/scrap",
++             "/ingresos-egresos", "/remitos", "/metricas", "/metricas/compras",
++             "/metricas/inventario", "/metricas/descartes"]
++    vistas = 0
++    for ruta in rutas:
++        html = c.get(ruta).get_data(as_text=True)
++        for m in re.finditer(
++                r'<script type="application/json" id="([\w-]+)">\s*(.*?)\s*</script>',
++                html, re.S):
++            json.loads(m.group(2))   # revienta si no es JSON valido
++            vistas += 1
++    assert vistas >= 8, f"esperaba varias islas de datos, encontre {vistas}"
+diff --git a/tests/test_stock_map_remoto.py b/tests/test_stock_map_remoto.py
+index 46c1b87..78b8ef0 100644
+--- a/tests/test_stock_map_remoto.py
++++ b/tests/test_stock_map_remoto.py
+@@ -10,7 +10,7 @@ import json
+ import re
+ 
+ import pytest
+-from conftest import make_user, make_item, make_location, login
++from conftest import make_user, make_item, make_location, login, var_js
+ 
+ 
+ @pytest.fixture()
+@@ -47,8 +47,7 @@ def _como(A, username):
+ 
+ 
+ def _var(html, nombre):
+-    m = re.search(rf"var {nombre} = (.*?);\n", html, re.S)
+-    return json.loads(m.group(1)) if m else None
++    return var_js(html, nombre)
+ 
+ 
+ @pytest.fixture()
+@@ -96,8 +95,8 @@ def _sembrar_stock(A, loc, n, prefijo):
+ 
+ 
+ def _peso_mapa(html):
+-    m = re.search(r"var stockQtyMap = (.*?);\n", html, re.S)
+-    return len(m.group(1).encode()) if m else 0
++    """Bytes que ocupa el mapa de stock dentro del HTML servido."""
++    return len(json.dumps(_var(html, "stockQtyMap") or {}).encode())
+ 
+ 
+ def test_el_mapa_no_crece_con_el_inventario_en_modo_remoto(A, esc, umbral):
+diff --git a/tests/test_tecnico_scope.py b/tests/test_tecnico_scope.py
+index 4306bc3..424c5c5 100644
+--- a/tests/test_tecnico_scope.py
++++ b/tests/test_tecnico_scope.py
+@@ -15,7 +15,7 @@ import json
+ import re
+ 
+ import pytest
+-from conftest import make_user, make_item, make_location, login
++from conftest import make_user, make_item, make_location, login, var_js
+ 
+ 
+ @pytest.fixture()
+@@ -209,9 +209,12 @@ def test_lector_no_puede_generar_solicitudes(A, esc):
+ 
+ 
+ def _stock_qty_map(html):
+-    """Extrae la variable stockQtyMap embebida en el HTML."""
+-    m = re.search(r"var stockQtyMap = (.*?);\n", html, re.S)
+-    return json.loads(m.group(1)) if m else None
++    """Mapa de stock que el servidor le manda al JS de la pantalla.
++
++    Desde la Fase 4 viaja en una isla JSON; var_js() cubre las dos formas, asi
++    que estos tests siguen probando el dato y no el envoltorio.
++    """
++    return var_js(html, "stockQtyMap")
+ 
+ 
+ @pytest.mark.parametrize("ruta", ["/movements", "/item-usage"])

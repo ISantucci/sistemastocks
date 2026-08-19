@@ -14,7 +14,7 @@
 <div class="page-header"><div><h2>Carga múltiple</h2><p>Cargá varios ítems en un mismo movimiento.</p></div></div>
 
 <div class="card">
-  <form method="post" id="bulk-form">
+  <form method="post" id="bulk-form" data-confirm-move="Confirmar carga múltiple">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="form-grid">
       <div class="field">
@@ -53,7 +53,7 @@
 </div>
 
 <template id="bulk-line-template">
-  <div class="bulk-line">
+  <div class="bulk-line" data-confirm-row>
     <div class="bulk-item-select field">
       <label>Item</label>
       <select name="item_id[]" class="bulk-item" required>

@@ -1,0 +1,315 @@
+From 46c6029523adcfb5776d33d5abbc5d71ffd54b06 Mon Sep 17 00:00:00 2001
+From: c <a@b>
+Date: Tue, 18 Aug 2026 14:50:53 +0000
+Subject: [PATCH 09/10] Verificacion de persistencia: la data vive en la base,
+ no en el HTML
+
+---
+ verificacion/verificar_persistencia.py | 298 +++++++++++++++++++++++++
+ 1 file changed, 298 insertions(+)
+ create mode 100644 verificacion/verificar_persistencia.py
+
+diff --git a/verificacion/verificar_persistencia.py b/verificacion/verificar_persistencia.py
+new file mode 100644
+index 0000000..1120040
+--- /dev/null
++++ b/verificacion/verificar_persistencia.py
+@@ -0,0 +1,298 @@
++"""Verificación: la data se guarda en la BASE, no en el HTML.
++
++La pregunta que responde: ¿el HTML es una VISTA de los datos, o los datos viven
++ahí? Si vivieran en el HTML, el sistema no tendría trazabilidad real: bastaría
++con recargar mal, cerrar el navegador o editar el DOM para perder o falsear
++información.
++
++Qué se comprueba, sobre una base sintética y temporal:
++
++  1. Un movimiento cargado por HTTP queda escrito en el archivo .db, leído con
++     sqlite3 CRUDO (sin pasar por SQLAlchemy ni por la app).
++  2. El stock de origen y destino cambió en la base, no solo en la pantalla.
++  3. Los datos sobreviven a reiniciar la aplicación (se levanta una instancia
++     nueva contra el mismo archivo).
++  4. Tocar el HTML no cambia nada: el servidor ignora lo que el cliente diga.
++  5. La cookie de sesión NO guarda datos del negocio (solo la identidad).
++  6. El JavaScript no usa localStorage/sessionStorage para guardar nada.
++  7. El HTML no expone datos que el usuario no deba ver.
++
++No toca ningún dato real.
++"""
++import json
++import os
++import re
++import sqlite3
++import subprocess
++import sys
++import tempfile
++
++_T = tempfile.mkdtemp(prefix="verif_persist_")
++DB = os.path.join(_T, "data", "s.db")
++os.environ.update(
++    STOCKS_DB_PATH=DB,
++    STOCKS_BACKUP_DIR=os.path.join(_T, "b"),
++    STOCKS_LOG_DIR=os.path.join(_T, "l"),
++    FLASK_SECRET_KEY="verificacion-persistencia",
++    APP_DEBUG="false",
++    RATELIMIT_ENABLED="false",
++)
++RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++sys.path.insert(0, RAIZ)
++
++import app as A  # noqa: E402
++
++A.app.config["WTF_CSRF_ENABLED"] = False
++FALLAS = []
++
++
++def chequear(cond, msg):
++    print(("  OK   " if cond else "  FALLA") + "  " + msg)
++    if not cond:
++        FALLAS.append(msg)
++
++
++def crudo(sql, args=()):
++    """Consulta el archivo .db directo, sin la app en el medio."""
++    con = sqlite3.connect(DB)
++    try:
++        return con.execute(sql, args).fetchall()
++    finally:
++        con.close()
++
++
++D = {}
++
++
++def sembrar():
++    with A.app.app_context():
++        A.db.drop_all()
++        A.db.create_all()
++        A.seed_defaults()
++
++        cat = A.Category(name="Cables", prefix="CAB")
++        A.db.session.add(cat)
++        A.db.session.commit()
++
++        jaula = A.Location.query.filter_by(name=A.LOCATION_JAULA_TNG).first()
++        if not jaula:
++            jaula = A.Location(name=A.LOCATION_JAULA_TNG)
++            A.db.session.add(jaula)
++        cam = A.Location(name="Camioneta Uno", is_truck=True)
++        A.db.session.add(cam)
++        A.db.session.commit()
++
++        it = A.Item(code="CAB-001", name="Cable de prueba",
++                    category_id=cat.id, is_active=True)
++        A.db.session.add(it)
++        A.db.session.commit()
++
++        A.upsert_stock(it.id, jaula.id, 100)
++        A.db.session.commit()
++
++        u = A.User(username="adm2", full_name="Admin Dos", role="ADMIN")
++        u.set_password("pass1234")
++        A.db.session.add(u)
++        A.db.session.commit()
++
++        D.update(item=it.id, jaula=jaula.id, cam=cam.id, user=u.id,
++                 codigo=it.code)
++
++
++def main():
++    print("=== 1. Un movimiento cargado por HTTP, ¿queda en el archivo .db? ===")
++    sembrar()
++    movs_antes = crudo("SELECT COUNT(*) FROM movements")[0][0]
++
++    c = A.app.test_client()
++    c.post("/login", data={"username": "adm2", "password": "pass1234"})
++    r = c.post("/movements", data={
++        "item_id": str(D["item"]),
++        "from_location_id": str(D["jaula"]),
++        "to_location_id": str(D["cam"]),
++        "qty": "7",
++        "observation": "prueba de persistencia",
++    }, follow_redirects=True)
++    chequear(r.status_code == 200, "el POST del movimiento respondio 200")
++
++    movs = crudo("SELECT id, item_id, qty, from_location_id, to_location_id, observation "
++                 "FROM movements ORDER BY id DESC LIMIT 1")
++    chequear(crudo("SELECT COUNT(*) FROM movements")[0][0] == movs_antes + 1,
++             "hay una fila nueva en la tabla movements (leida con sqlite3 crudo)")
++    if movs:
++        m = movs[0]
++        chequear(m[1] == D["item"] and m[2] == 7,
++                 "la fila guarda item y cantidad correctos (item=%s qty=%s)" % (m[1], m[2]))
++        chequear(m[3] == D["jaula"] and m[4] == D["cam"],
++                 "guarda origen y destino correctos")
++        chequear("prueba de persistencia" in (m[5] or ""),
++                 "guarda la observacion que se tipeo")
++
++    print("\n=== 2. ¿El stock cambio en la BASE o solo en la pantalla? ===")
++    q_jaula = crudo("SELECT quantity FROM stock WHERE item_id=? AND location_id=?",
++                    (D["item"], D["jaula"]))
++    q_cam = crudo("SELECT quantity FROM stock WHERE item_id=? AND location_id=?",
++                  (D["item"], D["cam"]))
++    chequear(q_jaula and q_jaula[0][0] == 93,
++             "Jaula bajo de 100 a %s en la base" % (q_jaula[0][0] if q_jaula else "?"))
++    chequear(q_cam and q_cam[0][0] == 7,
++             "Camioneta subio a %s en la base" % (q_cam[0][0] if q_cam else "?"))
++
++    print("\n=== 3. ¿Sobrevive a reiniciar la aplicacion? ===")
++    # Se levanta un proceso NUEVO contra el mismo archivo. Si los datos vivieran
++    # en memoria o en el HTML, aca desaparecerian.
++    codigo = (
++        "import os,sys;"
++        "os.environ.update(STOCKS_DB_PATH=%r,STOCKS_BACKUP_DIR=%r,STOCKS_LOG_DIR=%r,"
++        "FLASK_SECRET_KEY='x',RATELIMIT_ENABLED='false');"
++        "sys.path.insert(0,%r);"
++        "import app as B;"
++        "ctx=B.app.app_context();ctx.push();"
++        "print(B.Movement.query.count(), "
++        "B.Stock.query.filter_by(item_id=%d,location_id=%d).first().quantity)"
++        % (DB, os.path.join(_T, "b"), os.path.join(_T, "l"), RAIZ,
++           D["item"], D["cam"])
++    )
++    out = subprocess.run([sys.executable, "-c", codigo], capture_output=True, text=True)
++    linea = [l for l in out.stdout.strip().split("\n") if l and l[0].isdigit()]
++    chequear(bool(linea) and linea[-1].split() == ["1", "7"],
++             "proceso nuevo lee 1 movimiento y 7 unidades en la camioneta -> %s"
++             % (linea[-1] if linea else out.stderr[-200:]))
++
++    print("\n=== 4. ¿El servidor confia en lo que manda el cliente? ===")
++    # Se manda una cantidad mayor a la que hay: si el tope viviera solo en el
++    # atributo max del HTML, el backend lo aceptaria.
++    antes = crudo("SELECT quantity FROM stock WHERE item_id=? AND location_id=?",
++                  (D["item"], D["jaula"]))[0][0]
++    c.post("/movements", data={
++        "item_id": str(D["item"]),
++        "from_location_id": str(D["jaula"]),
++        "to_location_id": str(D["cam"]),
++        "qty": "99999",
++    }, follow_redirects=True)
++    despues = crudo("SELECT quantity FROM stock WHERE item_id=? AND location_id=?",
++                    (D["item"], D["jaula"]))[0][0]
++    chequear(despues == antes,
++             "un POST con qty=99999 NO movio stock (quedo en %s)" % despues)
++    chequear(despues >= 0, "el stock nunca quedo negativo")
++
++    print("\n=== 5. ¿Que guarda la cookie de sesion? ===")
++    # La cookie de Flask va FIRMADA, no cifrada: cualquiera con la cookie puede
++    # leer su contenido (no modificarlo). Por eso importa saber que lleva.
++    ck = c.get_cookie("session")
++    cookie = ck.value if ck else None
++
++    if not cookie:
++        chequear(False, "no se pudo leer la cookie de sesion")
++    else:
++        import zlib
++        from itsdangerous import base64_decode
++
++        # Formato de Flask: [.]<payload>.<timestamp>.<firma>. El punto inicial
++        # marca que el payload viene comprimido con zlib. Hay que sacarlo ANTES
++        # de partir por puntos: si no, el primer elemento queda vacio.
++        comprimida = cookie.startswith(".")
++        payload = (cookie[1:] if comprimida else cookie).split(".")[0]
++        try:
++            datos = base64_decode(payload)
++            if comprimida:
++                datos = zlib.decompress(datos)
++            claro = datos.decode("utf-8", "replace")
++        except Exception as e:
++            claro = ""
++            chequear(False, "no se pudo decodificar la cookie: %s" % e)
++
++        # Guarda contra un falso verde: si la decodificacion fallara y quedara
++        # vacia, los chequeos de abajo pasarian por no encontrar nada.
++        chequear(len(claro) > 10,
++                 "la cookie se decodifico y tiene contenido (%d bytes)" % len(claro))
++        print("      contenido en claro: %s" % claro[:220])
++
++        try:
++            campos = sorted(json.loads(claro).keys())
++            print("      campos: %s" % campos)
++        except Exception:
++            campos = None
++
++        for prohibido in ["CAB-001", "Cable", "quantity", "password", "password_hash",
++                          "stock", "qty"]:
++            chequear(prohibido not in claro,
++                     "la cookie NO lleva '%s'" % prohibido)
++
++        if campos is not None:
++            PERMITIDOS = {"_user_id", "_id", "_fresh", "csrf_token", "alerts_seen",
++                          "_permanent"}
++            de_mas = [c_ for c_ in campos if c_ not in PERMITIDOS]
++            chequear(not de_mas,
++                     "la cookie solo lleva identidad y CSRF %s"
++                     % (de_mas or "(sin campos de mas)"))
++
++    print("\n=== 6. ¿El JavaScript guarda datos del negocio en el navegador? ===")
++    # No se prohibe el almacenamiento del navegador: se prohibe guardar AHI datos
++    # del negocio. Una preferencia de interfaz (barra plegada, tema) es correcta
++    # y perderla no cuesta nada. Un item, una cantidad o un id de usuario, no.
++    import glob
++    claves = []
++    apis = []
++    for f in sorted(glob.glob(os.path.join(RAIZ, "static", "js", "*.js"))):
++        txt = open(f, encoding="utf-8").read()
++        for api in ("localStorage", "sessionStorage", "indexedDB", "document.cookie"):
++            if api in txt:
++                apis.append("%s -> %s" % (os.path.basename(f), api))
++        for m in re.finditer(r"(?:local|session)Storage\.(?:set|get)Item\(\s*['\"]([^'\"]+)", txt):
++            claves.append((os.path.basename(f), m.group(1)))
++
++    chequear("indexedDB" not in " ".join(apis), "no se usa indexedDB")
++    chequear("document.cookie" not in " ".join(apis),
++             "el JS no escribe cookies a mano")
++
++    if claves:
++        print("      claves guardadas en el navegador:")
++        for f, k in sorted(set(claves)):
++            print("        %-22s %s" % (f, k))
++
++    # Preferencias de interfaz aceptadas: perderlas no cuesta nada y no son datos.
++    PREFERENCIAS_OK = {"sidebarcollapsed", "theme", "tema", "densidad"}
++    SOSPECHOSAS = ("item", "stock", "user", "usuario", "qty", "cantidad", "token",
++                   "sesion", "session", "remito", "movimiento", "pass", "rol", "role")
++
++    malas = []
++    for f, k in set(claves):
++        # Se saca el prefijo de la app antes de mirar: si no, "tngstocks." hace
++        # que CUALQUIER clave parezca contener "stock".
++        corta = k.split(".", 1)[-1] if "." in k else k
++        if corta.lower() in PREFERENCIAS_OK:
++            continue
++        if any(p in corta.lower() for p in SOSPECHOSAS):
++            malas.append((f, k))
++
++    chequear(not malas,
++             "ninguna clave guarda datos del negocio %s"
++             % (malas or "(las que hay son preferencias de interfaz)"))
++
++    print("\n=== 7. ¿El HTML expone algo que no deba? ===")
++    html = c.get("/movements").get_data(as_text=True)
++    isla = re.search(r'<script type="application/json" id="[\w-]+-datos">\s*(.*?)\s*</script>',
++                     html, re.S)
++    datos = json.loads(isla.group(1)) if isla else {}
++    print("      claves de la isla de datos: %s" % sorted(datos.keys()))
++    for clave in datos:
++        chequear("password" not in clave.lower() and "secret" not in clave.lower()
++                 and "token" not in clave.lower(),
++                 "la clave '%s' no parece sensible" % clave)
++    con = sqlite3.connect(DB)
++    hashes = [r[0] for r in con.execute("SELECT password_hash FROM users")]
++    con.close()
++    chequear(not any(h and h in html for h in hashes),
++             "ningun hash de contrasena aparece en el HTML")
++
++    print()
++    if FALLAS:
++        print("RESULTADO: %d FALLAS" % len(FALLAS))
++        sys.exit(1)
++    print("RESULTADO: todo OK — la data vive en la base, el HTML es solo la vista")
++
++
++if __name__ == "__main__":
++    print("=== Verificacion de persistencia y exposicion ===\n")
++    main()

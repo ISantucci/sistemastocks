@@ -1,0 +1,1929 @@
+From 36f7dd84e2d886636bbc7bbe8aa667eee0030d51 Mon Sep 17 00:00:00 2001
+From: c <a@b>
+Date: Tue, 18 Aug 2026 13:41:03 +0000
+Subject: [PATCH 5/7] Fase 5 (paso 1): extraer modelos.py, migraciones.py,
+ extensiones.py y rutas_datos.py
+
+---
+ _fase5_extraer.py | 128 +++++++
+ app.py            | 834 ++--------------------------------------------
+ extensiones.py    |   9 +
+ migraciones.py    | 256 ++++++++++++++
+ modelos.py        | 595 +++++++++++++++++++++++++++++++++
+ rutas_datos.py    |  21 ++
+ 6 files changed, 1037 insertions(+), 806 deletions(-)
+ create mode 100644 _fase5_extraer.py
+ create mode 100644 extensiones.py
+ create mode 100644 migraciones.py
+ create mode 100644 modelos.py
+ create mode 100644 rutas_datos.py
+
+diff --git a/_fase5_extraer.py b/_fase5_extraer.py
+new file mode 100644
+index 0000000..e4264d0
+--- /dev/null
++++ b/_fase5_extraer.py
+@@ -0,0 +1,128 @@
++"""Fase 5 (paso 1) — sacar de app.py lo que no depende del resto.
++
++Criterio: SOLO mover codigo. Ni una linea de logica cambia. Son dos bloques que
++no tienen acoplamiento real con los handlers:
++
++  - migraciones.py : ensure_sqlite_schema(), 235 lineas de sqlite3 puro.
++  - modelos.py     : las 21 clases del ORM + sus helpers.
++
++Lo que NO se hace acá es partir las rutas en blueprints. Motivo concreto: un
++blueprint renombra los endpoints ('metricas' pasa a ser 'metricas.metricas'),
++asi que habria que tocar todos los url_for() de los 47 templates y de la suite
++en el mismo commit. Es un diff enorme, dificil de revisar y de revertir, y su
++beneficio es de mantenibilidad interna, no de la operacion. Va aparte y despues
++de que estas fases esten estables.
++"""
++import re
++
++src = open("app.py", encoding="utf-8").read()
++lineas = src.split("\n")
++
++
++def indice(pred, desde=0):
++    for i in range(desde, len(lineas)):
++        if pred(lineas[i]):
++            return i
++    raise AssertionError("no encontrado")
++
++
++# ------------------------------------------------------------- migraciones
++ini_mig = indice(lambda l: l.startswith("# ------------------ MIGRACIONES SQLITE"))
++fin_mig = indice(lambda l: l.startswith("# ------------------ HELPERS: OPERACIONES DESTRUCTIVAS"))
++bloque_mig = "\n".join(lineas[ini_mig:fin_mig]).strip()
++
++# ------------------------------------------------------------------ modelos
++ini_mod = indice(lambda l: l.startswith("# ------------------ MODELOS"))
++fin_mod = indice(lambda l: l.startswith("# ------------------ LOGIN MANAGER"))
++bloque_mod = "\n".join(lineas[ini_mod:fin_mod]).strip()
++
++# Se saca de abajo hacia arriba para no correr los indices.
++nuevas = lineas[:ini_mod] + [
++    "# ------------------ MODELOS ------------------",
++    "# Las 21 clases del ORM viven en modelos.py desde la Fase 5. Se importan con",
++    "# * a proposito: asi `app.Item`, `app.Stock`, etc. siguen resolviendo igual",
++    "# que cuando estaban escritas aca, y ni la suite ni serve.py se enteran.",
++    "from modelos import *  # noqa: F401,F403",
++    "from modelos import (  # noqa: F401  (explicito para los linters)",
++    "    Location, User, Supplier, LocationResponsible, Category, Item,",
++    "    ItemSupplier, ItemUnit, Stock, Movement, PendingDelivery, Remito,",
++    "    RemitoLine, Scrap, Repair, PurchaseRequest, PurchaseRequestLine,",
++    "    PurchaseRequestRecipient, RepairRequest, RepairRequestLine,",
++    "    UNIT_EN_STOCK, UNIT_ENTREGADO, UNIT_DESCARTADO,",
++    "    item_supplier_names, apply_item_suppliers,",
++    ")",
++    "",
++    "",
++] + lineas[fin_mod:]
++
++# recalcular los limites de migraciones sobre la lista nueva
++lineas = nuevas
++ini_mig = indice(lambda l: l.startswith("# ------------------ MIGRACIONES SQLITE"))
++fin_mig = indice(lambda l: l.startswith("# ------------------ HELPERS: OPERACIONES DESTRUCTIVAS"))
++
++lineas = lineas[:ini_mig] + [
++    "# ------------------ MIGRACIONES SQLITE (best-effort) ------------------",
++    "# El migrador vive en migraciones.py desde la Fase 5. Se re-exporta con el",
++    "# mismo nombre porque serve.py y el bloque __main__ lo importan de app.",
++    "from migraciones import ensure_sqlite_schema  # noqa: F401",
++    "",
++    "",
++] + lineas[fin_mig:]
++
++open("app.py", "w", encoding="utf-8").write("\n".join(lineas))
++
++# ------------------------------------------------------------ modelos.py
++cab_mod = '''"""Modelos del dominio (ORM).
++
++Extraido de app.py en la Fase 5 SIN cambiar una linea de logica: es el mismo
++codigo, movido. app.py lo reimporta con `from modelos import *`, asi que todo lo
++que antes se accedia como `app.Item` sigue funcionando igual.
++
++Por que se separo primero esto y no las rutas: los modelos no dependen de nada
++del resto del sistema (solo de `db` y de utilidades de fecha/hash), asi que
++moverlos no puede romper un handler. Las rutas, en cambio, arrastran los
++endpoints de url_for(), que es otra conversacion.
++"""
++from datetime import datetime, timezone, timedelta
++
++from werkzeug.security import generate_password_hash, check_password_hash
++
++from extensiones import db
++
++
++# Hora local Argentina (UTC-3, sin horario de verano). Offset fijo para no
++# depender de la zona horaria del sistema/contenedor ni de librerias externas.
++AR_TZ = timezone(timedelta(hours=-3))
++
++
++def now_ar():
++    """Fecha/hora actual en hora argentina, naive (para guardar y mostrar)."""
++    return datetime.now(AR_TZ).replace(tzinfo=None)
++
++
++'''
++open("modelos.py", "w", encoding="utf-8").write(cab_mod + bloque_mod + "\n")
++
++# --------------------------------------------------------- migraciones.py
++cab_mig = '''"""Migraciones de esquema para SQLite (best-effort).
++
++Extraido de app.py en la Fase 5 SIN cambiar una linea: es el mismo codigo.
++Se movio primero porque no depende de nada del sistema salvo la ruta del .db:
++abre sqlite3 directo, mira sqlite_master y agrega columnas faltantes.
++
++OJO: sigue siendo solo ADITIVO (no renombra, no cambia tipos, no toca
++constraints) y no versiona el esquema. Migrar esto a una herramienta real
++(Alembic / Flask-Migrate) es una tarea aparte, con su propio riesgo, y esta
++anotada en el vault.
++"""
++import sqlite3
++
++from rutas_datos import DB_PATH
++
++
++'''
++open("migraciones.py", "w", encoding="utf-8").write(cab_mig + bloque_mig + "\n")
++
++print("app.py:", len(open("app.py", encoding="utf-8").read().split("\n")), "lineas")
++print("modelos.py:", len(open("modelos.py", encoding="utf-8").read().split("\n")), "lineas")
++print("migraciones.py:", len(open("migraciones.py", encoding="utf-8").read().split("\n")), "lineas")
+diff --git a/app.py b/app.py
+index bede4b0..af8f2f3 100644
+--- a/app.py
++++ b/app.py
+@@ -56,20 +56,16 @@ else:
+         "Usando key efimera (las sesiones se invalidan en cada reinicio)."
+     )
+ 
+-BASE_DIR = Path(__file__).resolve().parent
+-
+-DB_PATH = Path(os.environ.get("STOCKS_DB_PATH", str(BASE_DIR / "data/stocks.db"))).resolve()
+-BACKUP_DIR = Path(os.environ.get("STOCKS_BACKUP_DIR", str(BASE_DIR / "backups"))).resolve()
+-LOG_DIR = Path(os.environ.get("STOCKS_LOG_DIR", str(BASE_DIR / "logs"))).resolve()
+-
+-DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+-BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+-LOG_DIR.mkdir(parents=True, exist_ok=True)
++# Rutas de datos y extensiones: viven en modulos propios desde la Fase 5, para
++# que modelos.py y migraciones.py puedan usarlas sin importar app.py (que seria
++# circular). Se re-exportan aca con el mismo nombre de siempre.
++from rutas_datos import BASE_DIR, DB_PATH, BACKUP_DIR, LOG_DIR  # noqa: E402
++from extensiones import db  # noqa: E402
+ 
+ app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{DB_PATH.as_posix()}"
+ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+ 
+-db = SQLAlchemy(app)
++db.init_app(app)
+ 
+ # ------------------ CSRF (Flask-WTF) ------------------
+ # Proteccion CSRF global para todos los POST. Los GET/HEAD/OPTIONS quedan
+@@ -683,572 +679,18 @@ def username_taken(username, exclude_id=None) -> bool:
+ 
+ 
+ # ------------------ MODELOS ------------------
+-
+-class Location(db.Model):
+-    __tablename__ = "locations"
+-    id = db.Column(db.Integer, primary_key=True)
+-    name = db.Column(db.String(100), unique=True, nullable=False)
+-    description = db.Column(db.String(255), nullable=True)
+-
+-    # Si querés, podés marcar externas (Proveedor / Baja)
+-    is_external = db.Column(db.Boolean, default=False, nullable=False)
+-    is_truck = db.Column(db.Boolean, default=False, nullable=False)
+-
+-
+-class User(db.Model):
+-    __tablename__ = "users"
+-    id = db.Column(db.Integer, primary_key=True)
+-
+-    username = db.Column(db.String(80), unique=True, nullable=False)
+-    full_name = db.Column(db.String(120), nullable=False, default="")
+-    password_hash = db.Column(db.String(255), nullable=False)
+-
+-    role = db.Column(db.String(20), nullable=False)  # ADMIN/SUPERVISOR/TECNICO/LECTOR
+-
+-    # Email de contacto (aditivo, opcional). Se usa como destinatario de las
+-    # solicitudes de compra (ver PurchaseRequestRecipient).
+-    email = db.Column(db.String(255), nullable=True)
+-
+-    # Flask-Login interface
+-    @property
+-    def is_authenticated(self):  # Flask-Login lo maneja, pero OK
+-        return True
+-
+-    @property
+-    def is_active(self):
+-        return True
+-
+-    @property
+-    def is_anonymous(self):
+-        return False
+-
+-    def get_id(self):
+-        return str(self.id)
+-
+-    def set_password(self, raw_password: str):
+-        self.password_hash = generate_password_hash(raw_password)
+-
+-    def check_password(self, raw_password: str) -> bool:
+-        return check_password_hash(self.password_hash, raw_password)
+-
+-
+-class Supplier(db.Model):
+-    """Carta de proveedor. Entidad propia (separada de usuarios) para no ensuciar
+-    la tabla de usuarios. Se usa en la seccion Ingresos/Egresos.
+-    """
+-    __tablename__ = "suppliers"
+-    id = db.Column(db.Integer, primary_key=True)
+-
+-    contact_name = db.Column(db.String(120), nullable=False)          # Nombre (contacto)
+-    business_name = db.Column(db.String(160), nullable=True)          # Comercio / nombre de fantasia
+-    cuit = db.Column(db.String(20), nullable=True)                    # CUIT
+-    legal_name = db.Column(db.String(160), nullable=True)            # Razon social
+-    email = db.Column(db.String(255), nullable=True)
+-    phone = db.Column(db.String(40), nullable=True)
+-
+-    is_active = db.Column(db.Boolean, default=True, nullable=False)   # baja logica
+-    created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
+-
+-
+-class LocationResponsible(db.Model):
+-    __tablename__ = "location_responsibles"
+-    id = db.Column(db.Integer, primary_key=True)
+-    location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), nullable=False)
+-    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+-
+-    location = db.relationship("Location", backref="responsibles")
+-    user = db.relationship("User")
+-
+-    __table_args__ = (db.UniqueConstraint("location_id", "user_id", name="uq_loc_user"),)
+-
+-
+-class Category(db.Model):
+-    __tablename__ = "categories"
+-    id = db.Column(db.Integer, primary_key=True)
+-    name = db.Column(db.String(120), unique=True, nullable=False)
+-    description = db.Column(db.String(255), nullable=True)
+-    # Prefijo de código de items de esta categoría (3 letras, ej. "CAB").
+-    prefix = db.Column(db.String(8), nullable=True)
+-
+-
+-class Item(db.Model):
+-    __tablename__ = "items"
+-    id = db.Column(db.Integer, primary_key=True)
+-
+-    code = db.Column(db.String(50), unique=True, nullable=False)  # ELT-012
+-    name = db.Column(db.String(200), nullable=False)
+-    description = db.Column(db.String(255), nullable=True)
+-
+-    category_id = db.Column(db.Integer, db.ForeignKey("categories.id"), nullable=False)
+-    category = db.relationship("Category", backref="items")
+-
+-    trackable = db.Column(db.Boolean, default=False, nullable=False)
+-
+-    # Stock de seguridad (mínimo). Aplica solo a NO rastreables.
+-    # Para rastreables no tiene sentido (máx 1 por ubicación), así que se ignora.
+-    stock_min = db.Column(db.Integer, default=0, nullable=False)
+-
+-    # Baja lógica (no borramos historial / stock). Si is_active=False no aparece
+-    # en formularios, pero se mantiene en listados e históricos.
+-    is_active = db.Column(db.Boolean, default=True, nullable=False)
+-
+-    # Link de referencia de compra (opcional). Ver ensure_sqlite_schema para la
+-    # migración idempotente sobre bases existentes.
+-    reference_link = db.Column(db.String(500), nullable=True)
+-
+-    # Forma de contabilización de la cantidad: 'unidad' (default, comportamiento
+-    # histórico) o 'metros'. Solo afecta cómo se muestra/rotula la cantidad; no
+-    # cambia la lógica de stock (sigue siendo un entero).
+-    unit = db.Column(db.String(16), default="unidad", nullable=False)
+-
+-    # Ítem serializado: además del stock por cantidad (comportamiento histórico),
+-    # se llevan unidades individuales con número de serie en la tabla item_units.
+-    # Es OPT-IN e independiente de 'trackable'. Un ítem NO serializado se comporta
+-    # exactamente igual que antes (esta columna queda en 0/False).
+-    serialized = db.Column(db.Boolean, default=False, nullable=False)
+-
+-
+-class ItemSupplier(db.Model):
+-    """Proveedores asociados a un ítem (relación N a N).
+-
+-    Aditivo y sin efecto sobre stock, movimientos ni historial: es únicamente
+-    catálogo, pensado para poder automatizar más adelante las solicitudes de
+-    compra (agrupar los ítems pedidos por proveedor).
+-
+-    'is_preferred' queda disponible desde ahora para marcar el proveedor por
+-    defecto de un ítem. Todavía no lo consume ninguna lógica: se guarda y se
+-    muestra, nada más. Así, cuando se implemente el envío de solicitudes, no
+-    hace falta otra migración.
+-    """
+-    __tablename__ = "item_suppliers"
+-    id = db.Column(db.Integer, primary_key=True)
+-    item_id = db.Column(db.Integer, db.ForeignKey("items.id"), nullable=False)
+-    supplier_id = db.Column(db.Integer, db.ForeignKey("suppliers.id"), nullable=False)
+-    is_preferred = db.Column(db.Boolean, default=False, nullable=False)
+-    created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
+-
+-    item = db.relationship(
+-        "Item",
+-        backref=db.backref("supplier_links", cascade="all, delete-orphan"),
+-    )
+-    supplier = db.relationship("Supplier")
+-
+-    __table_args__ = (
+-        db.UniqueConstraint("item_id", "supplier_id", name="uq_item_supplier"),
+-    )
+-
+-
+-def item_supplier_names(it) -> str:
+-    """Proveedores de un ítem como texto, con el preferido primero y marcado.
+-
+-    Se usa en el listado y en el export. Si el ítem no tiene proveedores
+-    devuelve cadena vacía (comportamiento de todos los ítems ya cargados).
+-    """
+-    links = sorted(
+-        it.supplier_links or [],
+-        key=lambda l: (not l.is_preferred, (l.supplier.contact_name or "").lower()),
+-    )
+-    out = []
+-    for l in links:
+-        if not l.supplier:
+-            continue
+-        label = l.supplier.business_name or l.supplier.contact_name
+-        out.append(f"{label} ★" if l.is_preferred else label)
+-    return ", ".join(out)
+-
+-
+-def apply_item_suppliers(item, form):
+-    """Sincroniza los proveedores de un ítem con lo enviado en el formulario.
+-
+-    Espera 'supplier_ids' (multiple) y opcionalmente 'preferred_supplier_id'.
+-    NO hace commit: lo deja para el caller, que ya maneja su propia transacción.
+-
+-    Importante: el formulario tiene que declarar 'manages_suppliers=1'. Si no
+-    viene, se asume que esa pantalla no gestiona proveedores y NO se toca nada.
+-    Hace falta un marcador aparte porque un <select multiple> sin nada elegido
+-    directamente NO envía la clave: sin esto, vaciar la lista sería
+-    indistinguible de un formulario que no maneja proveedores, y no se podrían
+-    quitar todos.
+-    """
+-    if form.get("manages_suppliers") != "1":
+-        return
+-
+-    raw = [v for v in form.getlist("supplier_ids") if v.strip().isdigit()]
+-    wanted = {int(v) for v in raw}
+-
+-    # Solo proveedores existentes. Los inactivos se conservan si ya estaban
+-    # vinculados (no rompemos historial), pero no se pueden agregar nuevos.
+-    existing_ids = {l.supplier_id for l in (item.supplier_links or [])}
+-    valid = {
+-        s.id for s in Supplier.query.filter(Supplier.id.in_(wanted)).all()
+-        if s.is_active or s.id in existing_ids
+-    } if wanted else set()
+-
+-    pref_raw = (form.get("preferred_supplier_id") or "").strip()
+-    pref_id = int(pref_raw) if pref_raw.isdigit() and int(pref_raw) in valid else None
+-
+-    # Quitar los que ya no están.
+-    for link in list(item.supplier_links or []):
+-        if link.supplier_id not in valid:
+-            db.session.delete(link)
+-        else:
+-            link.is_preferred = (link.supplier_id == pref_id)
+-
+-    # Agregar los nuevos.
+-    for sid in valid - existing_ids:
+-        db.session.add(ItemSupplier(
+-            item_id=item.id,
+-            supplier_id=sid,
+-            is_preferred=(sid == pref_id),
+-        ))
+-
+-
+-# Estados de una unidad serializada.
+-UNIT_EN_STOCK = "EN_STOCK"      # presente en una ubicación interna
+-UNIT_ENTREGADO = "ENTREGADO"    # salió del sistema (entregado / externo)
+-UNIT_DESCARTADO = "DESCARTADO"  # fue a Descartes
+-
+-
+-class ItemUnit(db.Model):
+-    """Unidad física individual de un ítem serializado (un serial = una fila).
+-
+-    Convive con Stock (cantidad agregada): la disponibilidad se sigue leyendo del
+-    stock por cantidad. Estas filas agregan trazabilidad por serial, sin cambiar
+-    la lógica de stock existente para ítems no serializados.
+-    """
+-    __tablename__ = "item_units"
+-    id = db.Column(db.Integer, primary_key=True)
+-
+-    item_id = db.Column(db.Integer, db.ForeignKey("items.id"), nullable=False, index=True)
+-    serial = db.Column(db.String(120), nullable=False)
+-
+-    status = db.Column(db.String(16), nullable=False, default=UNIT_EN_STOCK)
+-    # Ubicación actual (solo si status = EN_STOCK). NULL cuando salió del sistema.
+-    location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), nullable=True)
+-
+-    notes = db.Column(db.String(255), nullable=True)
+-    created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
+-
+-    item = db.relationship("Item", backref="units")
+-    location = db.relationship("Location")
+-
+-    # El serial es único dentro de un mismo ítem (no global: dos modelos distintos
+-    # podrían, en teoría, compartir formato de serie).
+-    __table_args__ = (db.UniqueConstraint("item_id", "serial", name="uq_unit_item_serial"),)
+-
+-
+-class Stock(db.Model):
+-    __tablename__ = "stock"
+-    id = db.Column(db.Integer, primary_key=True)
+-
+-    item_id = db.Column(db.Integer, db.ForeignKey("items.id"), nullable=False)
+-    location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), nullable=False)
+-    quantity = db.Column(db.Integer, default=0, nullable=False)
+-
+-    item = db.relationship("Item")
+-    location = db.relationship("Location")
+-
+-    __table_args__ = (db.UniqueConstraint("item_id", "location_id", name="uq_stock_item_location"),)
+-
+-
+-class Movement(db.Model):
+-    __tablename__ = "movements"
+-    id = db.Column(db.Integer, primary_key=True)
+-    created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
+-
+-    item_id = db.Column(db.Integer, db.ForeignKey("items.id"), nullable=False)
+-    qty = db.Column(db.Integer, nullable=False)
+-
+-    # AHORA: OBLIGATORIOS, como pediste
+-    from_location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), nullable=False)
+-    to_location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), nullable=False)
+-
+-    # Responsable obligatorio: usuario logueado
+-    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+-
+-    observation = db.Column(db.String(255), nullable=True)
+-
+-    year = db.Column(db.Integer, nullable=True)
+-    seq = db.Column(db.Integer, nullable=True)
+-    number = db.Column(db.String(32), unique=True, nullable=True)
+-
+-    # Proveedor asociado (solo en movimientos generados por Ingresos/Egresos).
+-    # NULL en los movimientos internos normales (jaula/camionetas). Sirve para
+-    # separarlos del listado de Movimientos sin tocar el historico.
+-    supplier_id = db.Column(db.Integer, db.ForeignKey("suppliers.id"), nullable=True)
+-
+-    item = db.relationship("Item")
+-    supplier = db.relationship("Supplier")
+-    from_location = db.relationship("Location", foreign_keys=[from_location_id])
+-    to_location = db.relationship("Location", foreign_keys=[to_location_id])
+-    user = db.relationship("User")
+-
+-class PendingDelivery(db.Model):
+-    __tablename__ = "pending_deliveries"
+-
+-    id = db.Column(db.Integer, primary_key=True)
+-    created_at = db.Column(db.DateTime, default=now_ar)
+-
+-    movement_id = db.Column(db.Integer, db.ForeignKey("movements.id"), nullable=False)
+-
+-    responsible_from_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+-    responsible_to_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+-
+-    item_id = db.Column(db.Integer, db.ForeignKey("items.id"), nullable=False)
+-
+-    # Devolucion esperada (aditivo). Si son NULL se comportan como antes:
+-    #   return_item_id NULL -> vuelve el mismo item entregado (item_id)
+-    #   return_qty     NULL -> vuelve la misma cantidad del movimiento
+-    # Permite: (a) que vuelva OTRO item (ej. entregas domo, deben traer Onvif)
+-    # y (b) devolucion parcial (entregas 2, deben traer 1).
+-    return_item_id = db.Column(db.Integer, db.ForeignKey("items.id"), nullable=True)
+-    return_qty = db.Column(db.Integer, nullable=True)
+-
+-    comment = db.Column(db.Text)
+-    returned = db.Column(db.Boolean, default=False, nullable=False)
+-
+-    movement = db.relationship("Movement")
+-    responsible_from = db.relationship("User", foreign_keys=[responsible_from_id])
+-    responsible_to = db.relationship("User", foreign_keys=[responsible_to_id])
+-    item = db.relationship("Item", foreign_keys=[item_id])
+-    return_item = db.relationship("Item", foreign_keys=[return_item_id])
+-
+-# ------------------ REMITOS ------------------
+-
+-class Remito(db.Model):
+-    __tablename__ = "remitos"
+-    id = db.Column(db.Integer, primary_key=True)
+-    created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
+-
+-    # Numeración simple por año (R-YYYY-0001)
+-    year = db.Column(db.Integer, nullable=False)
+-    seq = db.Column(db.Integer, nullable=False)
+-
+-    number = db.Column(db.String(32), unique=True, nullable=False)
+-
+-    status = db.Column(db.String(16), nullable=False, default="BORRADOR")  # BORRADOR / CONFIRMADO
+-
+-    # Pendiente de impresion. Solo lo activan los remitos auto-generados por
+-    # Ingresos/Egresos, para el badge de "no te olvides de imprimir". Los remitos
+-    # normales quedan en False (default), asi no disparan alerta.
+-    print_pending = db.Column(db.Boolean, default=False, nullable=False)
+-
+-    from_location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), nullable=False)
+-    to_location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), nullable=False)
+-
+-    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+-
+-    observation = db.Column(db.String(255), nullable=True)
+-
+-    # Responsables elegidos al crear el remito (a cargo de cada ubicación).
+-    # Nullable: si el origen/destino es externo (proveedor) queda vacío para
+-    # completar a mano después de imprimir.
+-    responsible_from_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+-    responsible_to_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+-
+-    from_location = db.relationship("Location", foreign_keys=[from_location_id])
+-    to_location = db.relationship("Location", foreign_keys=[to_location_id])
+-    created_by = db.relationship("User", foreign_keys=[created_by_user_id])
+-    responsible_from = db.relationship("User", foreign_keys=[responsible_from_id])
+-    responsible_to = db.relationship("User", foreign_keys=[responsible_to_id])
+-
+-    __table_args__ = (
+-        db.UniqueConstraint("year", "seq", name="uq_remito_year_seq"),
+-    )
+-
+-
+-class RemitoLine(db.Model):
+-    __tablename__ = "remito_lines"
+-    id = db.Column(db.Integer, primary_key=True)
+-    remito_id = db.Column(db.Integer, db.ForeignKey("remitos.id"), nullable=False)
+-    movement_id = db.Column(db.Integer, db.ForeignKey("movements.id"), nullable=False, unique=True)
+-
+-    remito = db.relationship("Remito", backref=db.backref("lines", cascade="all, delete-orphan"))
+-    movement = db.relationship("Movement")
+-
+-class Scrap(db.Model):
+-    __tablename__ = "scrap"
+-    id = db.Column(db.Integer, primary_key=True)
+-    created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
+-
+-    item_id = db.Column(db.Integer, db.ForeignKey("items.id"), nullable=False)
+-    location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), nullable=False)
+-    quantity = db.Column(db.Integer, nullable=False)
+-    reason = db.Column(db.String(255), nullable=True)
+-    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+-
+-    item = db.relationship("Item")
+-    location = db.relationship("Location")
+-    user = db.relationship("User")
+-
+-
+-class Repair(db.Model):
+-    """Registro de reparaciones. Aditivo: no altera tablas existentes.
+-
+-    Ciclo: un item vuelve de un pendiente y en vez de ir directo a Descartes
+-    se manda a reparacion (EN_REPARACION). Desde /reparaciones se resuelve:
+-      - REPARADO  -> vuelve a stock (Jaula TNG)
+-      - DESCARTADO -> va a Descartes y se genera un Scrap (con motivo)
+-    Permite reportar cuantas se reparan/descartan por mes.
+-    """
+-    __tablename__ = "repairs"
+-    id = db.Column(db.Integer, primary_key=True)
+-    created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
+-
+-    item_id = db.Column(db.Integer, db.ForeignKey("items.id"), nullable=False)
+-    quantity = db.Column(db.Integer, nullable=False, default=1)
+-
+-    # EN_REPARACION -> REPARADO / DESCARTADO
+-    status = db.Column(db.String(16), nullable=False, default="EN_REPARACION")
+-
+-    resolved_at = db.Column(db.DateTime, nullable=True)
+-    result_reason = db.Column(db.String(255), nullable=True)  # motivo si se descarta
+-
+-    # Trazabilidad de origen (opcional, no rompe si es NULL)
+-    pending_id = db.Column(db.Integer, db.ForeignKey("pending_deliveries.id"), nullable=True)
+-    source_location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), nullable=True)
+-
+-    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+-    resolved_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+-
+-    item = db.relationship("Item")
+-    created_by = db.relationship("User", foreign_keys=[created_by_user_id])
+-    resolved_by = db.relationship("User", foreign_keys=[resolved_by_user_id])
+-    source_location = db.relationship("Location", foreign_keys=[source_location_id])
+-
+-
+-class PurchaseRequest(db.Model):
+-    """Cabecera de una solicitud de compra (estilo remito).
+-
+-    Aditivo: no toca stock ni movimientos. La marca "solicitado" que se ve
+-    en Alertas de Stock se DERIVA de estas solicitudes (status REALIZADA),
+-    no se guarda un flag redundante en stock.
+-    """
+-    __tablename__ = "purchase_requests"
+-    id = db.Column(db.Integer, primary_key=True)
+-    created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
+-
+-    year = db.Column(db.Integer, nullable=False)
+-    seq = db.Column(db.Integer, nullable=False)
+-    number = db.Column(db.String(32), unique=True, nullable=False)  # SC-2026-0001
+-
+-    # PENDIENTE (recien creada) / REALIZADA (ya enviada a mano)
+-    status = db.Column(db.String(16), nullable=False, default="PENDIENTE")
+-
+-    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+-    observation = db.Column(db.String(255), nullable=True)
+-    sent_at = db.Column(db.DateTime, nullable=True)  # para el envio automatico futuro
+-
+-    created_by = db.relationship("User")
+-    lines = db.relationship(
+-        "PurchaseRequestLine",
+-        backref="request",
+-        cascade="all, delete-orphan",
+-        order_by="PurchaseRequestLine.id",
+-    )
+-    # Destinatarios seleccionados al crear la solicitud (aditivo). El mail se
+-    # resuelve en vivo desde el usuario; guardamos el vinculo para trazabilidad
+-    # de a quien se le mando.
+-    recipients = db.relationship(
+-        "PurchaseRequestRecipient",
+-        backref="request",
+-        cascade="all, delete-orphan",
+-    )
+-
+-
+-class PurchaseRequestLine(db.Model):
+-    __tablename__ = "purchase_request_lines"
+-    id = db.Column(db.Integer, primary_key=True)
+-    purchase_request_id = db.Column(
+-        db.Integer, db.ForeignKey("purchase_requests.id"), nullable=False
+-    )
+-    item_id = db.Column(db.Integer, db.ForeignKey("items.id"), nullable=False)
+-    qty = db.Column(db.Integer, nullable=False)
+-    # Preparado para futuro: especificaciones por item (aditivo, sin migracion disruptiva).
+-    spec = db.Column(db.String(255), nullable=True)
+-
+-    item = db.relationship("Item")
+-
+-
+-class PurchaseRequestRecipient(db.Model):
+-    """Destinatario de una solicitud de compra (usuario con email).
+-
+-    Aditivo: no toca stock ni la lógica existente. Reemplaza la lista de mails
+-    hardcodeada por una selección de usuarios en el momento de crear la
+-    solicitud. El email se lee del usuario vinculado, no se copia acá.
+-    """
+-    __tablename__ = "purchase_request_recipients"
+-    id = db.Column(db.Integer, primary_key=True)
+-    purchase_request_id = db.Column(
+-        db.Integer, db.ForeignKey("purchase_requests.id"), nullable=False
+-    )
+-    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+-
+-    user = db.relationship("User")
+-
+-    __table_args__ = (
+-        db.UniqueConstraint(
+-            "purchase_request_id", "user_id", name="uq_pr_recipient"
+-        ),
+-    )
+-
+-
+-class RepairRequest(db.Model):
+-    """Cabecera de una solicitud de repuestos hecha por un técnico.
+-
+-    Aditivo (mismo patrón que PurchaseRequest): tablas nuevas, no toca stock ni
+-    modelos existentes. El impacto sobre stock ocurre SOLO al cerrarla, cuando
+-    admin/supervisor generan los movimientos Jaula -> camioneta del técnico.
+-    """
+-    __tablename__ = "repair_requests"
+-    id = db.Column(db.Integer, primary_key=True)
+-    created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
+-
+-    year = db.Column(db.Integer, nullable=False)
+-    seq = db.Column(db.Integer, nullable=False)
+-    number = db.Column(db.String(32), unique=True, nullable=False)  # SR-2026-0001
+-
+-    # PENDIENTE (recién creada) / CERRADA (entregada completa) /
+-    # CERRADA_PARCIAL (se entregó ALGO pero menos de lo pedido) /
+-    # CANCELADA (el técnico dio de baja su propia solicitud) /
+-    # RECHAZADA (admin/supervisor la rechaza, no se entrega nada).
+-    # CANCELADA y RECHAZADA son estados terminales SIN efecto sobre stock,
+-    # movimientos ni pendientes: la solicitud simplemente no se ejecuta.
+-    status = db.Column(db.String(20), nullable=False, default="PENDIENTE")
+-
+-    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+-    # Camioneta destino elegida por el técnico al crear (una de sus asignadas).
+-    dest_location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), nullable=False)
+-    observation = db.Column(db.String(255), nullable=True)
+-
+-    closed_at = db.Column(db.DateTime, nullable=True)
+-    closed_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+-    # Motivo de cancelación (técnico) o rechazo (admin/supervisor). Aditivo y
+-    # nullable: el schema auto-sync lo agrega con ALTER TABLE ADD COLUMN.
+-    close_reason = db.Column(db.String(255), nullable=True)
+-
+-    created_by = db.relationship("User", foreign_keys=[created_by_user_id])
+-    closed_by = db.relationship("User", foreign_keys=[closed_by_user_id])
+-    dest_location = db.relationship("Location", foreign_keys=[dest_location_id])
+-    lines = db.relationship(
+-        "RepairRequestLine",
+-        backref="request",
+-        cascade="all, delete-orphan",
+-        order_by="RepairRequestLine.id",
+-    )
+-
+-
+-class RepairRequestLine(db.Model):
+-    __tablename__ = "repair_request_lines"
+-    id = db.Column(db.Integer, primary_key=True)
+-    repair_request_id = db.Column(
+-        db.Integer, db.ForeignKey("repair_requests.id"), nullable=False
+-    )
+-    item_id = db.Column(db.Integer, db.ForeignKey("items.id"), nullable=False)
+-    qty = db.Column(db.Integer, nullable=False)          # cantidad pedida
+-    qty_entregada = db.Column(db.Integer, nullable=False, default=0)  # entregada al cerrar
+-
+-    item = db.relationship("Item")
++# Las 21 clases del ORM viven en modelos.py desde la Fase 5. Se importan con
++# * a proposito: asi `app.Item`, `app.Stock`, etc. siguen resolviendo igual
++# que cuando estaban escritas aca, y ni la suite ni serve.py se enteran.
++from modelos import *  # noqa: F401,F403
++from modelos import (  # noqa: F401  (explicito para los linters)
++    Location, User, Supplier, LocationResponsible, Category, Item,
++    ItemSupplier, ItemUnit, Stock, Movement, PendingDelivery, Remito,
++    RemitoLine, Scrap, Repair, PurchaseRequest, PurchaseRequestLine,
++    PurchaseRequestRecipient, RepairRequest, RepairRequestLine,
++    UNIT_EN_STOCK, UNIT_ENTREGADO, UNIT_DESCARTADO,
++    item_supplier_names, apply_item_suppliers,
++)
+ 
+ 
+ # ------------------ LOGIN MANAGER ------------------
+@@ -1573,243 +1015,23 @@ def _build_movements_query(filters: dict, include_supplier: bool = False):
+ 
+ 
+ # ------------------ MIGRACIONES SQLITE (best-effort) ------------------
++# El migrador vive en migraciones.py desde la Fase 5. Se re-exporta con el
++# mismo nombre porque serve.py y el bloque __main__ lo importan de app.
++from migraciones import ensure_sqlite_schema as _ensure_sqlite_schema
+ 
+-def ensure_sqlite_schema() -> None:
+-    """Best-effort schema migration for SQLite.
+ 
+-    Objetivo: que el sistema no explote si ya existe un stocks.db viejo.
+-    - Si la DB no existe, no hace nada (create_all la crea).
+-    - Si existe, agrega columnas faltantes con ALTER TABLE.
++def ensure_sqlite_schema() -> None:
++    """Delega en migraciones.py, pasandole el DB_PATH de este modulo.
+ 
+-    Nota: SQLite no permite alterar constraints facilmente (NOT NULL, FK, etc.).
+-    Para un entorno local simple, esto alcanza.
++    Se pasa explicito y no se deja que migraciones.py lea su propio global
++    porque la suite hace monkeypatch de app.DB_PATH para correr el migrador
++    contra una base de prueba. Asi el contrato publico queda igual que antes.
+     """
+-    if not DB_PATH.exists():
+-        return
+-
+-    conn = sqlite3.connect(str(DB_PATH))
+-    try:
+-        cur = conn.cursor()
+-
+-        def table_exists(name: str) -> bool:
+-            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,))
+-            return cur.fetchone() is not None
+-
+-        def columns(table: str) -> set[str]:
+-            cur.execute(f"PRAGMA table_info({table})")
+-            return {r[1] for r in cur.fetchall()}
+-
+-        def add_column(table: str, coldef: str) -> None:
+-            cur.execute(f"ALTER TABLE {table} ADD COLUMN {coldef}")
+-
+-        # ------------------------------------------------------------------
+-        # SINCRONIZACION AUTOMATICA DE COLUMNAS (aditiva, generica).
+-        # Recorre TODOS los modelos y agrega cualquier columna que exista en el
+-        # modelo pero falte en la tabla real. No borra, no modifica, no renombra.
+-        # Asi, agregar un campo a un modelo NO requiere tocar nada mas: al
+-        # reiniciar el servicio la DB se pone al dia sola.
+-        # ------------------------------------------------------------------
+-        try:
+-            from sqlalchemy.dialects import sqlite as _sqld
+-            _dialect = _sqld.dialect()
+-
+-            def _scalar_default(col):
+-                d = col.default
+-                if d is not None and getattr(d, "is_scalar", False):
+-                    val = d.arg
+-                    if isinstance(val, bool):
+-                        return "1" if val else "0"
+-                    if isinstance(val, (int, float)):
+-                        return str(val)
+-                    if isinstance(val, str):
+-                        return "'" + val.replace("'", "''") + "'"
+-                return None
+-
+-            for _tbl in db.metadata.sorted_tables:
+-                if not table_exists(_tbl.name):
+-                    continue  # tabla nueva: la crea db.create_all()
+-                _have = columns(_tbl.name)
+-                for _col in _tbl.columns:
+-                    if _col.name in _have:
+-                        continue
+-                    try:
+-                        _type = _col.type.compile(dialect=_dialect)
+-                    except Exception:
+-                        _type = "TEXT"
+-                    _default = _scalar_default(_col)
+-                    _clause = f"{_col.name} {_type}"
+-                    if _default is not None:
+-                        if not _col.nullable:
+-                            _clause += " NOT NULL"
+-                        _clause += f" DEFAULT {_default}"
+-                    # Sin default constante -> se agrega NULLABLE para que el
+-                    # ALTER nunca falle (SQLite no permite ADD COLUMN NOT NULL
+-                    # sin default constante). El ORM sigue exigiendo el valor.
+-                    try:
+-                        add_column(_tbl.name, _clause)
+-                        print(f"[schema-sync] +columna {_tbl.name}.{_col.name}")
+-                    except Exception as _e:
+-                        print(f"[schema-sync][WARN] {_tbl.name}.{_col.name}: {_e}")
+-        except Exception as _e:
+-            print(f"[schema-sync][WARN] sync generico omitido: {_e}")
+-
+-        if table_exists("locations"):
+-            c = columns("locations")
+-            if "description" not in c:
+-                add_column("locations", "description TEXT")
+-            if "is_external" not in c:
+-                add_column("locations", "is_external INTEGER NOT NULL DEFAULT 0")
+-            if "is_truck" not in c:
+-                add_column("locations", "is_truck INTEGER NOT NULL DEFAULT 0")
+-
+-        if not table_exists("location_responsibles"):
+-            cur.execute("""
+-                CREATE TABLE location_responsibles (
+-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+-                    location_id INTEGER NOT NULL REFERENCES locations(id),
+-                    user_id INTEGER NOT NULL REFERENCES users(id),
+-                    UNIQUE(location_id, user_id)
+-                )
+-            """)
+-
+-        if table_exists("users"):
+-            c = columns("users")
+-            if "full_name" not in c:
+-                add_column("users", "full_name TEXT NOT NULL DEFAULT ''")
+-            if "role" not in c:
+-                add_column("users", "role TEXT NOT NULL DEFAULT 'LECTOR'")
+-            if "password_hash" not in c:
+-                add_column("users", "password_hash TEXT NOT NULL DEFAULT ''")
+-            if "email" not in c:
+-                add_column("users", "email TEXT")
+-
+-        if table_exists("items"):
+-            c = columns("items")
+-            if "trackable" not in c:
+-                add_column("items", "trackable INTEGER NOT NULL DEFAULT 0")
+-            if "is_active" not in c:
+-                add_column("items", "is_active INTEGER NOT NULL DEFAULT 1")
+-            if "stock_min" not in c:
+-                add_column("items", "stock_min INTEGER NOT NULL DEFAULT 0")
+-            if "reference_link" not in c:
+-                add_column("items", "reference_link TEXT")
+-            if "unit" not in c:
+-                add_column("items", "unit VARCHAR(16) NOT NULL DEFAULT 'unidad'")
+-            if "serialized" not in c:
+-                add_column("items", "serialized INTEGER NOT NULL DEFAULT 0")
+-
+-        # Unidades serializadas (aditivo). Tabla nueva: si no existe, se crea.
+-        # Los ítems existentes quedan con serialized=0 y sin unidades, o sea sin
+-        # cambios de comportamiento.
+-        if not table_exists("item_units"):
+-            cur.execute("""
+-                CREATE TABLE item_units (
+-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+-                    item_id INTEGER NOT NULL REFERENCES items(id),
+-                    serial VARCHAR(120) NOT NULL,
+-                    status VARCHAR(16) NOT NULL DEFAULT 'EN_STOCK',
+-                    location_id INTEGER REFERENCES locations(id),
+-                    notes VARCHAR(255),
+-                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+-                    UNIQUE(item_id, serial)
+-                )
+-            """)
+-
+-        # Proveedores (aditivo). Tabla nueva: si no existe, se crea.
+-        if not table_exists("suppliers"):
+-            cur.execute("""
+-                CREATE TABLE suppliers (
+-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+-                    contact_name VARCHAR(120) NOT NULL,
+-                    business_name VARCHAR(160),
+-                    cuit VARCHAR(20),
+-                    legal_name VARCHAR(160),
+-                    email VARCHAR(255),
+-                    phone VARCHAR(40),
+-                    is_active INTEGER NOT NULL DEFAULT 1,
+-                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+-                )
+-            """)
+-
+-        # Ingresos/Egresos: proveedor asociado en el movimiento (aditivo).
+-        if table_exists("movements"):
+-            c = columns("movements")
+-            if "supplier_id" not in c:
+-                add_column("movements", "supplier_id INTEGER REFERENCES suppliers(id)")
+-
+-        # Remito pendiente de impresion (aditivo).
+-        if table_exists("remitos"):
+-            c = columns("remitos")
+-            if "print_pending" not in c:
+-                add_column("remitos", "print_pending INTEGER NOT NULL DEFAULT 0")
+-
+-        # Destinatarios de solicitudes de compra (aditivo). Tabla nueva: si no
+-        # existe, se crea. Reemplaza la lista de mails hardcodeada.
+-        if not table_exists("purchase_request_recipients"):
+-            cur.execute("""
+-                CREATE TABLE purchase_request_recipients (
+-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+-                    purchase_request_id INTEGER NOT NULL REFERENCES purchase_requests(id),
+-                    user_id INTEGER NOT NULL REFERENCES users(id),
+-                    UNIQUE(purchase_request_id, user_id)
+-                )
+-            """)
+-
+-        if table_exists("categories"):
+-            c = columns("categories")
+-            if "prefix" not in c:
+-                add_column("categories", "prefix VARCHAR(8)")
+-            # Backfill de las 12 categorías conocidas: solo donde el prefijo
+-            # esté vacío. No pisa prefijos ya cargados a mano.
+-            cur.execute("SELECT id, name, prefix FROM categories")
+-            for cid, cname, cpref in cur.fetchall():
+-                if not (cpref or "").strip():
+-                    p = CATEGORY_PREFIXES.get(normalize_text(cname))
+-                    if p:
+-                        cur.execute("UPDATE categories SET prefix=? WHERE id=?", (p, cid))
+-
+-        if table_exists("movements"):
+-            c = columns("movements")
+-            if "user_id" not in c:
+-                add_column("movements", "user_id INTEGER")
+-            if "observation" not in c:
+-                add_column("movements", "observation TEXT")
+-            if "year" not in c:
+-                add_column("movements", "year INTEGER")
+-            if "seq" not in c:
+-                add_column("movements", "seq INTEGER")
+-            if "number" not in c:
+-                add_column("movements", "number VARCHAR(32)")
+-            # backfill responsable si habia movimientos viejos
+-            try:
+-                cur.execute("UPDATE movements SET user_id = COALESCE(user_id, 1) WHERE user_id IS NULL")
+-            except Exception:
+-                pass
+-
+-        # Remitos: responsables elegidos (aditivo, nullable). Los remitos viejos
+-        # quedan con estos campos en NULL.
+-        if table_exists("remitos"):
+-            c = columns("remitos")
+-            if "responsible_from_id" not in c:
+-                add_column("remitos", "responsible_from_id INTEGER")
+-            if "responsible_to_id" not in c:
+-                add_column("remitos", "responsible_to_id INTEGER")
+-
+-        # Pendientes: item/cantidad de devolucion esperada (aditivo, nullable).
+-        # NULL = comportamiento previo (vuelve el mismo item y la misma cantidad).
+-        if table_exists("pending_deliveries"):
+-            c = columns("pending_deliveries")
+-            if "return_item_id" not in c:
+-                add_column("pending_deliveries", "return_item_id INTEGER")
+-            if "return_qty" not in c:
+-                add_column("pending_deliveries", "return_qty INTEGER")
+-
+-        conn.commit()
+-    finally:
+-        conn.close()
++    return _ensure_sqlite_schema(DB_PATH)
+ 
+ 
+ def location_is_external(location_id: int) -> bool:
++    """Se queda en app.py: consulta el ORM, no es parte del migrador."""
+     loc = Location.query.get(location_id)
+     return bool(loc and loc.is_external)
+ 
+diff --git a/extensiones.py b/extensiones.py
+new file mode 100644
+index 0000000..363ac53
+--- /dev/null
++++ b/extensiones.py
+@@ -0,0 +1,9 @@
++"""Extensiones de Flask, sin la app.
++
++Extraido de app.py en la Fase 5. `db` se crea aca, suelto, y app.py lo ata a la
++aplicacion con db.init_app(app). Es lo que permite que modelos.py importe `db`
++sin importar app.py, que es lo que antes hacia imposible separar los modelos.
++"""
++from flask_sqlalchemy import SQLAlchemy
++
++db = SQLAlchemy()
+diff --git a/migraciones.py b/migraciones.py
+new file mode 100644
+index 0000000..04c9c5d
+--- /dev/null
++++ b/migraciones.py
+@@ -0,0 +1,256 @@
++"""Migraciones de esquema para SQLite (best-effort).
++
++Extraido de app.py en la Fase 5 SIN cambiar una linea: es el mismo codigo.
++Se movio primero porque no depende de nada del sistema salvo la ruta del .db:
++abre sqlite3 directo, mira sqlite_master y agrega columnas faltantes.
++
++OJO: sigue siendo solo ADITIVO (no renombra, no cambia tipos, no toca
++constraints) y no versiona el esquema. Migrar esto a una herramienta real
++(Alembic / Flask-Migrate) es una tarea aparte, con su propio riesgo, y esta
++anotada en el vault.
++"""
++import sqlite3
++
++from rutas_datos import DB_PATH
++
++
++# ------------------ MIGRACIONES SQLITE (best-effort) ------------------
++
++def ensure_sqlite_schema(db_path=None) -> None:
++    """Best-effort schema migration for SQLite.
++
++    Objetivo: que el sistema no explote si ya existe un stocks.db viejo.
++    - Si la DB no existe, no hace nada (create_all la crea).
++
++    db_path: se recibe por parametro (antes leia un global de app.py). Sin
++    argumento usa el DB_PATH del entorno, que es el comportamiento de siempre.
++    - Si existe, agrega columnas faltantes con ALTER TABLE.
++
++    Nota: SQLite no permite alterar constraints facilmente (NOT NULL, FK, etc.).
++    Para un entorno local simple, esto alcanza.
++    """
++    db_path = db_path or DB_PATH
++    if not db_path.exists():
++        return
++
++    conn = sqlite3.connect(str(db_path))
++    try:
++        cur = conn.cursor()
++
++        def table_exists(name: str) -> bool:
++            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,))
++            return cur.fetchone() is not None
++
++        def columns(table: str) -> set[str]:
++            cur.execute(f"PRAGMA table_info({table})")
++            return {r[1] for r in cur.fetchall()}
++
++        def add_column(table: str, coldef: str) -> None:
++            cur.execute(f"ALTER TABLE {table} ADD COLUMN {coldef}")
++
++        # ------------------------------------------------------------------
++        # SINCRONIZACION AUTOMATICA DE COLUMNAS (aditiva, generica).
++        # Recorre TODOS los modelos y agrega cualquier columna que exista en el
++        # modelo pero falte en la tabla real. No borra, no modifica, no renombra.
++        # Asi, agregar un campo a un modelo NO requiere tocar nada mas: al
++        # reiniciar el servicio la DB se pone al dia sola.
++        # ------------------------------------------------------------------
++        try:
++            from sqlalchemy.dialects import sqlite as _sqld
++            _dialect = _sqld.dialect()
++
++            def _scalar_default(col):
++                d = col.default
++                if d is not None and getattr(d, "is_scalar", False):
++                    val = d.arg
++                    if isinstance(val, bool):
++                        return "1" if val else "0"
++                    if isinstance(val, (int, float)):
++                        return str(val)
++                    if isinstance(val, str):
++                        return "'" + val.replace("'", "''") + "'"
++                return None
++
++            for _tbl in db.metadata.sorted_tables:
++                if not table_exists(_tbl.name):
++                    continue  # tabla nueva: la crea db.create_all()
++                _have = columns(_tbl.name)
++                for _col in _tbl.columns:
++                    if _col.name in _have:
++                        continue
++                    try:
++                        _type = _col.type.compile(dialect=_dialect)
++                    except Exception:
++                        _type = "TEXT"
++                    _default = _scalar_default(_col)
++                    _clause = f"{_col.name} {_type}"
++                    if _default is not None:
++                        if not _col.nullable:
++                            _clause += " NOT NULL"
++                        _clause += f" DEFAULT {_default}"
++                    # Sin default constante -> se agrega NULLABLE para que el
++                    # ALTER nunca falle (SQLite no permite ADD COLUMN NOT NULL
++                    # sin default constante). El ORM sigue exigiendo el valor.
++                    try:
++                        add_column(_tbl.name, _clause)
++                        print(f"[schema-sync] +columna {_tbl.name}.{_col.name}")
++                    except Exception as _e:
++                        print(f"[schema-sync][WARN] {_tbl.name}.{_col.name}: {_e}")
++        except Exception as _e:
++            print(f"[schema-sync][WARN] sync generico omitido: {_e}")
++
++        if table_exists("locations"):
++            c = columns("locations")
++            if "description" not in c:
++                add_column("locations", "description TEXT")
++            if "is_external" not in c:
++                add_column("locations", "is_external INTEGER NOT NULL DEFAULT 0")
++            if "is_truck" not in c:
++                add_column("locations", "is_truck INTEGER NOT NULL DEFAULT 0")
++
++        if not table_exists("location_responsibles"):
++            cur.execute("""
++                CREATE TABLE location_responsibles (
++                    id INTEGER PRIMARY KEY AUTOINCREMENT,
++                    location_id INTEGER NOT NULL REFERENCES locations(id),
++                    user_id INTEGER NOT NULL REFERENCES users(id),
++                    UNIQUE(location_id, user_id)
++                )
++            """)
++
++        if table_exists("users"):
++            c = columns("users")
++            if "full_name" not in c:
++                add_column("users", "full_name TEXT NOT NULL DEFAULT ''")
++            if "role" not in c:
++                add_column("users", "role TEXT NOT NULL DEFAULT 'LECTOR'")
++            if "password_hash" not in c:
++                add_column("users", "password_hash TEXT NOT NULL DEFAULT ''")
++            if "email" not in c:
++                add_column("users", "email TEXT")
++
++        if table_exists("items"):
++            c = columns("items")
++            if "trackable" not in c:
++                add_column("items", "trackable INTEGER NOT NULL DEFAULT 0")
++            if "is_active" not in c:
++                add_column("items", "is_active INTEGER NOT NULL DEFAULT 1")
++            if "stock_min" not in c:
++                add_column("items", "stock_min INTEGER NOT NULL DEFAULT 0")
++            if "reference_link" not in c:
++                add_column("items", "reference_link TEXT")
++            if "unit" not in c:
++                add_column("items", "unit VARCHAR(16) NOT NULL DEFAULT 'unidad'")
++            if "serialized" not in c:
++                add_column("items", "serialized INTEGER NOT NULL DEFAULT 0")
++
++        # Unidades serializadas (aditivo). Tabla nueva: si no existe, se crea.
++        # Los ítems existentes quedan con serialized=0 y sin unidades, o sea sin
++        # cambios de comportamiento.
++        if not table_exists("item_units"):
++            cur.execute("""
++                CREATE TABLE item_units (
++                    id INTEGER PRIMARY KEY AUTOINCREMENT,
++                    item_id INTEGER NOT NULL REFERENCES items(id),
++                    serial VARCHAR(120) NOT NULL,
++                    status VARCHAR(16) NOT NULL DEFAULT 'EN_STOCK',
++                    location_id INTEGER REFERENCES locations(id),
++                    notes VARCHAR(255),
++                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++                    UNIQUE(item_id, serial)
++                )
++            """)
++
++        # Proveedores (aditivo). Tabla nueva: si no existe, se crea.
++        if not table_exists("suppliers"):
++            cur.execute("""
++                CREATE TABLE suppliers (
++                    id INTEGER PRIMARY KEY AUTOINCREMENT,
++                    contact_name VARCHAR(120) NOT NULL,
++                    business_name VARCHAR(160),
++                    cuit VARCHAR(20),
++                    legal_name VARCHAR(160),
++                    email VARCHAR(255),
++                    phone VARCHAR(40),
++                    is_active INTEGER NOT NULL DEFAULT 1,
++                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
++                )
++            """)
++
++        # Ingresos/Egresos: proveedor asociado en el movimiento (aditivo).
++        if table_exists("movements"):
++            c = columns("movements")
++            if "supplier_id" not in c:
++                add_column("movements", "supplier_id INTEGER REFERENCES suppliers(id)")
++
++        # Remito pendiente de impresion (aditivo).
++        if table_exists("remitos"):
++            c = columns("remitos")
++            if "print_pending" not in c:
++                add_column("remitos", "print_pending INTEGER NOT NULL DEFAULT 0")
++
++        # Destinatarios de solicitudes de compra (aditivo). Tabla nueva: si no
++        # existe, se crea. Reemplaza la lista de mails hardcodeada.
++        if not table_exists("purchase_request_recipients"):
++            cur.execute("""
++                CREATE TABLE purchase_request_recipients (
++                    id INTEGER PRIMARY KEY AUTOINCREMENT,
++                    purchase_request_id INTEGER NOT NULL REFERENCES purchase_requests(id),
++                    user_id INTEGER NOT NULL REFERENCES users(id),
++                    UNIQUE(purchase_request_id, user_id)
++                )
++            """)
++
++        if table_exists("categories"):
++            c = columns("categories")
++            if "prefix" not in c:
++                add_column("categories", "prefix VARCHAR(8)")
++            # Backfill de las 12 categorías conocidas: solo donde el prefijo
++            # esté vacío. No pisa prefijos ya cargados a mano.
++            cur.execute("SELECT id, name, prefix FROM categories")
++            for cid, cname, cpref in cur.fetchall():
++                if not (cpref or "").strip():
++                    p = CATEGORY_PREFIXES.get(normalize_text(cname))
++                    if p:
++                        cur.execute("UPDATE categories SET prefix=? WHERE id=?", (p, cid))
++
++        if table_exists("movements"):
++            c = columns("movements")
++            if "user_id" not in c:
++                add_column("movements", "user_id INTEGER")
++            if "observation" not in c:
++                add_column("movements", "observation TEXT")
++            if "year" not in c:
++                add_column("movements", "year INTEGER")
++            if "seq" not in c:
++                add_column("movements", "seq INTEGER")
++            if "number" not in c:
++                add_column("movements", "number VARCHAR(32)")
++            # backfill responsable si habia movimientos viejos
++            try:
++                cur.execute("UPDATE movements SET user_id = COALESCE(user_id, 1) WHERE user_id IS NULL")
++            except Exception:
++                pass
++
++        # Remitos: responsables elegidos (aditivo, nullable). Los remitos viejos
++        # quedan con estos campos en NULL.
++        if table_exists("remitos"):
++            c = columns("remitos")
++            if "responsible_from_id" not in c:
++                add_column("remitos", "responsible_from_id INTEGER")
++            if "responsible_to_id" not in c:
++                add_column("remitos", "responsible_to_id INTEGER")
++
++        # Pendientes: item/cantidad de devolucion esperada (aditivo, nullable).
++        # NULL = comportamiento previo (vuelve el mismo item y la misma cantidad).
++        if table_exists("pending_deliveries"):
++            c = columns("pending_deliveries")
++            if "return_item_id" not in c:
++                add_column("pending_deliveries", "return_item_id INTEGER")
++            if "return_qty" not in c:
++                add_column("pending_deliveries", "return_qty INTEGER")
++
++        conn.commit()
++    finally:
++        conn.close()
++
+diff --git a/modelos.py b/modelos.py
+new file mode 100644
+index 0000000..0431ecc
+--- /dev/null
++++ b/modelos.py
+@@ -0,0 +1,595 @@
++"""Modelos del dominio (ORM).
++
++Extraido de app.py en la Fase 5 SIN cambiar una linea de logica: es el mismo
++codigo, movido. app.py lo reimporta con `from modelos import *`, asi que todo lo
++que antes se accedia como `app.Item` sigue funcionando igual.
++
++Por que se separo primero esto y no las rutas: los modelos no dependen de nada
++del resto del sistema (solo de `db` y de utilidades de fecha/hash), asi que
++moverlos no puede romper un handler. Las rutas, en cambio, arrastran los
++endpoints de url_for(), que es otra conversacion.
++"""
++from datetime import datetime, timezone, timedelta
++
++from werkzeug.security import generate_password_hash, check_password_hash
++
++from extensiones import db
++
++
++# Hora local Argentina (UTC-3, sin horario de verano). Offset fijo para no
++# depender de la zona horaria del sistema/contenedor ni de librerias externas.
++AR_TZ = timezone(timedelta(hours=-3))
++
++
++def now_ar():
++    """Fecha/hora actual en hora argentina, naive (para guardar y mostrar)."""
++    return datetime.now(AR_TZ).replace(tzinfo=None)
++
++
++# ------------------ MODELOS ------------------
++
++class Location(db.Model):
++    __tablename__ = "locations"
++    id = db.Column(db.Integer, primary_key=True)
++    name = db.Column(db.String(100), unique=True, nullable=False)
++    description = db.Column(db.String(255), nullable=True)
++
++    # Si querés, podés marcar externas (Proveedor / Baja)
++    is_external = db.Column(db.Boolean, default=False, nullable=False)
++    is_truck = db.Column(db.Boolean, default=False, nullable=False)
++
++
++class User(db.Model):
++    __tablename__ = "users"
++    id = db.Column(db.Integer, primary_key=True)
++
++    username = db.Column(db.String(80), unique=True, nullable=False)
++    full_name = db.Column(db.String(120), nullable=False, default="")
++    password_hash = db.Column(db.String(255), nullable=False)
++
++    role = db.Column(db.String(20), nullable=False)  # ADMIN/SUPERVISOR/TECNICO/LECTOR
++
++    # Email de contacto (aditivo, opcional). Se usa como destinatario de las
++    # solicitudes de compra (ver PurchaseRequestRecipient).
++    email = db.Column(db.String(255), nullable=True)
++
++    # Flask-Login interface
++    @property
++    def is_authenticated(self):  # Flask-Login lo maneja, pero OK
++        return True
++
++    @property
++    def is_active(self):
++        return True
++
++    @property
++    def is_anonymous(self):
++        return False
++
++    def get_id(self):
++        return str(self.id)
++
++    def set_password(self, raw_password: str):
++        self.password_hash = generate_password_hash(raw_password)
++
++    def check_password(self, raw_password: str) -> bool:
++        return check_password_hash(self.password_hash, raw_password)
++
++
++class Supplier(db.Model):
++    """Carta de proveedor. Entidad propia (separada de usuarios) para no ensuciar
++    la tabla de usuarios. Se usa en la seccion Ingresos/Egresos.
++    """
++    __tablename__ = "suppliers"
++    id = db.Column(db.Integer, primary_key=True)
++
++    contact_name = db.Column(db.String(120), nullable=False)          # Nombre (contacto)
++    business_name = db.Column(db.String(160), nullable=True)          # Comercio / nombre de fantasia
++    cuit = db.Column(db.String(20), nullable=True)                    # CUIT
++    legal_name = db.Column(db.String(160), nullable=True)            # Razon social
++    email = db.Column(db.String(255), nullable=True)
++    phone = db.Column(db.String(40), nullable=True)
++
++    is_active = db.Column(db.Boolean, default=True, nullable=False)   # baja logica
++    created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
++
++
++class LocationResponsible(db.Model):
++    __tablename__ = "location_responsibles"
++    id = db.Column(db.Integer, primary_key=True)
++    location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), nullable=False)
++    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
++
++    location = db.relationship("Location", backref="responsibles")
++    user = db.relationship("User")
++
++    __table_args__ = (db.UniqueConstraint("location_id", "user_id", name="uq_loc_user"),)
++
++
++class Category(db.Model):
++    __tablename__ = "categories"
++    id = db.Column(db.Integer, primary_key=True)
++    name = db.Column(db.String(120), unique=True, nullable=False)
++    description = db.Column(db.String(255), nullable=True)
++    # Prefijo de código de items de esta categoría (3 letras, ej. "CAB").
++    prefix = db.Column(db.String(8), nullable=True)
++
++
++class Item(db.Model):
++    __tablename__ = "items"
++    id = db.Column(db.Integer, primary_key=True)
++
++    code = db.Column(db.String(50), unique=True, nullable=False)  # ELT-012
++    name = db.Column(db.String(200), nullable=False)
++    description = db.Column(db.String(255), nullable=True)
++
++    category_id = db.Column(db.Integer, db.ForeignKey("categories.id"), nullable=False)
++    category = db.relationship("Category", backref="items")
++
++    trackable = db.Column(db.Boolean, default=False, nullable=False)
++
++    # Stock de seguridad (mínimo). Aplica solo a NO rastreables.
++    # Para rastreables no tiene sentido (máx 1 por ubicación), así que se ignora.
++    stock_min = db.Column(db.Integer, default=0, nullable=False)
++
++    # Baja lógica (no borramos historial / stock). Si is_active=False no aparece
++    # en formularios, pero se mantiene en listados e históricos.
++    is_active = db.Column(db.Boolean, default=True, nullable=False)
++
++    # Link de referencia de compra (opcional). Ver ensure_sqlite_schema para la
++    # migración idempotente sobre bases existentes.
++    reference_link = db.Column(db.String(500), nullable=True)
++
++    # Forma de contabilización de la cantidad: 'unidad' (default, comportamiento
++    # histórico) o 'metros'. Solo afecta cómo se muestra/rotula la cantidad; no
++    # cambia la lógica de stock (sigue siendo un entero).
++    unit = db.Column(db.String(16), default="unidad", nullable=False)
++
++    # Ítem serializado: además del stock por cantidad (comportamiento histórico),
++    # se llevan unidades individuales con número de serie en la tabla item_units.
++    # Es OPT-IN e independiente de 'trackable'. Un ítem NO serializado se comporta
++    # exactamente igual que antes (esta columna queda en 0/False).
++    serialized = db.Column(db.Boolean, default=False, nullable=False)
++
++
++class ItemSupplier(db.Model):
++    """Proveedores asociados a un ítem (relación N a N).
++
++    Aditivo y sin efecto sobre stock, movimientos ni historial: es únicamente
++    catálogo, pensado para poder automatizar más adelante las solicitudes de
++    compra (agrupar los ítems pedidos por proveedor).
++
++    'is_preferred' queda disponible desde ahora para marcar el proveedor por
++    defecto de un ítem. Todavía no lo consume ninguna lógica: se guarda y se
++    muestra, nada más. Así, cuando se implemente el envío de solicitudes, no
++    hace falta otra migración.
++    """
++    __tablename__ = "item_suppliers"
++    id = db.Column(db.Integer, primary_key=True)
++    item_id = db.Column(db.Integer, db.ForeignKey("items.id"), nullable=False)
++    supplier_id = db.Column(db.Integer, db.ForeignKey("suppliers.id"), nullable=False)
++    is_preferred = db.Column(db.Boolean, default=False, nullable=False)
++    created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
++
++    item = db.relationship(
++        "Item",
++        backref=db.backref("supplier_links", cascade="all, delete-orphan"),
++    )
++    supplier = db.relationship("Supplier")
++
++    __table_args__ = (
++        db.UniqueConstraint("item_id", "supplier_id", name="uq_item_supplier"),
++    )
++
++
++def item_supplier_names(it) -> str:
++    """Proveedores de un ítem como texto, con el preferido primero y marcado.
++
++    Se usa en el listado y en el export. Si el ítem no tiene proveedores
++    devuelve cadena vacía (comportamiento de todos los ítems ya cargados).
++    """
++    links = sorted(
++        it.supplier_links or [],
++        key=lambda l: (not l.is_preferred, (l.supplier.contact_name or "").lower()),
++    )
++    out = []
++    for l in links:
++        if not l.supplier:
++            continue
++        label = l.supplier.business_name or l.supplier.contact_name
++        out.append(f"{label} ★" if l.is_preferred else label)
++    return ", ".join(out)
++
++
++def apply_item_suppliers(item, form):
++    """Sincroniza los proveedores de un ítem con lo enviado en el formulario.
++
++    Espera 'supplier_ids' (multiple) y opcionalmente 'preferred_supplier_id'.
++    NO hace commit: lo deja para el caller, que ya maneja su propia transacción.
++
++    Importante: el formulario tiene que declarar 'manages_suppliers=1'. Si no
++    viene, se asume que esa pantalla no gestiona proveedores y NO se toca nada.
++    Hace falta un marcador aparte porque un <select multiple> sin nada elegido
++    directamente NO envía la clave: sin esto, vaciar la lista sería
++    indistinguible de un formulario que no maneja proveedores, y no se podrían
++    quitar todos.
++    """
++    if form.get("manages_suppliers") != "1":
++        return
++
++    raw = [v for v in form.getlist("supplier_ids") if v.strip().isdigit()]
++    wanted = {int(v) for v in raw}
++
++    # Solo proveedores existentes. Los inactivos se conservan si ya estaban
++    # vinculados (no rompemos historial), pero no se pueden agregar nuevos.
++    existing_ids = {l.supplier_id for l in (item.supplier_links or [])}
++    valid = {
++        s.id for s in Supplier.query.filter(Supplier.id.in_(wanted)).all()
++        if s.is_active or s.id in existing_ids
++    } if wanted else set()
++
++    pref_raw = (form.get("preferred_supplier_id") or "").strip()
++    pref_id = int(pref_raw) if pref_raw.isdigit() and int(pref_raw) in valid else None
++
++    # Quitar los que ya no están.
++    for link in list(item.supplier_links or []):
++        if link.supplier_id not in valid:
++            db.session.delete(link)
++        else:
++            link.is_preferred = (link.supplier_id == pref_id)
++
++    # Agregar los nuevos.
++    for sid in valid - existing_ids:
++        db.session.add(ItemSupplier(
++            item_id=item.id,
++            supplier_id=sid,
++            is_preferred=(sid == pref_id),
++        ))
++
++
++# Estados de una unidad serializada.
++UNIT_EN_STOCK = "EN_STOCK"      # presente en una ubicación interna
++UNIT_ENTREGADO = "ENTREGADO"    # salió del sistema (entregado / externo)
++UNIT_DESCARTADO = "DESCARTADO"  # fue a Descartes
++
++
++class ItemUnit(db.Model):
++    """Unidad física individual de un ítem serializado (un serial = una fila).
++
++    Convive con Stock (cantidad agregada): la disponibilidad se sigue leyendo del
++    stock por cantidad. Estas filas agregan trazabilidad por serial, sin cambiar
++    la lógica de stock existente para ítems no serializados.
++    """
++    __tablename__ = "item_units"
++    id = db.Column(db.Integer, primary_key=True)
++
++    item_id = db.Column(db.Integer, db.ForeignKey("items.id"), nullable=False, index=True)
++    serial = db.Column(db.String(120), nullable=False)
++
++    status = db.Column(db.String(16), nullable=False, default=UNIT_EN_STOCK)
++    # Ubicación actual (solo si status = EN_STOCK). NULL cuando salió del sistema.
++    location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), nullable=True)
++
++    notes = db.Column(db.String(255), nullable=True)
++    created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
++
++    item = db.relationship("Item", backref="units")
++    location = db.relationship("Location")
++
++    # El serial es único dentro de un mismo ítem (no global: dos modelos distintos
++    # podrían, en teoría, compartir formato de serie).
++    __table_args__ = (db.UniqueConstraint("item_id", "serial", name="uq_unit_item_serial"),)
++
++
++class Stock(db.Model):
++    __tablename__ = "stock"
++    id = db.Column(db.Integer, primary_key=True)
++
++    item_id = db.Column(db.Integer, db.ForeignKey("items.id"), nullable=False)
++    location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), nullable=False)
++    quantity = db.Column(db.Integer, default=0, nullable=False)
++
++    item = db.relationship("Item")
++    location = db.relationship("Location")
++
++    __table_args__ = (db.UniqueConstraint("item_id", "location_id", name="uq_stock_item_location"),)
++
++
++class Movement(db.Model):
++    __tablename__ = "movements"
++    id = db.Column(db.Integer, primary_key=True)
++    created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
++
++    item_id = db.Column(db.Integer, db.ForeignKey("items.id"), nullable=False)
++    qty = db.Column(db.Integer, nullable=False)
++
++    # AHORA: OBLIGATORIOS, como pediste
++    from_location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), nullable=False)
++    to_location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), nullable=False)
++
++    # Responsable obligatorio: usuario logueado
++    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
++
++    observation = db.Column(db.String(255), nullable=True)
++
++    year = db.Column(db.Integer, nullable=True)
++    seq = db.Column(db.Integer, nullable=True)
++    number = db.Column(db.String(32), unique=True, nullable=True)
++
++    # Proveedor asociado (solo en movimientos generados por Ingresos/Egresos).
++    # NULL en los movimientos internos normales (jaula/camionetas). Sirve para
++    # separarlos del listado de Movimientos sin tocar el historico.
++    supplier_id = db.Column(db.Integer, db.ForeignKey("suppliers.id"), nullable=True)
++
++    item = db.relationship("Item")
++    supplier = db.relationship("Supplier")
++    from_location = db.relationship("Location", foreign_keys=[from_location_id])
++    to_location = db.relationship("Location", foreign_keys=[to_location_id])
++    user = db.relationship("User")
++
++class PendingDelivery(db.Model):
++    __tablename__ = "pending_deliveries"
++
++    id = db.Column(db.Integer, primary_key=True)
++    created_at = db.Column(db.DateTime, default=now_ar)
++
++    movement_id = db.Column(db.Integer, db.ForeignKey("movements.id"), nullable=False)
++
++    responsible_from_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
++    responsible_to_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
++
++    item_id = db.Column(db.Integer, db.ForeignKey("items.id"), nullable=False)
++
++    # Devolucion esperada (aditivo). Si son NULL se comportan como antes:
++    #   return_item_id NULL -> vuelve el mismo item entregado (item_id)
++    #   return_qty     NULL -> vuelve la misma cantidad del movimiento
++    # Permite: (a) que vuelva OTRO item (ej. entregas domo, deben traer Onvif)
++    # y (b) devolucion parcial (entregas 2, deben traer 1).
++    return_item_id = db.Column(db.Integer, db.ForeignKey("items.id"), nullable=True)
++    return_qty = db.Column(db.Integer, nullable=True)
++
++    comment = db.Column(db.Text)
++    returned = db.Column(db.Boolean, default=False, nullable=False)
++
++    movement = db.relationship("Movement")
++    responsible_from = db.relationship("User", foreign_keys=[responsible_from_id])
++    responsible_to = db.relationship("User", foreign_keys=[responsible_to_id])
++    item = db.relationship("Item", foreign_keys=[item_id])
++    return_item = db.relationship("Item", foreign_keys=[return_item_id])
++
++# ------------------ REMITOS ------------------
++
++class Remito(db.Model):
++    __tablename__ = "remitos"
++    id = db.Column(db.Integer, primary_key=True)
++    created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
++
++    # Numeración simple por año (R-YYYY-0001)
++    year = db.Column(db.Integer, nullable=False)
++    seq = db.Column(db.Integer, nullable=False)
++
++    number = db.Column(db.String(32), unique=True, nullable=False)
++
++    status = db.Column(db.String(16), nullable=False, default="BORRADOR")  # BORRADOR / CONFIRMADO
++
++    # Pendiente de impresion. Solo lo activan los remitos auto-generados por
++    # Ingresos/Egresos, para el badge de "no te olvides de imprimir". Los remitos
++    # normales quedan en False (default), asi no disparan alerta.
++    print_pending = db.Column(db.Boolean, default=False, nullable=False)
++
++    from_location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), nullable=False)
++    to_location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), nullable=False)
++
++    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
++
++    observation = db.Column(db.String(255), nullable=True)
++
++    # Responsables elegidos al crear el remito (a cargo de cada ubicación).
++    # Nullable: si el origen/destino es externo (proveedor) queda vacío para
++    # completar a mano después de imprimir.
++    responsible_from_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
++    responsible_to_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
++
++    from_location = db.relationship("Location", foreign_keys=[from_location_id])
++    to_location = db.relationship("Location", foreign_keys=[to_location_id])
++    created_by = db.relationship("User", foreign_keys=[created_by_user_id])
++    responsible_from = db.relationship("User", foreign_keys=[responsible_from_id])
++    responsible_to = db.relationship("User", foreign_keys=[responsible_to_id])
++
++    __table_args__ = (
++        db.UniqueConstraint("year", "seq", name="uq_remito_year_seq"),
++    )
++
++
++class RemitoLine(db.Model):
++    __tablename__ = "remito_lines"
++    id = db.Column(db.Integer, primary_key=True)
++    remito_id = db.Column(db.Integer, db.ForeignKey("remitos.id"), nullable=False)
++    movement_id = db.Column(db.Integer, db.ForeignKey("movements.id"), nullable=False, unique=True)
++
++    remito = db.relationship("Remito", backref=db.backref("lines", cascade="all, delete-orphan"))
++    movement = db.relationship("Movement")
++
++class Scrap(db.Model):
++    __tablename__ = "scrap"
++    id = db.Column(db.Integer, primary_key=True)
++    created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
++
++    item_id = db.Column(db.Integer, db.ForeignKey("items.id"), nullable=False)
++    location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), nullable=False)
++    quantity = db.Column(db.Integer, nullable=False)
++    reason = db.Column(db.String(255), nullable=True)
++    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
++
++    item = db.relationship("Item")
++    location = db.relationship("Location")
++    user = db.relationship("User")
++
++
++class Repair(db.Model):
++    """Registro de reparaciones. Aditivo: no altera tablas existentes.
++
++    Ciclo: un item vuelve de un pendiente y en vez de ir directo a Descartes
++    se manda a reparacion (EN_REPARACION). Desde /reparaciones se resuelve:
++      - REPARADO  -> vuelve a stock (Jaula TNG)
++      - DESCARTADO -> va a Descartes y se genera un Scrap (con motivo)
++    Permite reportar cuantas se reparan/descartan por mes.
++    """
++    __tablename__ = "repairs"
++    id = db.Column(db.Integer, primary_key=True)
++    created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
++
++    item_id = db.Column(db.Integer, db.ForeignKey("items.id"), nullable=False)
++    quantity = db.Column(db.Integer, nullable=False, default=1)
++
++    # EN_REPARACION -> REPARADO / DESCARTADO
++    status = db.Column(db.String(16), nullable=False, default="EN_REPARACION")
++
++    resolved_at = db.Column(db.DateTime, nullable=True)
++    result_reason = db.Column(db.String(255), nullable=True)  # motivo si se descarta
++
++    # Trazabilidad de origen (opcional, no rompe si es NULL)
++    pending_id = db.Column(db.Integer, db.ForeignKey("pending_deliveries.id"), nullable=True)
++    source_location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), nullable=True)
++
++    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
++    resolved_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
++
++    item = db.relationship("Item")
++    created_by = db.relationship("User", foreign_keys=[created_by_user_id])
++    resolved_by = db.relationship("User", foreign_keys=[resolved_by_user_id])
++    source_location = db.relationship("Location", foreign_keys=[source_location_id])
++
++
++class PurchaseRequest(db.Model):
++    """Cabecera de una solicitud de compra (estilo remito).
++
++    Aditivo: no toca stock ni movimientos. La marca "solicitado" que se ve
++    en Alertas de Stock se DERIVA de estas solicitudes (status REALIZADA),
++    no se guarda un flag redundante en stock.
++    """
++    __tablename__ = "purchase_requests"
++    id = db.Column(db.Integer, primary_key=True)
++    created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
++
++    year = db.Column(db.Integer, nullable=False)
++    seq = db.Column(db.Integer, nullable=False)
++    number = db.Column(db.String(32), unique=True, nullable=False)  # SC-2026-0001
++
++    # PENDIENTE (recien creada) / REALIZADA (ya enviada a mano)
++    status = db.Column(db.String(16), nullable=False, default="PENDIENTE")
++
++    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
++    observation = db.Column(db.String(255), nullable=True)
++    sent_at = db.Column(db.DateTime, nullable=True)  # para el envio automatico futuro
++
++    created_by = db.relationship("User")
++    lines = db.relationship(
++        "PurchaseRequestLine",
++        backref="request",
++        cascade="all, delete-orphan",
++        order_by="PurchaseRequestLine.id",
++    )
++    # Destinatarios seleccionados al crear la solicitud (aditivo). El mail se
++    # resuelve en vivo desde el usuario; guardamos el vinculo para trazabilidad
++    # de a quien se le mando.
++    recipients = db.relationship(
++        "PurchaseRequestRecipient",
++        backref="request",
++        cascade="all, delete-orphan",
++    )
++
++
++class PurchaseRequestLine(db.Model):
++    __tablename__ = "purchase_request_lines"
++    id = db.Column(db.Integer, primary_key=True)
++    purchase_request_id = db.Column(
++        db.Integer, db.ForeignKey("purchase_requests.id"), nullable=False
++    )
++    item_id = db.Column(db.Integer, db.ForeignKey("items.id"), nullable=False)
++    qty = db.Column(db.Integer, nullable=False)
++    # Preparado para futuro: especificaciones por item (aditivo, sin migracion disruptiva).
++    spec = db.Column(db.String(255), nullable=True)
++
++    item = db.relationship("Item")
++
++
++class PurchaseRequestRecipient(db.Model):
++    """Destinatario de una solicitud de compra (usuario con email).
++
++    Aditivo: no toca stock ni la lógica existente. Reemplaza la lista de mails
++    hardcodeada por una selección de usuarios en el momento de crear la
++    solicitud. El email se lee del usuario vinculado, no se copia acá.
++    """
++    __tablename__ = "purchase_request_recipients"
++    id = db.Column(db.Integer, primary_key=True)
++    purchase_request_id = db.Column(
++        db.Integer, db.ForeignKey("purchase_requests.id"), nullable=False
++    )
++    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
++
++    user = db.relationship("User")
++
++    __table_args__ = (
++        db.UniqueConstraint(
++            "purchase_request_id", "user_id", name="uq_pr_recipient"
++        ),
++    )
++
++
++class RepairRequest(db.Model):
++    """Cabecera de una solicitud de repuestos hecha por un técnico.
++
++    Aditivo (mismo patrón que PurchaseRequest): tablas nuevas, no toca stock ni
++    modelos existentes. El impacto sobre stock ocurre SOLO al cerrarla, cuando
++    admin/supervisor generan los movimientos Jaula -> camioneta del técnico.
++    """
++    __tablename__ = "repair_requests"
++    id = db.Column(db.Integer, primary_key=True)
++    created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
++
++    year = db.Column(db.Integer, nullable=False)
++    seq = db.Column(db.Integer, nullable=False)
++    number = db.Column(db.String(32), unique=True, nullable=False)  # SR-2026-0001
++
++    # PENDIENTE (recién creada) / CERRADA (entregada completa) /
++    # CERRADA_PARCIAL (se entregó ALGO pero menos de lo pedido) /
++    # CANCELADA (el técnico dio de baja su propia solicitud) /
++    # RECHAZADA (admin/supervisor la rechaza, no se entrega nada).
++    # CANCELADA y RECHAZADA son estados terminales SIN efecto sobre stock,
++    # movimientos ni pendientes: la solicitud simplemente no se ejecuta.
++    status = db.Column(db.String(20), nullable=False, default="PENDIENTE")
++
++    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
++    # Camioneta destino elegida por el técnico al crear (una de sus asignadas).
++    dest_location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), nullable=False)
++    observation = db.Column(db.String(255), nullable=True)
++
++    closed_at = db.Column(db.DateTime, nullable=True)
++    closed_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
++    # Motivo de cancelación (técnico) o rechazo (admin/supervisor). Aditivo y
++    # nullable: el schema auto-sync lo agrega con ALTER TABLE ADD COLUMN.
++    close_reason = db.Column(db.String(255), nullable=True)
++
++    created_by = db.relationship("User", foreign_keys=[created_by_user_id])
++    closed_by = db.relationship("User", foreign_keys=[closed_by_user_id])
++    dest_location = db.relationship("Location", foreign_keys=[dest_location_id])
++    lines = db.relationship(
++        "RepairRequestLine",
++        backref="request",
++        cascade="all, delete-orphan",
++        order_by="RepairRequestLine.id",
++    )
++
++
++class RepairRequestLine(db.Model):
++    __tablename__ = "repair_request_lines"
++    id = db.Column(db.Integer, primary_key=True)
++    repair_request_id = db.Column(
++        db.Integer, db.ForeignKey("repair_requests.id"), nullable=False
++    )
++    item_id = db.Column(db.Integer, db.ForeignKey("items.id"), nullable=False)
++    qty = db.Column(db.Integer, nullable=False)          # cantidad pedida
++    qty_entregada = db.Column(db.Integer, nullable=False, default=0)  # entregada al cerrar
++
++    item = db.relationship("Item")
+diff --git a/rutas_datos.py b/rutas_datos.py
+new file mode 100644
+index 0000000..f4bb65e
+--- /dev/null
++++ b/rutas_datos.py
+@@ -0,0 +1,21 @@
++"""Rutas de datos del sistema (base, backups, logs).
++
++Extraido de app.py en la Fase 5. Vive aparte porque lo necesitan varios modulos
++(app.py y migraciones.py) y no depende de ninguno de ellos: solo lee el entorno.
++
++Las variables se resuelven al importar, igual que antes. Las pruebas y los
++scripts de verificacion definen STOCKS_DB_PATH ANTES de importar app, asi que
++siguen apuntando a su carpeta temporal y nunca tocan la base real.
++"""
++import os
++from pathlib import Path
++
++BASE_DIR = Path(__file__).resolve().parent
++
++DB_PATH = Path(os.environ.get("STOCKS_DB_PATH", str(BASE_DIR / "data/stocks.db"))).resolve()
++BACKUP_DIR = Path(os.environ.get("STOCKS_BACKUP_DIR", str(BASE_DIR / "backups"))).resolve()
++LOG_DIR = Path(os.environ.get("STOCKS_LOG_DIR", str(BASE_DIR / "logs"))).resolve()
++
++DB_PATH.parent.mkdir(parents=True, exist_ok=True)
++BACKUP_DIR.mkdir(parents=True, exist_ok=True)
++LOG_DIR.mkdir(parents=True, exist_ok=True)

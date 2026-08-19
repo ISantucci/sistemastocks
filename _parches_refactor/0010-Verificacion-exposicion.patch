@@ -1,0 +1,261 @@
+From 548ea86ad8f52c272a5836cb110f0f33656a630c Mon Sep 17 00:00:00 2001
+From: c <a@b>
+Date: Tue, 18 Aug 2026 14:52:24 +0000
+Subject: [PATCH 10/10] Verificacion de exposicion: que se ve con F12, rol por
+ rol
+
+---
+ verificacion/README.md               |  21 +++
+ verificacion/verificar_exposicion.py | 204 +++++++++++++++++++++++++++
+ 2 files changed, 225 insertions(+)
+ create mode 100644 verificacion/verificar_exposicion.py
+
+diff --git a/verificacion/README.md b/verificacion/README.md
+index 30d3b56..41d03b5 100644
+--- a/verificacion/README.md
++++ b/verificacion/README.md
+@@ -11,6 +11,20 @@ más serios de la Fase 4 los encontró esto, no la suite:
+ - `makeStockLoader is not defined` en `/movements/bulk` (orden de carga de los `<script>`).
+ - `Cannot read properties of null` en `/solicitudes-repuestos` para roles que no ven el formulario de alta.
+ 
++## Los cuatro scripts
++
++| Script | Qué prueba |
++|---|---|
++| `verificar_navegador.py` | El selector de ítems de `/movements` con el mapa de stock embebido y remoto |
++| `verificar_items_remoto.py` | El catálogo remoto: que ofrezca solo lo que hay en la ubicación elegida |
++| `verificar_ui.py` | 24 pantallas, modales, panel de detalle, confirms, gráficos, CSP en enforce |
++| `verificar_persistencia.py` | Que la data se guarde en la BASE y no en el HTML |
++| `verificar_exposicion.py` | Qué se ve con F12: secretos y datos fuera de alcance, rol por rol |
++
++Los dos últimos **no necesitan navegador**: usan el cliente de pruebas de Flask
++y leen el archivo `.db` con `sqlite3` crudo, así que se pueden correr sin
++instalar Playwright.
++
+ ## Cómo se corren
+ 
+ ```
+@@ -21,6 +35,13 @@ MODO=embebido python verificacion/verificar_navegador.py   # mapa de stock embeb
+ MODO=remoto   python verificacion/verificar_navegador.py   # mapa por API
+ python verificacion/verificar_ui.py                        # UI general
+ CSP=true python verificacion/verificar_ui.py               # con la CSP en enforce
++
++N_ITEMS=3000 python verificacion/verificar_items_remoto.py # catálogo grande
++N_ITEMS=300  python verificacion/verificar_items_remoto.py # catálogo chico
++
++# Estos dos no necesitan navegador:
++python verificacion/verificar_persistencia.py
++python verificacion/verificar_exposicion.py
+ ```
+ 
+ Salen con código 1 si algo falla, así que sirven en CI.
+diff --git a/verificacion/verificar_exposicion.py b/verificacion/verificar_exposicion.py
+new file mode 100644
+index 0000000..50bc5d2
+--- /dev/null
++++ b/verificacion/verificar_exposicion.py
+@@ -0,0 +1,204 @@
++"""Verificación: qué se ve realmente con F12, rol por rol.
++
++Recorre todas las pantallas con cada rol y revisa el HTML que sale del servidor
++(que es exactamente lo que muestra "Ver código fuente" o la pestaña Elements
++del F12) buscando dos cosas distintas:
++
++  A. SECRETOS — contraseñas, hashes, la FLASK_SECRET_KEY, rutas del servidor,
++     cadenas de conexión, tracebacks. Nada de esto debe aparecer nunca.
++
++  B. DATOS FUERA DE ALCANCE — que un TÉCNICO no reciba stock, ítems ni
++     ubicaciones de camionetas ajenas. La pantalla puede no mostrarlos y el
++     dato viajar igual: eso es lo que había antes de la Fase 1.
++
++Además informa (sin marcarlo como falla) qué datos de otras personas viajan,
++para que la decisión de dejarlos o sacarlos sea explícita y no por omisión.
++
++Base sintética y temporal. No toca ningún dato real.
++"""
++import json
++import os
++import re
++import sys
++import tempfile
++
++CLAVE = "SECRETO-DE-PRUEBA-9f2a4c"
++PASS = "MiClaveSecreta2026"
++
++_T = tempfile.mkdtemp(prefix="verif_exp_")
++os.environ.update(
++    STOCKS_DB_PATH=os.path.join(_T, "data", "s.db"),
++    STOCKS_BACKUP_DIR=os.path.join(_T, "b"),
++    STOCKS_LOG_DIR=os.path.join(_T, "l"),
++    FLASK_SECRET_KEY=CLAVE,
++    APP_DEBUG="false",
++    RATELIMIT_ENABLED="false",
++)
++RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++sys.path.insert(0, RAIZ)
++
++import app as A  # noqa: E402
++
++A.app.config["WTF_CSRF_ENABLED"] = False
++FALLAS = []
++D = {}
++
++
++def chequear(cond, msg):
++    print(("  OK   " if cond else "  FALLA") + "  " + msg)
++    if not cond:
++        FALLAS.append(msg)
++
++
++def sembrar():
++    with A.app.app_context():
++        A.db.drop_all()
++        A.db.create_all()
++        A.seed_defaults()
++
++        cat = A.Category(name="Cables", prefix="CAB")
++        A.db.session.add(cat)
++        A.db.session.commit()
++
++        jaula = A.Location.query.filter_by(name=A.LOCATION_JAULA_TNG).first()
++        if not jaula:
++            jaula = A.Location(name=A.LOCATION_JAULA_TNG)
++            A.db.session.add(jaula)
++        A.db.session.commit()
++
++        mia = A.Location(name="Camioneta MIA", is_truck=True)
++        ajena = A.Location(name="Camioneta AJENA", is_truck=True)
++        A.db.session.add_all([mia, ajena])
++        A.db.session.commit()
++
++        for cod, nom in [("MIO-001", "Item de mi camioneta"),
++                         ("AJE-001", "Item de camioneta ajena"),
++                         ("JAU-001", "Item de la jaula")]:
++            A.db.session.add(A.Item(code=cod, name=nom, category_id=cat.id,
++                                    is_active=True, stock_min=2))
++        A.db.session.commit()
++        I = {i.code: i for i in A.Item.query.all()}
++
++        A.upsert_stock(I["MIO-001"].id, mia.id, 5)
++        A.upsert_stock(I["AJE-001"].id, ajena.id, 5)
++        A.upsert_stock(I["JAU-001"].id, jaula.id, 50)
++        A.db.session.commit()
++
++        for u, r in [("tec", "TECNICO"), ("tec2", "TECNICO"),
++                     ("sup", "SUPERVISOR"), ("adm", "ADMIN"), ("lec", "LECTOR")]:
++            x = A.User(username=u, full_name="NombreReal%s" % u.upper(),
++                       role=r, email="%s@tng.test" % u)
++            x.set_password(PASS)
++            A.db.session.add(x)
++        A.db.session.commit()
++
++        t1 = A.User.query.filter_by(username="tec").first()
++        t2 = A.User.query.filter_by(username="tec2").first()
++        A.db.session.add(A.LocationResponsible(user_id=t1.id, location_id=mia.id))
++        A.db.session.add(A.LocationResponsible(user_id=t2.id, location_id=ajena.id))
++        A.db.session.commit()
++
++        D.update(mia=mia.id, ajena=ajena.id, jaula=jaula.id,
++                 hashes=[u.password_hash for u in A.User.query.all()])
++
++
++RUTAS = [
++    "/", "/items", "/stock", "/stock/export.csv", "/items/export.xlsx",
++    "/movements", "/movements/bulk", "/movements/export.csv", "/item-usage",
++    "/remitos", "/scrap", "/reparaciones", "/pending-deliveries", "/stock-alerts",
++    "/solicitudes-compra", "/solicitudes-repuestos", "/ingresos-egresos",
++    "/proveedores", "/users", "/locations", "/categories", "/conteo", "/admin",
++    "/perfil", "/import/items", "/metricas", "/metricas/compras",
++    "/metricas/inventario", "/api/items/search",
++]
++
++SECRETOS = {
++    "contrasena en claro": re.compile(re.escape(PASS)),
++    "FLASK_SECRET_KEY": re.compile(re.escape(CLAVE)),
++    "hash de contrasena": re.compile(r"(pbkdf2:|scrypt:|\$2[aby]\$)"),
++    "ruta del servidor": re.compile(r"/tmp/|C:\\\\Users|/home/\w|/root/"),
++    "cadena de conexion": re.compile(r"sqlite:///|postgres://|mysql://"),
++    "traceback": re.compile(r"Traceback \(most recent call last\)"),
++    "campo password con valor": re.compile(r'type="password"[^>]*\svalue="[^"]+"'),
++}
++
++
++def cuerpo(resp):
++    """Texto de la respuesta. El .xlsx es binario: se mira en latin-1 para poder
++    buscarle patrones igual (un secreto en un binario sigue siendo un secreto)."""
++    return resp.get_data().decode("utf-8", "replace")
++
++
++def main():
++    sembrar()
++
++    print("=== A. SECRETOS en el HTML (todas las rutas x todos los roles) ===\n")
++    total = 0
++    hallados = []
++    for rol, user in [("ADMIN", "adm"), ("SUPERVISOR", "sup"),
++                      ("TECNICO", "tec"), ("LECTOR", "lec")]:
++        c = A.app.test_client()
++        c.post("/login", data={"username": user, "password": PASS})
++        for ruta in RUTAS:
++            html = cuerpo(c.get(ruta))
++            total += 1
++            for nombre, rx in SECRETOS.items():
++                m = rx.search(html)
++                if m:
++                    hallados.append((rol, ruta, nombre, m.group(0)[:40]))
++            for h in D["hashes"]:
++                if h and h in html:
++                    hallados.append((rol, ruta, "password_hash literal", h[:25]))
++
++    chequear(not hallados, "%d paginas revisadas, 0 secretos expuestos %s"
++             % (total, hallados[:3] if hallados else ""))
++
++    print("\n=== B. DATOS FUERA DE ALCANCE — que recibe un TECNICO ===")
++    print("    (responsable solo de 'Camioneta MIA')\n")
++    c = A.app.test_client()
++    c.post("/login", data={"username": "tec", "password": PASS})
++
++    for ruta in ["/movements", "/item-usage", "/stock", "/stock/export.csv",
++                 "/api/items/search",
++                 "/api/items/search?location_id=%d" % D["ajena"],
++                 "/api/stock/by-location?location_id=%d" % D["ajena"]]:
++        html = cuerpo(c.get(ruta))
++        chequear("AJE-001" not in html,
++                 "%-46s no filtra el item de la camioneta ajena" % ruta)
++
++    # El mapa de stock, mirado adentro de la isla de datos
++    for ruta in ["/movements", "/item-usage"]:
++        html = cuerpo(c.get(ruta))
++        m = re.search(r'<script type="application/json" id="[\w-]+-datos">\s*(.*?)\s*</script>',
++                      html, re.S)
++        mapa = json.loads(m.group(1)).get("stockQtyMap", {}) if m else {}
++        ajenas = {k for k in mapa if int(k) in (D["ajena"], D["jaula"])}
++        chequear(not ajenas,
++                 "%-46s el mapa de stock no trae ubicaciones ajenas" % ruta)
++
++    print("\n=== C. QUE SI VIAJA (informativo — decidir, no asumir) ===\n")
++    html = cuerpo(c.get("/movements"))
++    otros = sorted(set(re.findall(r"NombreReal(TEC2|SUP|ADM|LEC)", html)))
++    ubis = sorted(set(re.findall(r"Camioneta (AJENA|MIA)", html)))
++    mails = sorted(set(re.findall(r"[\w.]+@tng\.test", html)))
++    print("      /movements le muestra al TECNICO:")
++    print("        nombres de otros usuarios : %s" % (otros or "ninguno"))
++    print("        nombres de ubicaciones    : %s" % (ubis or "ninguna"))
++    print("        emails                    : %s" % (mails or "ninguno"))
++    print()
++    print("      No son credenciales y no le dan ningun permiso: los POST validan")
++    print("      el alcance por separado. Pero son datos que quiza no necesita.")
++    print("      Queda como decision pendiente, no como falla.")
++
++    chequear(not mails, "no viajan emails de usuarios en /movements")
++
++    print()
++    if FALLAS:
++        print("RESULTADO: %d FALLAS" % len(FALLAS))
++        sys.exit(1)
++    print("RESULTADO: sin secretos ni datos fuera de alcance en el HTML")
++
++
++if __name__ == "__main__":
++    print("=== Verificacion de exposicion (que se ve con F12) ===\n")
++    main()

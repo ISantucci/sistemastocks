@@ -7,7 +7,7 @@
 
 <div class="card">
   <div class="card-header"><span class="card-title">Registrar descarte</span></div>
-  <form method="post">
+  <form method="post" data-confirm-move="Confirmar descarte" data-confirm-danger>
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="form-grid">
       <div class="field">
@@ -41,7 +41,7 @@
 </div>
 
 <template id="scrap-line-template">
-  <div class="scrap-line" style="display:flex; gap:12px; align-items:flex-end; margin-bottom:10px; flex-wrap:wrap;">
+  <div class="scrap-line" data-confirm-row style="display:flex; gap:12px; align-items:flex-end; margin-bottom:10px; flex-wrap:wrap;">
     <div class="scrap-item-select field" style="flex:1; min-width:240px;">
       <label>Item</label>
       <select name="item_id[]" class="scrap-item" required>

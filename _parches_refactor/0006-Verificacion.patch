@@ -1,0 +1,227 @@
+From 1f69f52fa4056be6bc243c50ce4d2d8c8af83a51 Mon Sep 17 00:00:00 2001
+From: c <a@b>
+Date: Tue, 18 Aug 2026 13:41:23 +0000
+Subject: [PATCH 6/7] Verificacion en navegador usada para validar las fases
+ 1-5
+
+---
+ _fase5_extraer.py      | 128 -----------------------------------------
+ app.py                 |   2 +-
+ migraciones.py         |   1 -
+ requirements-dev.txt   |   3 +
+ verificacion/README.md |  40 +++++++++++++
+ 5 files changed, 44 insertions(+), 130 deletions(-)
+ delete mode 100644 _fase5_extraer.py
+ create mode 100644 verificacion/README.md
+
+diff --git a/_fase5_extraer.py b/_fase5_extraer.py
+deleted file mode 100644
+index e4264d0..0000000
+--- a/_fase5_extraer.py
++++ /dev/null
+@@ -1,128 +0,0 @@
+-"""Fase 5 (paso 1) — sacar de app.py lo que no depende del resto.
+-
+-Criterio: SOLO mover codigo. Ni una linea de logica cambia. Son dos bloques que
+-no tienen acoplamiento real con los handlers:
+-
+-  - migraciones.py : ensure_sqlite_schema(), 235 lineas de sqlite3 puro.
+-  - modelos.py     : las 21 clases del ORM + sus helpers.
+-
+-Lo que NO se hace acá es partir las rutas en blueprints. Motivo concreto: un
+-blueprint renombra los endpoints ('metricas' pasa a ser 'metricas.metricas'),
+-asi que habria que tocar todos los url_for() de los 47 templates y de la suite
+-en el mismo commit. Es un diff enorme, dificil de revisar y de revertir, y su
+-beneficio es de mantenibilidad interna, no de la operacion. Va aparte y despues
+-de que estas fases esten estables.
+-"""
+-import re
+-
+-src = open("app.py", encoding="utf-8").read()
+-lineas = src.split("\n")
+-
+-
+-def indice(pred, desde=0):
+-    for i in range(desde, len(lineas)):
+-        if pred(lineas[i]):
+-            return i
+-    raise AssertionError("no encontrado")
+-
+-
+-# ------------------------------------------------------------- migraciones
+-ini_mig = indice(lambda l: l.startswith("# ------------------ MIGRACIONES SQLITE"))
+-fin_mig = indice(lambda l: l.startswith("# ------------------ HELPERS: OPERACIONES DESTRUCTIVAS"))
+-bloque_mig = "\n".join(lineas[ini_mig:fin_mig]).strip()
+-
+-# ------------------------------------------------------------------ modelos
+-ini_mod = indice(lambda l: l.startswith("# ------------------ MODELOS"))
+-fin_mod = indice(lambda l: l.startswith("# ------------------ LOGIN MANAGER"))
+-bloque_mod = "\n".join(lineas[ini_mod:fin_mod]).strip()
+-
+-# Se saca de abajo hacia arriba para no correr los indices.
+-nuevas = lineas[:ini_mod] + [
+-    "# ------------------ MODELOS ------------------",
+-    "# Las 21 clases del ORM viven en modelos.py desde la Fase 5. Se importan con",
+-    "# * a proposito: asi `app.Item`, `app.Stock`, etc. siguen resolviendo igual",
+-    "# que cuando estaban escritas aca, y ni la suite ni serve.py se enteran.",
+-    "from modelos import *  # noqa: F401,F403",
+-    "from modelos import (  # noqa: F401  (explicito para los linters)",
+-    "    Location, User, Supplier, LocationResponsible, Category, Item,",
+-    "    ItemSupplier, ItemUnit, Stock, Movement, PendingDelivery, Remito,",
+-    "    RemitoLine, Scrap, Repair, PurchaseRequest, PurchaseRequestLine,",
+-    "    PurchaseRequestRecipient, RepairRequest, RepairRequestLine,",
+-    "    UNIT_EN_STOCK, UNIT_ENTREGADO, UNIT_DESCARTADO,",
+-    "    item_supplier_names, apply_item_suppliers,",
+-    ")",
+-    "",
+-    "",
+-] + lineas[fin_mod:]
+-
+-# recalcular los limites de migraciones sobre la lista nueva
+-lineas = nuevas
+-ini_mig = indice(lambda l: l.startswith("# ------------------ MIGRACIONES SQLITE"))
+-fin_mig = indice(lambda l: l.startswith("# ------------------ HELPERS: OPERACIONES DESTRUCTIVAS"))
+-
+-lineas = lineas[:ini_mig] + [
+-    "# ------------------ MIGRACIONES SQLITE (best-effort) ------------------",
+-    "# El migrador vive en migraciones.py desde la Fase 5. Se re-exporta con el",
+-    "# mismo nombre porque serve.py y el bloque __main__ lo importan de app.",
+-    "from migraciones import ensure_sqlite_schema  # noqa: F401",
+-    "",
+-    "",
+-] + lineas[fin_mig:]
+-
+-open("app.py", "w", encoding="utf-8").write("\n".join(lineas))
+-
+-# ------------------------------------------------------------ modelos.py
+-cab_mod = '''"""Modelos del dominio (ORM).
+-
+-Extraido de app.py en la Fase 5 SIN cambiar una linea de logica: es el mismo
+-codigo, movido. app.py lo reimporta con `from modelos import *`, asi que todo lo
+-que antes se accedia como `app.Item` sigue funcionando igual.
+-
+-Por que se separo primero esto y no las rutas: los modelos no dependen de nada
+-del resto del sistema (solo de `db` y de utilidades de fecha/hash), asi que
+-moverlos no puede romper un handler. Las rutas, en cambio, arrastran los
+-endpoints de url_for(), que es otra conversacion.
+-"""
+-from datetime import datetime, timezone, timedelta
+-
+-from werkzeug.security import generate_password_hash, check_password_hash
+-
+-from extensiones import db
+-
+-
+-# Hora local Argentina (UTC-3, sin horario de verano). Offset fijo para no
+-# depender de la zona horaria del sistema/contenedor ni de librerias externas.
+-AR_TZ = timezone(timedelta(hours=-3))
+-
+-
+-def now_ar():
+-    """Fecha/hora actual en hora argentina, naive (para guardar y mostrar)."""
+-    return datetime.now(AR_TZ).replace(tzinfo=None)
+-
+-
+-'''
+-open("modelos.py", "w", encoding="utf-8").write(cab_mod + bloque_mod + "\n")
+-
+-# --------------------------------------------------------- migraciones.py
+-cab_mig = '''"""Migraciones de esquema para SQLite (best-effort).
+-
+-Extraido de app.py en la Fase 5 SIN cambiar una linea: es el mismo codigo.
+-Se movio primero porque no depende de nada del sistema salvo la ruta del .db:
+-abre sqlite3 directo, mira sqlite_master y agrega columnas faltantes.
+-
+-OJO: sigue siendo solo ADITIVO (no renombra, no cambia tipos, no toca
+-constraints) y no versiona el esquema. Migrar esto a una herramienta real
+-(Alembic / Flask-Migrate) es una tarea aparte, con su propio riesgo, y esta
+-anotada en el vault.
+-"""
+-import sqlite3
+-
+-from rutas_datos import DB_PATH
+-
+-
+-'''
+-open("migraciones.py", "w", encoding="utf-8").write(cab_mig + bloque_mig + "\n")
+-
+-print("app.py:", len(open("app.py", encoding="utf-8").read().split("\n")), "lineas")
+-print("modelos.py:", len(open("modelos.py", encoding="utf-8").read().split("\n")), "lineas")
+-print("migraciones.py:", len(open("migraciones.py", encoding="utf-8").read().split("\n")), "lineas")
+diff --git a/app.py b/app.py
+index af8f2f3..878ad04 100644
+--- a/app.py
++++ b/app.py
+@@ -7355,4 +7355,4 @@ if __name__ == "__main__":
+     app_host = os.environ.get("APP_HOST", "127.0.0.1")
+     app_port = int(os.environ.get("APP_PORT", "5000"))
+     app_debug = os.environ.get("APP_DEBUG", "false").lower() == "true"
+-    app.run(host=app_host, port=app_port, debug=app_debug)
+\ No newline at end of file
++    app.run(host=app_host, port=app_port, debug=app_debug)
+diff --git a/migraciones.py b/migraciones.py
+index 04c9c5d..fe9cda4 100644
+--- a/migraciones.py
++++ b/migraciones.py
+@@ -253,4 +253,3 @@ def ensure_sqlite_schema(db_path=None) -> None:
+         conn.commit()
+     finally:
+         conn.close()
+-
+diff --git a/requirements-dev.txt b/requirements-dev.txt
+index 0af01cb..3c95a1b 100644
+--- a/requirements-dev.txt
++++ b/requirements-dev.txt
+@@ -1,3 +1,6 @@
+ # Dependencias solo para desarrollo/pruebas (no van a producción).
+ # Instalar: pip install -r requirements-dev.txt
+ pytest
++
++# Verificacion en navegador (ver verificacion/README.md)
++playwright==1.49.1
+diff --git a/verificacion/README.md b/verificacion/README.md
+new file mode 100644
+index 0000000..30d3b56
+--- /dev/null
++++ b/verificacion/README.md
+@@ -0,0 +1,40 @@
++# Verificación en navegador
++
++Estos dos scripts **no son parte de la aplicación**: son las pruebas que se
++usaron para validar los cambios de las Fases 1 a 5. Corren la app con una base
++**sintética y temporal** (datos inventados) y la manejan con Chromium headless.
++
++Existen porque `pytest` valida el HTML que devuelve el servidor, pero no puede
++ver si el JavaScript sigue funcionando en un navegador de verdad. Los dos bugs
++más serios de la Fase 4 los encontró esto, no la suite:
++
++- `makeStockLoader is not defined` en `/movements/bulk` (orden de carga de los `<script>`).
++- `Cannot read properties of null` en `/solicitudes-repuestos` para roles que no ven el formulario de alta.
++
++## Cómo se corren
++
++```
++pip install playwright
++playwright install chromium
++
++MODO=embebido python verificacion/verificar_navegador.py   # mapa de stock embebido
++MODO=remoto   python verificacion/verificar_navegador.py   # mapa por API
++python verificacion/verificar_ui.py                        # UI general
++CSP=true python verificacion/verificar_ui.py               # con la CSP en enforce
++```
++
++Salen con código 1 si algo falla, así que sirven en CI.
++
++## Requisito: assets locales
++
++El navegador del entorno de pruebas no tiene salida a internet, así que Tom
++Select y Chart.js tienen que estar vendorizados
++(`python scripts/vendor_assets.py`, el paso manual que ya figura en el vault).
++Sin eso, los selects y los gráficos no cargan y las verificaciones fallan por
++un motivo que no tiene nada que ver con el código.
++
++## No tocan nada real
++
++Ambos definen `STOCKS_DB_PATH` a una carpeta temporal **antes** de importar
++`app`, igual que `tests/conftest.py`. No leen ni escriben `data/stocks.db` ni
++ningún backup.

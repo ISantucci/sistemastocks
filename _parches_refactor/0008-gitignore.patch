@@ -1,0 +1,82 @@
+From 33bac046f419b7bb42cf19b5ba87acdabfd2796c Mon Sep 17 00:00:00 2001
+From: c <a@b>
+Date: Tue, 18 Aug 2026 14:45:02 +0000
+Subject: [PATCH 08/10] gitignore: parches del refactor, venvs alternativos,
+ restos .fuse_hidden y artefactos de Playwright
+
+---
+ .gitignore | 65 ++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 65 insertions(+)
+ create mode 100644 .gitignore
+
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..9af03fc
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,65 @@
++.venv/
++__pycache__/
++*.pyc
++data/
++data_local/
++backups/
++backups_local/
++logs/
++logs_local/
++*.db
++*.db-wal
++*.db-shm
++.env
++env/
++*.env
++!deploy/.env.example
++*.bak
++*.bak_*
++SistemaStocksTNG.zip
++
++# --- Vault de Obsidian (documentacion funcional) -----------------------------
++# El vault vive fuera del repo (ObsidianVaults/TNGStocks/TNGStock) y es la
++# fuente de verdad FUNCIONAL, no codigo. Se ignora explicitamente por si alguna
++# vez se copia o se sincroniza adentro del repo por error: no queremos notas
++# internas, plantillas ni el estado de Obsidian mezclados con el codigo.
++TNGStock/
++TNGStocks/
++ObsidianVaults/
++00_START_HERE/
++01_Producto/
++.obsidian/
++*.obsidian/
++
++# --- Pytest / herramientas ---------------------------------------------------
++.pytest_cache/
++.coverage
++htmlcov/
++
++# --- Entornos virtuales con otros nombres ------------------------------------
++# .venv/ ya estaba; se agregan las variantes cortas que se crean sin pensar.
++.v/
++venv/
++ENV/
++
++# --- Parches del refactor (entrega temporal, NO va al repo) -------------------
++# Carpeta con los .patch de las fases 1-6. Se aplican con `git am --keep-cr` y
++# despues se borra. Si queda, ensucia el repo con 400 KB de diffs ya aplicados.
++_parches_refactor/
++*.patch
++*.orig
++*.rej
++
++# --- Restos de archivos borrados mientras estaban abiertos -------------------
++# Los .fuse_hidden* los genera el montaje de red/FUSE al borrar un archivo que
++# todavia tiene un proceso encima. No son codigo. OJO: hay 8 ya commiteados en
++# templates/ que esta regla NO saca sola; hay que hacerles `git rm --cached`.
++.fuse_hidden*
++*.fuse_hidden*
++
++# --- Navegador de las verificaciones ------------------------------------------
++# verificacion/*.py usa Playwright, que descarga navegadores y deja trazas.
++# Los scripts SI van al repo; lo que baja Playwright, no.
++.playwright/
++playwright-report/
++test-results/
