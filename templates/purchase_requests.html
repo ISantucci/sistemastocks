@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_pagination.html" import pagination %}
 {% block title %}Solicitudes de Compra · TNGStocks{% endblock %}
 {% block page_title %}Solicitudes de Compra{% endblock %}
 {% block content %}
@@ -42,6 +43,7 @@
       </tbody>
     </table>
   </div>
+  {{ pagination(page_obj, "solicitud", "solicitudes") }}
 </div>
 
 {% if me and me.role in ["ADMIN","SUPERVISOR"] %}

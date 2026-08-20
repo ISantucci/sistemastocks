@@ -1,0 +1,35 @@
+{
+  "_readme": [
+    "Catálogo de dependencias front-end de terceros, fijadas por versión.",
+    "",
+    "Mientras 'local' sea null, la app las sirve desde el CDN (comportamiento",
+    "histórico). Corriendo `python scripts/vendor_assets.py` se descargan a",
+    "static/vendor/, se calcula el hash SRI y este archivo se actualiza solo:",
+    "a partir de ahí la app las sirve locales y deja de depender del CDN.",
+    "",
+    "No editar 'integrity' a mano: lo calcula el script desde el archivo real."
+  ],
+  "assets": {
+    "tom-select-css": {
+      "version": "2.3.1",
+      "url": "https://cdn.jsdelivr.net/npm/tom-select@2.3.1/dist/css/tom-select.bootstrap5.min.css",
+      "local": null,
+      "integrity": null,
+      "type": "css"
+    },
+    "tom-select-js": {
+      "version": "2.3.1",
+      "url": "https://cdn.jsdelivr.net/npm/tom-select@2.3.1/dist/js/tom-select.complete.min.js",
+      "local": null,
+      "integrity": null,
+      "type": "js"
+    },
+    "chartjs": {
+      "version": "4.4.1",
+      "url": "https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js",
+      "local": null,
+      "integrity": null,
+      "type": "js"
+    }
+  }
+}

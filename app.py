@@ -6,6 +6,8 @@ import os
 import secrets
 import sqlite3
 import math
+import json
+from urllib.parse import urlencode
 
 # Hora local Argentina (UTC-3, sin horario de verano). Offset fijo para no
 # depender de la zona horaria del sistema/contenedor ni de librerias externas.
@@ -18,8 +20,9 @@ def now_ar():
 
 from flask import Flask, render_template, request, redirect, url_for, flash, Response, jsonify
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import func
+from sqlalchemy import func, case
 from flask import session
+from flask import g
 from flask import Response
 from flask_login import (
     LoginManager, login_user, logout_user,
@@ -94,6 +97,12 @@ def handle_csrf_error(e):
 # entorno para NO romper el acceso por HTTP en la EC2 si todavia no hay TLS
 # delante (default false = comportamiento actual). Poner en "true" cuando la
 # app quede detras de HTTPS.
+#
+# SESSION_COOKIE_SAMESITE se deja en "Lax" a proposito (no "Strict"): con
+# "Strict" la cookie NO viaja cuando el usuario llega al sistema desde un link
+# externo (mail, chat interno, favorito compartido) y aparece deslogueado sin
+# motivo aparente. La proteccion contra CSRF ya la da Flask-WTF (CSRFProtect
+# global), que es la defensa correcta; SameSite es solo una capa extra.
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
@@ -102,17 +111,286 @@ app.config.update(
     ),
 )
 
+# Tamano maximo de request. Corta subidas gigantes (import de items) antes de
+# leerlas a memoria. 16 MB alcanza de sobra para los CSV/XLSX del sistema.
+app.config["MAX_CONTENT_LENGTH"] = int(
+    os.environ.get("MAX_CONTENT_LENGTH_MB", "16")
+) * 1024 * 1024
+
+# Subida de archivos: el unico endpoint que recibe archivos es el import de
+# items, y lo procesa en memoria (nunca escribe en disco).
+IMPORT_ALLOWED_EXTENSIONS = {".csv", ".txt", ".tsv"}
+IMPORT_MAX_BYTES = int(os.environ.get("IMPORT_MAX_MB", "8")) * 1024 * 1024
+
+
+@app.errorhandler(413)
+def _handle_too_large(_e):
+    mb = app.config["MAX_CONTENT_LENGTH"] // (1024 * 1024)
+    flash(f"El archivo es demasiado grande (maximo {mb} MB).", "error")
+    return redirect(request.referrer or url_for("home")), 302
+
+
+# ------------------ ASSETS DE TERCEROS (Tom Select / Chart.js) ------------------
+# Los templates ya no hardcodean la URL del CDN: piden el asset por nombre y
+# esta capa decide de donde sale.
+#   - Si el asset esta vendorizado (scripts/vendor_assets.py lo bajo a
+#     static/vendor/), se sirve LOCAL: sin dependencia del CDN en runtime.
+#   - Si no, se sirve desde el CDN con la version fijada, mas integrity (SRI)
+#     si el manifiesto ya la conoce, mas crossorigin/referrerpolicy.
+# El comportamiento por defecto (sin vendorizar) es el mismo de siempre, asi
+# que no rompe nada; vendorizar es un paso opcional y reversible.
+VENDOR_MANIFEST_PATH = BASE_DIR / "static" / "vendor" / "assets.json"
+
+
+def _load_vendor_assets():
+    try:
+        with open(VENDOR_MANIFEST_PATH, "r", encoding="utf-8") as fh:
+            return json.load(fh).get("assets", {})
+    except Exception as exc:  # manifiesto ausente o corrupto: no romper el arranque
+        print(f"[WARN] No se pudo leer {VENDOR_MANIFEST_PATH}: {exc}")
+        return {}
+
+
+VENDOR_ASSETS = _load_vendor_assets()
+
+
+@app.template_global()
+def vendor_asset(name):
+    """Datos de un asset de terceros para el template: url, integrity, es_local."""
+    meta = VENDOR_ASSETS.get(name)
+    if not meta:
+        return {"url": "", "integrity": None, "is_local": False}
+
+    local = meta.get("local")
+    if local and (BASE_DIR / "static" / local).exists():
+        return {
+            "url": url_for("static", filename=local),
+            "integrity": None,   # archivo propio: SRI no aporta nada
+            "is_local": True,
+        }
+    return {
+        "url": meta.get("url", ""),
+        "integrity": meta.get("integrity"),
+        "is_local": False,
+    }
+
+
+def _any_asset_from_cdn():
+    if not VENDOR_ASSETS:
+        return True
+    for meta in VENDOR_ASSETS.values():
+        local = meta.get("local")
+        if not local or not (BASE_DIR / "static" / local).exists():
+            return True
+    return False
+
+
+# Origenes externos permitidos por la CSP. Si TODOS los assets estan
+# vendorizados, la CSP se cierra sola y deja de permitir CDNs.
+CDN_ORIGINS = (
+    "https://cdn.jsdelivr.net https://cdnjs.cloudflare.com"
+    if _any_asset_from_cdn()
+    else ""
+).strip()
+
+# CSP en modo REPORT-ONLY por defecto: reporta lo que romperia pero NO bloquea
+# nada. Los templates usan <script>/<style> inline, asi que una CSP en enforce
+# sin 'unsafe-inline' los romperia. Para pasar a enforce (una vez validado en
+# staging) poner CSP_ENFORCE=true.
+# La tipografia Inter se carga desde Google Fonts (base.html). No se puede
+# aplicar SRI porque el CSS que devuelve Google varia segun el navegador, asi
+# que se declara explicitamente como origen permitido. Si en algun momento se
+# descarga la fuente al servidor, borrar esta constante y la CSP se cierra sola.
+FONT_ORIGINS = "https://fonts.googleapis.com https://fonts.gstatic.com"
+
+
+def _csp_directive(name, *sources):
+    return " ".join([name] + [s for s in sources if s])
+
+
+CSP_POLICY = "; ".join([
+    _csp_directive("default-src", "'self'"),
+    _csp_directive("script-src", "'self'", "'unsafe-inline'", CDN_ORIGINS),
+    _csp_directive("style-src", "'self'", "'unsafe-inline'", CDN_ORIGINS, FONT_ORIGINS),
+    _csp_directive("img-src", "'self'", "data:"),
+    _csp_directive("font-src", "'self'", "data:", CDN_ORIGINS, FONT_ORIGINS),
+    _csp_directive("connect-src", "'self'"),
+    _csp_directive("frame-src", "'self'"),
+    _csp_directive("frame-ancestors", "'self'"),
+    _csp_directive("form-action", "'self'"),
+    _csp_directive("base-uri", "'self'"),
+    _csp_directive("object-src", "'none'"),
+])
+CSP_ENFORCE = os.environ.get("CSP_ENFORCE", "false").strip().lower() == "true"
+
+# HSTS: SOLO si HTTPS esta realmente funcionando delante. Activarlo por error
+# sobre HTTP deja el dominio inaccesible en los navegadores por meses.
+HSTS_ENABLED = os.environ.get("HSTS_ENABLED", "false").strip().lower() == "true"
+HSTS_MAX_AGE = os.environ.get("HSTS_MAX_AGE", "31536000")
+
 
 @app.after_request
 def _security_headers(resp):
-    # Cabeceras de seguridad basicas. No se agrega CSP estricta a proposito:
-    # los templates usan estilos/scripts inline y una CSP estricta los romperia.
+    # Cabeceras de seguridad basicas.
     # X-Frame-Options=SAMEORIGIN (no DENY) para no romper las vistas embebidas
     # del mismo dominio (parametro ?embed=1).
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
     resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
     resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    # Desactiva APIs del navegador que el sistema no usa.
+    resp.headers.setdefault(
+        "Permissions-Policy",
+        "geolocation=(), microphone=(), camera=(), payment=(), usb=(), "
+        "magnetometer=(), gyroscope=(), interest-cohort=()",
+    )
+    resp.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    resp.headers.setdefault("X-Permitted-Cross-Domain-Policies", "none")
+
+    if CSP_ENFORCE:
+        resp.headers.setdefault("Content-Security-Policy", CSP_POLICY)
+    else:
+        resp.headers.setdefault("Content-Security-Policy-Report-Only", CSP_POLICY)
+
+    if HSTS_ENABLED and request.is_secure:
+        resp.headers.setdefault(
+            "Strict-Transport-Security",
+            f"max-age={HSTS_MAX_AGE}; includeSubDomains",
+        )
+
+    # No publicar el stack (waitress / mod_wsgi / version de Python).
+    resp.headers["Server"] = "TNGStocks"
+    resp.headers.pop("X-Powered-By", None)
     return resp
+
+
+# ------------------ PAGINACION (arquitectura escalable de listados) ------------------
+# Motivo: hasta ahora los listados hacian .all() (o .limit(500) fijo) y armaban
+# UN SOLO HTML con TODAS las filas. Eso crece de forma lineal con los datos:
+# el HTML pesa mas, el navegador tarda mas y el worker queda ocupado mas tiempo.
+# Ademas el .limit(500) fijo OCULTABA filas en silencio (peor que paginar: el
+# usuario no se enteraba de que faltaban registros).
+#
+# Criterio de compatibilidad:
+#  - Se reutiliza el MISMO parametro "limit" que ya usaban movements/descartes/
+#    reparaciones, ahora con el significado de "filas por pagina". Cualquier URL
+#    vieja con ?limit=N sigue funcionando y muestra lo mismo en la pagina 1.
+#  - Se agrega el parametro "page" (default 1). Sin ?page, el comportamiento es
+#    el de siempre: se ve el principio del listado.
+#  - Los exports (CSV/XLSX) NO se paginan: siguen exportando el resultado
+#    completo del filtro, que es lo que la operacion diaria espera.
+
+PER_PAGE_DEFAULT = 200
+PER_PAGE_CHOICES = (50, 100, 200, 500, 1000)
+PER_PAGE_MAX = 5000
+
+
+class PageResult:
+    """Resultado paginado, liviano y sin dependencias del backend de DB.
+
+    Expone lo minimo que necesitan los templates. Es iterable para que
+    `{% for x in pagina %}` funcione igual que con una lista.
+    """
+
+    __slots__ = ("items", "page", "per_page", "total", "pages")
+
+    def __init__(self, items, page, per_page, total):
+        self.items = items
+        self.page = page
+        self.per_page = per_page
+        self.total = total
+        self.pages = max(1, math.ceil(total / per_page)) if per_page else 1
+
+    def __iter__(self):
+        return iter(self.items)
+
+    def __len__(self):
+        return len(self.items)
+
+    def __bool__(self):
+        return bool(self.items)
+
+    @property
+    def has_prev(self):
+        return self.page > 1
+
+    @property
+    def has_next(self):
+        return self.page < self.pages
+
+    @property
+    def first_index(self):
+        return 0 if not self.total else (self.page - 1) * self.per_page + 1
+
+    @property
+    def last_index(self):
+        return min(self.page * self.per_page, self.total)
+
+    def window(self, radius=2):
+        """Numeros de pagina a mostrar alrededor de la actual (con None = '...')."""
+        out = []
+        last = 0
+        for n in range(1, self.pages + 1):
+            if n <= 2 or n > self.pages - 2 or abs(n - self.page) <= radius:
+                if last and n - last > 1:
+                    out.append(None)
+                out.append(n)
+                last = n
+        return out
+
+
+def per_page_from_request(default=PER_PAGE_DEFAULT, arg="limit"):
+    """Filas por pagina pedidas por el usuario, acotadas a un maximo sano."""
+    raw = (request.args.get(arg) or "").strip()
+    value = int(raw) if raw.isdigit() and int(raw) > 0 else default
+    return max(1, min(value, PER_PAGE_MAX))
+
+
+def page_from_request(arg="page"):
+    raw = (request.args.get(arg) or "").strip()
+    return max(1, int(raw)) if raw.isdigit() and int(raw) > 0 else 1
+
+
+def paginate(query, per_page=None, page=None, count_query=None):
+    """Pagina una query de SQLAlchemy sin traer todo a memoria.
+
+    Se cuenta con una subconsulta (count_query opcional para casos con join +
+    distinct donde el count directo seria mas caro o incorrecto). Si la pagina
+    pedida quedo fuera de rango (por ejemplo, se borro un registro), se cae a
+    la ultima pagina valida en vez de mostrar una tabla vacia.
+    """
+    per_page = per_page if per_page is not None else per_page_from_request()
+    page = page if page is not None else page_from_request()
+
+    total = (count_query if count_query is not None else query).order_by(None).count()
+    pages = max(1, math.ceil(total / per_page)) if per_page else 1
+    if page > pages:
+        page = pages
+
+    items = query.limit(per_page).offset((page - 1) * per_page).all()
+    return PageResult(items, page, per_page, total)
+
+
+@app.template_global()
+def url_with(**overrides):
+    """URL actual con algunos parametros cambiados (el resto se conserva).
+
+    Sirve para los links de paginacion y de orden sin tener que repetir en cada
+    template la lista completa de filtros vigentes (que es justamente lo que
+    hoy hace que agregar un filtro obligue a tocar 6 lugares).
+    """
+    args = request.args.to_dict(flat=True)
+    for key, value in overrides.items():
+        if value is None or value == "":
+            args.pop(key, None)
+        else:
+            args[key] = value
+    query = urlencode(args)
+    return f"{request.path}?{query}" if query else request.path
+
+
+@app.context_processor
+def _pagination_globals():
+    return {"PER_PAGE_CHOICES": PER_PAGE_CHOICES}
 
 
 # ------------------ RATE LIMITING (flask-limiter) ------------------
@@ -671,11 +949,26 @@ class Movement(db.Model):
     # separarlos del listado de Movimientos sin tocar el historico.
     supplier_id = db.Column(db.Integer, db.ForeignKey("suppliers.id"), nullable=True)
 
+    # --- Reversión dentro de la ventana corta (ver movement_revert_blockers) ---
+    # Un movimiento NO se borra nunca: si se revierte, queda marcado acá y se
+    # genera un contra-movimiento con su propio número. Así el historial muestra
+    # el error y su corrección, que es justamente lo que da trazabilidad.
+    # Las tres columnas son nullable: las filas viejas quedan en NULL = "no
+    # revertido", y ensure_sqlite_schema() las agrega sola al reiniciar.
+    reverted_at = db.Column(db.DateTime, nullable=True)
+    reverted_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    # Si está seteado, ESTE movimiento es la reversión del que apunta.
+    reverses_movement_id = db.Column(db.Integer, db.ForeignKey("movements.id"), nullable=True)
+
     item = db.relationship("Item")
     supplier = db.relationship("Supplier")
     from_location = db.relationship("Location", foreign_keys=[from_location_id])
     to_location = db.relationship("Location", foreign_keys=[to_location_id])
-    user = db.relationship("User")
+    # foreign_keys explícito: desde que existe reverted_by_user_id hay DOS FK
+    # hacia users, y sin esto SQLAlchemy no puede resolver cuál usa cada relación.
+    user = db.relationship("User", foreign_keys=[user_id])
+    reverted_by = db.relationship("User", foreign_keys=[reverted_by_user_id])
+    reverses = db.relationship("Movement", remote_side=[id], foreign_keys=[reverses_movement_id])
 
 class PendingDelivery(db.Model):
     __tablename__ = "pending_deliveries"
@@ -1141,10 +1434,25 @@ def build_units_map(location_ids=None):
 
 
 def next_movement_number():
+    """Siguiente numero de movimiento. Formato: MOV-YYYY-0001.
+
+    El `seq` se reinicia cada anio. El numero DEBE llevar el anio: sin el, al
+    cambiar de anio el seq vuelve a 1 y el numero resultante ya existe, con lo
+    que el UNIQUE de `number` hace fallar el registro. Mismo formato que los
+    remitos (R-YYYY-0001) y las solicitudes (SR-YYYY-0001).
+
+    Los movimientos historicos con el formato viejo (MOV-001) NO se tocan: se
+    conservan tal cual para no romper el historial. Durante un tiempo van a
+    convivir los dos formatos, que es lo esperado.
+
+    Nota: bajo alta concurrencia dos requests podrian calcular el mismo seq
+    antes de commitear. El UNIQUE de `number` lo frena a nivel DB (el segundo
+    commit falla). Mismo riesgo menor ya documentado en next_remito_number().
+    """
     y = now_ar().year
     last = Movement.query.filter_by(year=y).order_by(Movement.seq.desc()).first()
     seq = (last.seq or 0) + 1 if last else 1
-    return y, seq, f"MOV-{seq:03d}"
+    return y, seq, f"MOV-{y}-{seq:04d}"
 
 
 def next_remito_number(year: int | None = None):
@@ -1249,7 +1557,10 @@ def _build_movements_query(filters: dict, include_supplier: bool = False):
     LISTADO de /movements muestre ingresos/egresos junto a los internos.
     Los movimientos internos historicos (supplier_id NULL) no se tocan.
     """
-    q = Movement.query.join(Item).join(User)
+    # onclause explícito: movements tiene DOS FK hacia users (user_id y
+    # reverted_by_user_id), así que el join implícito sería ambiguo. El
+    # responsable del movimiento sigue siendo user_id, igual que siempre.
+    q = Movement.query.join(Item).join(User, Movement.user_id == User.id)
     if not include_supplier:
         q = q.filter(Movement.supplier_id.is_(None))
 
@@ -1508,6 +1819,94 @@ def location_is_external(location_id: int) -> bool:
     return bool(loc and loc.is_external)
 
 
+# ------------------ HELPERS: REVERSIÓN DE MOVIMIENTOS ------------------
+
+# Ventana durante la cual un movimiento recién cargado se puede revertir.
+# Configurable por entorno para poder ajustarla sin tocar código.
+MOVEMENT_REVERT_MINUTES = int(os.environ.get("MOVEMENT_REVERT_MINUTES", "60"))
+
+
+def movement_revert_blockers(m: "Movement") -> list[str]:
+    """Motivos por los que un movimiento NO se puede revertir.
+
+    Lista vacía = se puede revertir. Es la ÚNICA fuente de verdad: la usan
+    tanto el listado (para decidir si muestra el botón) como el endpoint POST
+    (para autorizar de verdad). Ocultar el botón no alcanza como control.
+
+    El criterio es conservador: ante cualquier duda sobre si la reversión deja
+    el sistema consistente, se bloquea y se explica el motivo.
+    """
+    reasons: list[str] = []
+
+    if m.reverses_movement_id:
+        reasons.append("Es la reversión de otro movimiento.")
+    if m.reverted_at:
+        reasons.append("Ya fue revertido.")
+
+    # Ventana de tiempo. now_ar() y created_at comparten zona horaria.
+    limite = now_ar() - timedelta(minutes=MOVEMENT_REVERT_MINUTES)
+    if m.created_at and m.created_at < limite:
+        reasons.append(f"Pasaron más de {MOVEMENT_REVERT_MINUTES} minutos.")
+
+    # Serializados: no existe un vínculo ItemUnit -> Movement, así que no hay
+    # forma confiable de saber qué unidades tocó este movimiento (los seriales
+    # sólo quedan como texto en la observación). Antes que adivinar, se bloquea.
+    if m.item and m.item.serialized:
+        reasons.append("El ítem es serializado: la reversión automática no está soportada.")
+
+    # Ya se emitió el papel: revertir dejaría el remito mintiendo.
+    if RemitoLine.query.filter_by(movement_id=m.id).first():
+        reasons.append("El movimiento ya está incluido en un remito.")
+
+    # Pendientes: si alguno ya se cerró, hay una cadena posterior colgando.
+    if PendingDelivery.query.filter_by(movement_id=m.id, returned=True).first():
+        reasons.append("El pendiente generado ya fue devuelto.")
+
+    # Reparación ya resuelta: generó sus propios movimientos.
+    rep_resuelta = (
+        Repair.query.filter(Repair.item_id == m.item_id)
+        .filter(Repair.source_location_id == m.from_location_id)
+        .filter(Repair.created_at >= m.created_at)
+        .filter(Repair.status != "EN_REPARACION")
+        .first()
+    )
+    if rep_resuelta:
+        reasons.append("La reparación asociada ya fue resuelta.")
+
+    # Stock: revertir devuelve la mercadería al origen, o sea la saca del
+    # destino. Si ya no está ahí (se movió de nuevo), la reversión no es válida.
+    if not location_is_external(m.to_location_id):
+        row = Stock.query.filter_by(item_id=m.item_id, location_id=m.to_location_id).first()
+        if not row or (row.quantity or 0) < m.qty:
+            reasons.append("El stock ya no está en la ubicación de destino.")
+
+    return reasons
+
+
+def movement_can_revert(m: "Movement") -> bool:
+    return not movement_revert_blockers(m)
+
+
+# Filtros del listado de movimientos que se conservan al ir y volver de una
+# acción. Lista blanca a propósito: pasar request.args entero permitiría que un
+# parámetro cualquiera de la URL choque con los de url_for y tire un error.
+_MOV_VIEW_ARGS = ("from_date", "to_date", "item_id", "user_id", "limit", "page", "sort_by", "sort_dir")
+
+
+def movements_view_args() -> dict:
+    args = {}
+    for key in _MOV_VIEW_ARGS:
+        val = (request.args.get(key) or "").strip()
+        if val:
+            args[key] = val
+    return args
+
+
+@app.context_processor
+def _movements_view_args():
+    return {"movements_view_args": movements_view_args}
+
+
 # ------------------ HELPERS: OPERACIONES DESTRUCTIVAS ------------------
 
 def _backup_db(label: str) -> Path:
@@ -1752,6 +2151,15 @@ def login():
             flash("Usuario o contraseña incorrectos", "error")
             return redirect(url_for("login"))
 
+        # Rotacion de sesion al autenticar: se descarta cualquier contenido de
+        # la sesion anonima previa antes de marcarla como autenticada. Evita
+        # fijacion de sesion (que un atacante plante un valor de sesion y lo
+        # herede al loguearse la victima) y arrastre de flashes de otro usuario.
+        session.clear()
+        # Flask-WTF cachea el token CSRF crudo en `g` ademas de la sesion. Si
+        # no se limpia, la proxima pantalla reusaria el token viejo (que ya no
+        # esta en la sesion recien vaciada) y el primer POST daria 400.
+        g.pop("csrf_token", None)
         login_user(user)
         return redirect(url_for("home"))
 
@@ -2469,9 +2877,16 @@ def items():
     sort_by = f["sort_by"]
     sort_dir = f["sort_dir"]
 
-    items_list = _build_items_query(f).all()
+    # Paginado. Esta pantalla era la mas pesada de todas: ademas de la tabla,
+    # renderiza UN MODAL DE EDICION POR FILA, asi que el HTML crecia el doble
+    # de rapido. Al paginar, tabla y modales quedan acotados.
+    # El export XLSX sigue exportando el filtro completo, sin paginar.
+    items_page = paginate(_build_items_query(f))
+    items_list = items_page.items
     categories_list = Category.query.order_by(Category.name).all()
-    all_items = Item.query.order_by(Item.code).all()
+    all_items, all_items_remote = item_picker_options(
+        item_filter, value_field="id", base_query=Item.query
+    )
 
     # Proveedores activos para los selectores de alta/edición. Se ordenan por
     # el nombre que se muestra, igual que en la pantalla de Proveedores.
@@ -2498,8 +2913,10 @@ def items():
     return render_template(
         "items.html",
         items=items_list,
+        page_obj=items_page,
         categories=categories_list,
         all_items=all_items,
+        all_items_remote=all_items_remote,
         next_codes=next_codes,
         suppliers=suppliers_list,
         item_supplier_ids=item_supplier_ids,
@@ -2996,6 +3413,112 @@ def item_unit_delete(unit_id: int):
 
 # ---- STOCK (con filtros) ----
 
+# ------------------ SELECTOR DE ITEMS (catalogo grande) ------------------
+# Segundo foco del problema "todo en un solo HTML": varias pantallas vuelcan el
+# CATALOGO COMPLETO de items dentro de un <select> en cada carga de pagina. Con
+# pocos items no se nota; con miles, el HTML se dispara aunque la tabla este
+# paginada.
+#
+# Solucion sin romper nada: se mantiene EXACTAMENTE el select actual mientras
+# el catalogo activo sea chico (que es el caso hoy). Recien cuando supera el
+# umbral, el select pasa a modo remoto y busca contra /api/items/search a
+# medida que se tipea. El cambio es automatico y no requiere tocar la UI.
+ITEM_PICKER_MAX_INLINE = int(os.environ.get("ITEM_PICKER_MAX_INLINE", "800"))
+ITEM_SEARCH_LIMIT = 50
+
+
+def tech_location_ids_for(user):
+    """Ids de las ubicaciones de las que el usuario es responsable."""
+    return [
+        l.id for l in Location.query.join(LocationResponsible).filter(
+            LocationResponsible.user_id == user.id,
+        ).all()
+    ]
+
+
+def items_visible_query():
+    """Catalogo de items que el usuario actual puede ver en un selector.
+
+    Regla confirmada: el TECNICO no accede a la seccion Items, pero si tiene
+    que poder ver los items que estan en SU camioneta (sus ubicaciones
+    asignadas). Antes el selector de /stock le mostraba el catalogo COMPLETO,
+    lo cual era incoherente con ese criterio y ademas con el propio codigo, que
+    ya acotaba las CATEGORIAS del tecnico a las presentes en su stock.
+
+    Los demas roles ven el catalogo activo completo, como siempre.
+    """
+    base = Item.query.filter(Item.is_active == True)
+    if getattr(current_user, "role", None) != "TECNICO":
+        return base
+
+    tech_ids = tech_location_ids_for(current_user)
+    if not tech_ids:
+        return base.filter(db.false())
+
+    return base.filter(
+        Item.id.in_(
+            db.session.query(Stock.item_id).filter(
+                Stock.location_id.in_(tech_ids),
+                Stock.quantity > 0,
+            )
+        )
+    )
+
+
+def item_picker_options(selected_value=None, value_field="code", base_query=None):
+    """Opciones para un <select> de items. Devuelve (opciones, es_remoto).
+
+    - es_remoto=False -> lista completa (comportamiento historico, sin cambios).
+    - es_remoto=True  -> solo la opcion ya seleccionada, para que el filtro
+      vigente se siga viendo; el resto lo trae /api/items/search.
+    """
+    q = base_query if base_query is not None else items_visible_query()
+    total = q.order_by(None).count()
+
+    if total <= ITEM_PICKER_MAX_INLINE:
+        return q.order_by(Item.code).all(), False
+
+    selected_value = (str(selected_value).strip() if selected_value else "")
+    if not selected_value:
+        return [], True
+
+    column = Item.id if value_field == "id" else Item.code
+    if value_field == "id" and not selected_value.isdigit():
+        return [], True
+    needle = int(selected_value) if value_field == "id" else selected_value
+    return q.filter(column == needle).all(), True
+
+
+@app.route("/api/items/search")
+@login_required
+def api_items_search():
+    """Busqueda de items para los selects remotos (solo lectura).
+
+    Devuelve como maximo ITEM_SEARCH_LIMIT filas y aplica EL MISMO alcance que
+    el selector renderizado en el servidor (items_visible_query): al TECNICO
+    solo le devuelve items presentes en sus ubicaciones asignadas.
+
+    Es importante que el alcance viva en items_visible_query() y no se duplique
+    aca: si un dia cambia la regla, tiene que cambiar en un solo lugar. Acotar
+    solo el <select> y dejar la API abierta seria seguridad visual, no real.
+    """
+    term = (request.args.get("q") or "").strip()
+    q = items_visible_query()
+    if term:
+        like = f"%{term}%"
+        q = q.filter(db.or_(Item.code.ilike(like), Item.name.ilike(like)))
+    rows = q.order_by(Item.code).limit(ITEM_SEARCH_LIMIT).all()
+    return jsonify([
+        {
+            "id": it.id,
+            "code": it.code,
+            "name": it.name,
+            "label": f"{it.code} - {it.name}",
+        }
+        for it in rows
+    ])
+
+
 @app.route("/stock")
 @login_required
 def stock():
@@ -3045,7 +3568,10 @@ def stock():
             )
         )
 
-    rows = q.order_by(Location.name, Item.code).all()
+    # Paginado: antes se hacia .all() y se renderizaba TODA la tabla en un solo
+    # HTML. Los filtros y el export CSV siguen operando sobre el total.
+    rows_page = paginate(q.order_by(Location.name, Item.code))
+    rows = rows_page.items
 
     locations_list = tech_locations if is_tecnico else Location.query.order_by(Location.name).all()
     if is_tecnico:
@@ -3069,14 +3595,16 @@ def stock():
     else:
         categories_list = Category.query.order_by(Category.name).all()
 
-    items_list = Item.query.filter(Item.is_active == True).order_by(Item.code).all()
+    items_list, items_remote = item_picker_options(q_text, value_field="code")
 
     return render_template(
         "stock.html",
         stock_rows=rows,
+        page_obj=rows_page,
         locations=locations_list,
         categories=categories_list,
         items=items_list,
+        items_remote=items_remote,
         selected_location_id=loc_id,
         selected_category_id=category_id,
         selected_trackable=trackable,
@@ -3458,24 +3986,57 @@ def movements():
     # (comportamiento historico). _build_movements_query ya hace join a Item y User.
     sort_by = (request.args.get("sort_by") or "date").strip()
     sort_dir = (request.args.get("sort_dir") or "desc").strip().lower()
-    _mov_sortable = {
-        "date": Movement.created_at,
-        "qty": Movement.qty,
-        "item": Item.code,
-        "user": User.username,
-    }
-    _sort_col = _mov_sortable.get(sort_by, Movement.created_at)
-    _order = _sort_col.desc() if sort_dir == "desc" else _sort_col.asc()
+    # Estado de reversión como valor ordenable: normal (0) < revertido (1) <
+    # reversión (2). Se calcula en SQL para poder ordenar antes de paginar.
+    # OJO: "se puede revertir" NO entra acá y no se puede: depende de chequeos
+    # (stock actual, remitos, pendientes) que corren fila por fila DESPUÉS de
+    # traer la página, y además deja de ser cierto solo con el paso del tiempo.
+    _revert_state = case(
+        (Movement.reverses_movement_id.isnot(None), 2),
+        (Movement.reverted_at.isnot(None), 1),
+        else_=0,
+    )
 
-    logs_q = _build_movements_query(filters, include_supplier=True).order_by(_order)
+    # Cada clave puede mapear a varias columnas: la primera manda y el resto
+    # desempata. El ID que se ve en pantalla es el número (MOV-AAAA-NNNN), así
+    # que se ordena por año+secuencia y no por el texto, que ordenaría mal
+    # (MOV-1000 antes que MOV-999) y no existe en los movimientos históricos.
+    _mov_sortable = {
+        "date": [Movement.created_at],
+        "qty": [Movement.qty],
+        "item": [Item.code],
+        "user": [User.username],
+        "id": [Movement.year, Movement.seq, Movement.id],
+        "action": [_revert_state, Movement.created_at],
+    }
+    _sort_cols = _mov_sortable.get(sort_by, [Movement.created_at])
+    _order = [c.desc() if sort_dir == "desc" else c.asc() for c in _sort_cols]
+
+    logs_q = _build_movements_query(filters, include_supplier=True).order_by(*_order)
     if is_tecnico and tech_location_ids:
         logs_q = logs_q.filter(db.or_(
             Movement.from_location_id.in_(tech_location_ids),
             Movement.to_location_id.in_(tech_location_ids),
         ))
-    logs = logs_q.limit(limit).all()
+    # "limit" = filas por pagina (mismo parametro y mismo default de siempre).
+    logs_page = paginate(logs_q, per_page=limit)
+    logs = logs_page.items
 
     users_list = User.query.order_by(User.username).all()
+
+    # Qué movimientos de ESTA página se pueden revertir. Sólo se evalúan los
+    # candidatos obvios (recientes, no revertidos, no reversiones), así el
+    # chequeo caro corre sobre unas pocas filas y no sobre toda la página.
+    revertibles = set()
+    if current_user.role in ("ADMIN", "SUPERVISOR"):
+        _limite = now_ar() - timedelta(minutes=MOVEMENT_REVERT_MINUTES)
+        for _m in logs:
+            if _m.reverted_at or _m.reverses_movement_id:
+                continue
+            if not _m.created_at or _m.created_at < _limite:
+                continue
+            if movement_can_revert(_m):
+                revertibles.add(_m.id)
 
     # Mapa ubicacion -> items con stock (>0), para filtrar el selector "Item" segun "Desde"
     stock_map = {}
@@ -3501,6 +4062,7 @@ def movements():
         locations=locations_list,
         from_locations=from_locations,
         logs=logs,
+        page_obj=logs_page,
         stock_map=stock_map,
         stock_qty_map=stock_qty_map,
         external_location_ids=external_location_ids,
@@ -3522,7 +4084,108 @@ def movements():
         is_tecnico=is_tecnico,
         tech_locations=tech_locations,
         descartes_id=descartes_id,
+        revertibles=revertibles,
+        revert_minutes=MOVEMENT_REVERT_MINUTES,
     )
+
+@app.route("/movements/<int:movement_id>/revertir", methods=["POST"])
+@login_required
+@role_required("ADMIN", "SUPERVISOR")
+def movement_revert(movement_id: int):
+    """Revierte un movimiento reciente generando un CONTRA-MOVIMIENTO.
+
+    No borra ni edita el movimiento original: lo marca como revertido y crea uno
+    nuevo, inverso, con su propio número. El historial queda mostrando las dos
+    operaciones. Es alto impacto: sólo ADMIN/SUPERVISOR, dentro de la ventana de
+    MOVEMENT_REVERT_MINUTES, y sólo si movement_revert_blockers() está vacío.
+
+    La autorización se revalida acá entera: que el listado no muestre el botón
+    no es un control (alguien puede mandar el POST directo).
+    """
+    m = Movement.query.get_or_404(movement_id)
+
+    blockers = movement_revert_blockers(m)
+    if blockers:
+        flash("No se puede revertir: " + " ".join(blockers), "error")
+        return redirect(url_for("movements"))
+
+    try:
+        # El inverso exacto de lo que hizo el original: sale del destino y
+        # vuelve al origen. Las ubicaciones externas (Proveedor) no llevan
+        # stock propio, igual que al registrar el movimiento.
+        if not location_is_external(m.to_location_id):
+            upsert_stock(m.item_id, m.to_location_id, -m.qty)
+        if not location_is_external(m.from_location_id):
+            upsert_stock(m.item_id, m.from_location_id, m.qty)
+
+        detalle = []
+
+        # Pendientes abiertos: son deudas de devolución creadas por el
+        # movimiento que se está anulando. Si el movimiento no existió, la
+        # deuda tampoco. Los ya devueltos bloquean antes (ver blockers).
+        pendientes = PendingDelivery.query.filter_by(movement_id=m.id, returned=False).all()
+        for p in pendientes:
+            db.session.delete(p)
+        if pendientes:
+            detalle.append(f"{len(pendientes)} pendiente(s) anulado(s)")
+
+        # Scrap generado por un movimiento hacia Descartes: si no se elimina,
+        # las métricas de descartes siguen contando algo que se anuló.
+        scraps = (
+            Scrap.query.filter_by(item_id=m.item_id, location_id=m.from_location_id)
+            .filter(Scrap.created_at >= m.created_at)
+            .filter(Scrap.quantity == m.qty)
+            .all()
+        )
+        for s in scraps:
+            db.session.delete(s)
+        if scraps:
+            detalle.append(f"{len(scraps)} descarte(s) anulado(s)")
+
+        # Reparación abierta generada por un movimiento hacia "En reparación".
+        # Las ya resueltas bloquean antes (ver blockers).
+        repairs = (
+            Repair.query.filter_by(item_id=m.item_id, source_location_id=m.from_location_id)
+            .filter(Repair.created_at >= m.created_at)
+            .filter(Repair.status == "EN_REPARACION")
+            .all()
+        )
+        for r in repairs:
+            db.session.delete(r)
+        if repairs:
+            detalle.append(f"{len(repairs)} reparación(es) anulada(s)")
+
+        y, seq, number = next_movement_number()
+        obs = f"Reversión del movimiento {m.number or m.id}"
+        if detalle:
+            obs += " (" + ", ".join(detalle) + ")"
+
+        contra = Movement(
+            item_id=m.item_id,
+            qty=m.qty,
+            from_location_id=m.to_location_id,
+            to_location_id=m.from_location_id,
+            user_id=current_user.id,
+            observation=obs[:255],
+            year=y,
+            seq=seq,
+            number=number,
+            supplier_id=m.supplier_id,
+            reverses_movement_id=m.id,
+        )
+        db.session.add(contra)
+
+        m.reverted_at = now_ar()
+        m.reverted_by_user_id = current_user.id
+
+        db.session.commit()
+        flash(f"Movimiento {m.number or m.id} revertido con {number}.", "ok")
+    except Exception as e:
+        db.session.rollback()
+        flash(f"No se pudo revertir: {e}", "error")
+
+    return redirect(url_for("movements", **movements_view_args()))
+
 
 @app.route("/movements/bulk", methods=["GET", "POST"])
 @login_required
@@ -3602,6 +4265,11 @@ def movements_bulk():
             pending_responsible_id = first_resp.user_id
 
         parsed_lines = []
+        # Un item = una sola linea. Cargarlo dos veces rompe la trazabilidad
+        # (dos movimientos separados del mismo item) y permite pasarse del stock
+        # real, porque el tope de cantidad del front es por fila. El front ya lo
+        # saca del listado de las otras filas; esto es la validacion real.
+        seen_items = {}
 
         # Validaciones por linea
         for idx, line in enumerate(lines, start=1):
@@ -3629,6 +4297,15 @@ def movements_bulk():
             if not it or not it.is_active:
                 flash(f"Linea {idx}: el item seleccionado no existe o esta inactivo.", "error")
                 return redirect(url_for("movements_bulk"))
+
+            if item_id in seen_items:
+                flash(
+                    f"Linea {idx}: «{it.code} - {it.name}» ya esta cargado en la "
+                    f"linea {seen_items[item_id]}. Sumá la cantidad en una sola linea.",
+                    "error",
+                )
+                return redirect(url_for("movements_bulk"))
+            seen_items[item_id] = idx
 
             # Serializados: la carga múltiple no permite elegir seriales, así que
             # se bloquea para no desincronizar las unidades. Se usa Movimientos.
@@ -3856,6 +4533,7 @@ def item_usage():
             return render_template(
                 "item_usage.html",
                 items=[], is_tecnico=True, locations=[], movements=[],
+                page_obj=PageResult([], 1, 100, 0),
                 stock_map={}, stock_qty_map={}, serialized_item_ids=[],
                 users=[], from_date="", to_date="",
                 item_filter="", user_filter="", limit="100",
@@ -3891,7 +4569,10 @@ def item_usage():
         qtys = request.form.getlist("qty[]")
 
         # Limpieza de filas vacías + validación todo-o-nada (nada se toca hasta el try).
+        # Un ítem = una sola línea (ver nota en movements_bulk): el front lo saca
+        # del listado de las otras filas, acá está la validación real.
         parsed_lines = []
+        seen_items = {}
         for idx in range(len(item_ids)):
             item_raw = (item_ids[idx] or "").strip()
             qty_raw = (qtys[idx] or "").strip() if idx < len(qtys) else ""
@@ -3923,6 +4604,15 @@ def item_usage():
                     "error",
                 )
                 return redirect(url_for("item_usage"))
+
+            if item.id in seen_items:
+                flash(
+                    f"Línea {len(parsed_lines) + 1}: «{item.code} - {item.name}» ya está "
+                    f"cargado en la línea {seen_items[item.id]}. Sumá la cantidad en una sola línea.",
+                    "error",
+                )
+                return redirect(url_for("item_usage"))
+            seen_items[item.id] = len(parsed_lines) + 1
 
             parsed_lines.append({"item": item, "qty": qty})
 
@@ -4010,7 +4700,8 @@ def item_usage():
             hq = hq.join(Item)
             _col = Item.code
         elif sort_by == "user":
-            hq = hq.join(User)
+            # onclause explícito: ver nota en _build_movements_query.
+            hq = hq.join(User, Movement.user_id == User.id)
             _col = User.username
         elif sort_by == "qty":
             _col = Movement.qty
@@ -4018,8 +4709,13 @@ def item_usage():
             sort_by = "date"
             _col = Movement.created_at
         hq = hq.order_by(_col.desc() if sort_dir == "desc" else _col.asc())
-        movements_list = hq.limit(f_limit).all()
+        # "limit" pasa a significar "filas por pagina": una URL vieja con
+        # ?limit=N muestra lo mismo que antes en la pagina 1, pero ahora el
+        # resto de los registros son alcanzables en vez de quedar ocultos.
+        movements_page = paginate(hq, per_page=f_limit)
+        movements_list = movements_page.items
     else:
+        movements_page = PageResult([], 1, f_limit, 0)
         movements_list = []
 
     if is_tecnico:
@@ -4050,6 +4746,7 @@ def item_usage():
         items=items,
         locations=locations,
         movements=movements_list,
+        page_obj=movements_page,
         is_tecnico=is_tecnico,
         stock_map=stock_map,
         stock_qty_map=stock_qty_map,
@@ -4164,7 +4861,11 @@ def remitos():
     else:
         sort_by = "date"
         _col = Remito.created_at
-    remitos_list = query.order_by(_col.desc() if sort_dir == "desc" else _col.asc()).limit(500).all()
+    # Antes: .limit(500) fijo. A partir del remito 501 la pantalla dejaba de
+    # mostrarlos SIN AVISAR, que en un sistema con trazabilidad es peor que
+    # paginar. Ahora se pagina y el total queda visible.
+    remitos_page = paginate(query.order_by(_col.desc() if sort_dir == "desc" else _col.asc()))
+    remitos_list = remitos_page.items
     locations_list = Location.query.order_by(Location.name).all()
 
     # Usuarios que son responsables de alguna ubicación, para el filtro.
@@ -4179,6 +4880,7 @@ def remitos():
     return render_template(
         "remitos.html",
         remitos=remitos_list,
+        page_obj=remitos_page,
         locations=locations_list,
         responsible_users=responsible_users,
         responsible_id=resp_id,
@@ -4772,7 +5474,8 @@ def pending_deliveries():
     else:
         sort_by = "date"
         _col = PendingDelivery.created_at
-    pendings = pendings_q.order_by(_col.desc() if sort_dir == "desc" else _col.asc()).all()
+    pendings_page = paginate(pendings_q.order_by(_col.desc() if sort_dir == "desc" else _col.asc()))
+    pendings = pendings_page.items
 
     # Opciones de los selectores. Para el TECNICO se acotan a lo que aparece en
     # SUS pendientes: no tiene por qué ver el catálogo completo ni la lista de
@@ -4801,6 +5504,7 @@ def pending_deliveries():
     return render_template(
         "pending_deliveries.html",
         pendings=pendings,
+        page_obj=pendings_page,
         items=items_list,
         users=users_list,
         from_date=f_date_from,
@@ -4840,15 +5544,43 @@ def import_items():
         flash("No se envió archivo.", "error")
         return redirect(request.url)
 
+    # Validacion de la subida ANTES de leer nada a memoria.
+    # - Extension: solo texto tabular. No evita un archivo mal formado (para eso
+    #   esta el parseo fila por fila), pero corta el caso de subir cualquier
+    #   cosa por error.
+    # - Tamano: el tope duro lo aplica MAX_CONTENT_LENGTH (413) a nivel de
+    #   request; aca ademas se corta explicitamente por si el server de adelante
+    #   no propaga Content-Length.
+    # El archivo NUNCA se guarda en disco: se procesa en memoria y se descarta,
+    # asi que no hay path traversal ni archivos subidos dentro del webroot.
+    filename = os.path.basename(file.filename or "")
+    extension = os.path.splitext(filename)[1].lower()
+    if extension not in IMPORT_ALLOWED_EXTENSIONS:
+        flash(
+            "Formato no permitido. Subí un archivo "
+            + ", ".join(sorted(IMPORT_ALLOWED_EXTENSIONS))
+            + ".",
+            "error",
+        )
+        return redirect(request.url)
+
     created = 0
     skipped = 0
     errors = 0
 
     # 1) Leer y decodificar (varias codificaciones).
     try:
-        content = file.read()
+        content = file.read(IMPORT_MAX_BYTES + 1)
     except Exception as exc:
         flash(f"No se pudo leer el archivo: {exc}", "error")
+        return redirect(request.url)
+
+    if len(content) > IMPORT_MAX_BYTES:
+        flash(
+            f"El archivo supera el máximo permitido "
+            f"({IMPORT_MAX_BYTES // (1024 * 1024)} MB).",
+            "error",
+        )
         return redirect(request.url)
 
     text = None
@@ -5104,7 +5836,11 @@ def scrap_report():
         reasons = request.form.getlist("scrap_reason[]")
 
         # Validación todo-o-nada (nada se toca hasta el try).
+        # Un ítem = una sola línea (ver nota en movements_bulk). Consecuencia
+        # buscada: para descartar el mismo ítem con dos motivos distintos hay
+        # que hacer dos cargas.
         parsed_lines = []
+        seen_items = {}
         for idx in range(len(item_ids)):
             item_raw = (item_ids[idx] or "").strip()
             qty_raw = (qtys[idx] or "").strip() if idx < len(qtys) else ""
@@ -5139,6 +5875,15 @@ def scrap_report():
                     "error",
                 )
                 return redirect(url_for("scrap_report"))
+
+            if item.id in seen_items:
+                flash(
+                    f"Línea {n}: «{item.code} - {item.name}» ya está cargado en la "
+                    f"línea {seen_items[item.id]}. Sumá la cantidad en una sola línea.",
+                    "error",
+                )
+                return redirect(url_for("scrap_report"))
+            seen_items[item.id] = n
 
             parsed_lines.append({"item": item, "qty": qty, "reason": reason_raw})
 
@@ -5228,7 +5973,8 @@ def scrap_report():
     else:
         sort_by = "date"
         _col = Scrap.created_at
-    scraps = q.order_by(_col.desc() if sort_dir == "desc" else _col.asc()).limit(f_limit).all()
+    scraps_page = paginate(q.order_by(_col.desc() if sort_dir == "desc" else _col.asc()), per_page=f_limit)
+    scraps = scraps_page.items
 
     # Datos para el formulario de descarte + filtrado dinámico por ubicación
     # Origen: camionetas + la Jaula central (se descartan items desde ahi tambien).
@@ -5252,6 +5998,7 @@ def scrap_report():
     return render_template(
         "scrap_report.html",
         scraps=scraps,
+        page_obj=scraps_page,
         reason_filter=reason_filter,
         form_locations=form_locations,
         items=items_all,
@@ -5596,7 +6343,8 @@ def reparaciones():
     else:
         sort_by = "date"
         _col = Repair.resolved_at
-    historial = q.order_by(_col.desc() if sort_dir == "desc" else _col.asc()).limit(f_limit).all()
+    historial_page = paginate(q.order_by(_col.desc() if sort_dir == "desc" else _col.asc()), per_page=f_limit)
+    historial = historial_page.items
 
     # Resumen del mes en curso
     now = now_ar()
@@ -5613,6 +6361,7 @@ def reparaciones():
     return render_template(
         "reparaciones.html",
         pendientes=pendientes,
+        page_obj=historial_page,
         en_proveedor=en_proveedor,
         suppliers=suppliers_list,
         serial_en_reparacion=serial_en_reparacion,
@@ -5876,15 +6625,13 @@ def build_purchase_request_email(pr: PurchaseRequest) -> dict:
 @login_required
 @role_required("ADMIN", "SUPERVISOR", "LECTOR")
 def purchase_requests():
-    reqs = (
-        PurchaseRequest.query.order_by(PurchaseRequest.created_at.desc())
-        .limit(500)
-        .all()
-    )
+    reqs_page = paginate(PurchaseRequest.query.order_by(PurchaseRequest.created_at.desc()))
+    reqs = reqs_page.items
     alert_items = alert_items_distinct()
     return render_template(
         "purchase_requests.html",
         requests=reqs,
+        page_obj=reqs_page,
         alert_items=alert_items,
         recipient_users=selectable_recipient_users(),
     )
@@ -6028,7 +6775,8 @@ def repair_requests():
     q = RepairRequest.query
     if current_user.role == "TECNICO":
         q = q.filter(RepairRequest.created_by_user_id == current_user.id)
-    reqs = q.order_by(RepairRequest.created_at.desc()).limit(500).all()
+    reqs_page = paginate(q.order_by(RepairRequest.created_at.desc()))
+    reqs = reqs_page.items
 
     # Datos para el form de nueva solicitud (solo técnicos crean).
     trucks = _tech_trucks(current_user.id) if current_user.role == "TECNICO" else []
@@ -6041,6 +6789,7 @@ def repair_requests():
     return render_template(
         "repair_requests.html",
         requests=reqs,
+        page_obj=reqs_page,
         trucks=trucks,
         items=items_jaula,
         jaula_stock=jaula_stock,
@@ -6078,6 +6827,8 @@ def repair_request_new():
     qtys = request.form.getlist("qty[]")
 
     parsed = []
+    # Un repuesto = una sola línea (ver nota en movements_bulk).
+    seen_items = {}
     for idx in range(len(item_ids)):
         item_raw = (item_ids[idx] or "").strip()
         qty_raw = (qtys[idx] or "").strip() if idx < len(qtys) else ""
@@ -6101,6 +6852,14 @@ def repair_request_new():
         if jaula_stock.get(item.id, 0) <= 0:
             flash(f"«{item.code} - {item.name}» no tiene stock en la Jaula, no se puede solicitar.", "error")
             return redirect(url_for("repair_requests"))
+        if item.id in seen_items:
+            flash(
+                f"Línea {n}: «{item.code} - {item.name}» ya está cargado en la "
+                f"línea {seen_items[item.id]}. Sumá la cantidad en una sola línea.",
+                "error",
+            )
+            return redirect(url_for("repair_requests"))
+        seen_items[item.id] = n
         parsed.append((item.id, qty))
 
     if not parsed:
@@ -7313,6 +8072,7 @@ def in_out():
         # Se valida TODO antes de tocar nada (operación todo-o-nada).
         planned = []  # {it, qty, new_serials, out_units}
         seen_serials = set()  # evita repetir un serial entre filas
+        seen_items = {}       # un item = una sola fila (ver nota en movements_bulk)
         for idx in range(len(item_ids)):
             item_raw = (item_ids[idx] or "").strip()
             qty_raw = (qtys[idx] or "").strip() if idx < len(qtys) else ""
@@ -7327,6 +8087,15 @@ def in_out():
             if not it or not it.is_active:
                 flash("Hay una fila con un ítem inexistente o dado de baja.", "error")
                 return redirect(url_for("in_out"))
+
+            if it.id in seen_items:
+                flash(
+                    f"«{it.code} - {it.name}» está cargado en más de una fila. "
+                    "Sumá la cantidad en una sola fila.",
+                    "error",
+                )
+                return redirect(url_for("in_out"))
+            seen_items[it.id] = True
 
             out_units = []
             if it.serialized and tipo == "EGRESO":

@@ -86,10 +86,36 @@ def test_remito_agrupa_movimiento_sin_tocar_stock(A, escenario):
     assert A.Stock.query.filter_by(item_id=it.id, location_id=dep1.id).first().quantity == qty_before
 
 
-def test_tecnico_y_lector_pueden_ver_remitos(A, escenario):
+def test_tecnico_y_lector_pueden_ver_el_listado_de_remitos(A, escenario):
+    for role in ("tec", "lec"):
+        assert _client(A, role).get("/remitos").status_code == 200
+
+
+def test_lector_puede_abrir_cualquier_remito(A, escenario):
+    """El LECTOR consulta y reporta: ve el detalle de todos."""
     _crear_remito(_client(A, "admin", "admin123"), escenario)
     r = A.Remito.query.first()
-    for role in ("tec", "lec"):
-        c = _client(A, role)
-        assert c.get("/remitos").status_code == 200
-        assert c.get(f"/remitos/{r.id}").status_code == 200
+    assert _client(A, "lec").get(f"/remitos/{r.id}").status_code == 200
+
+
+def test_tecnico_no_puede_abrir_un_remito_ajeno(A, escenario):
+    """Anti-IDOR: escribir la URL de un remito de otro no alcanza.
+
+    El remito del escenario tiene como responsable a 'resp' (SUPERVISOR), no al
+    tecnico, asi que el tecnico debe ser rebotado al listado.
+    """
+    _crear_remito(_client(A, "admin", "admin123"), escenario)
+    r = A.Remito.query.first()
+    resp = _client(A, "tec").get(f"/remitos/{r.id}")
+    assert resp.status_code == 302, "un remito ajeno no debe abrirse por URL"
+    assert "/remitos" in resp.headers.get("Location", "")
+
+
+def test_tecnico_si_puede_abrir_su_propio_remito(A, escenario):
+    """El contrapeso del test anterior: si es parte, lo tiene que poder ver."""
+    _crear_remito(_client(A, "admin", "admin123"), escenario)
+    r = A.Remito.query.first()
+    tec = A.User.query.filter_by(username="tec").first()
+    r.responsible_to_id = tec.id
+    A.db.session.commit()
+    assert _client(A, "tec").get(f"/remitos/{r.id}").status_code == 200

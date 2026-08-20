@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_pagination.html" import pagination %}
 {% block title %}Ítems · TNGStocks{% endblock %}
 {% block page_title %}Ítems{% endblock %}
 {% block content %}
@@ -38,15 +39,28 @@
     </div>
     <div class="field">
       <label>Buscar ítem</label>
-      <select name="item_id" class="js-buscar">
+      <select name="item_id" class="js-buscar{% if all_items_remote %} js-buscar-remoto{% endif %}"
+              {% if all_items_remote %}data-src="{{ url_for('api_items_search') }}" data-value-field="id"{% endif %}>
         <option value="">Todos</option>
         {% for it in all_items %}
           <option value="{{ it.id }}" {% if selected_item_id and (selected_item_id|string) == (it.id|string) %}selected{% endif %}>{{ it.code }} - {{ it.name }}</option>
         {% endfor %}
       </select>
     </div>
+    <div class="field">
+      <label>Filas por página</label>
+      <select name="limit">
+        {% for n in PER_PAGE_CHOICES %}
+          <option value="{{ n }}" {% if page_obj.per_page == n %}selected{% endif %}>{{ n }}</option>
+        {% endfor %}
+        {% if page_obj.per_page not in PER_PAGE_CHOICES %}
+          <option value="{{ page_obj.per_page }}" selected>{{ page_obj.per_page }}</option>
+        {% endif %}
+      </select>
+    </div>
     <input type="hidden" name="sort_by" value="{{ selected_sort_by or 'code' }}">
     <input type="hidden" name="sort_dir" value="{{ selected_sort_dir or 'asc' }}">
+    <input type="hidden" name="page" value="1">
     <div class="field-actions">
       <button type="submit" class="btn btn-primary">Filtrar</button>
       <a href="{{ url_for('items') }}" class="btn btn-secondary">Limpiar</a>
@@ -59,13 +73,13 @@
     <table class="data-table">
       <thead>
         <tr>
-          <th><a href="{{ url_for('items', category_id=selected_category_id, trackable=selected_trackable, q=selected_q, item_id=selected_item_id, sort_by='code', sort_dir='desc' if selected_sort_by == 'code' and selected_sort_dir == 'asc' else 'asc') }}">Código{% if selected_sort_by == 'code' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
-          <th><a href="{{ url_for('items', category_id=selected_category_id, trackable=selected_trackable, q=selected_q, item_id=selected_item_id, sort_by='name', sort_dir='desc' if selected_sort_by == 'name' and selected_sort_dir == 'asc' else 'asc') }}">Nombre{% if selected_sort_by == 'name' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
-          <th><a href="{{ url_for('items', category_id=selected_category_id, trackable=selected_trackable, q=selected_q, item_id=selected_item_id, sort_by='category', sort_dir='desc' if selected_sort_by == 'category' and selected_sort_dir == 'asc' else 'asc') }}">Categoría{% if selected_sort_by == 'category' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
-          <th><a href="{{ url_for('items', category_id=selected_category_id, trackable=selected_trackable, q=selected_q, item_id=selected_item_id, sort_by='trackable', sort_dir='desc' if selected_sort_by == 'trackable' and selected_sort_dir == 'asc' else 'asc') }}">Rastreable{% if selected_sort_by == 'trackable' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
-          <th class="num"><a href="{{ url_for('items', category_id=selected_category_id, trackable=selected_trackable, q=selected_q, item_id=selected_item_id, sort_by='stock_min', sort_dir='desc' if selected_sort_by == 'stock_min' and selected_sort_dir == 'asc' else 'asc') }}">Stock seg.{% if selected_sort_by == 'stock_min' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
-          <th><a href="{{ url_for('items', category_id=selected_category_id, trackable=selected_trackable, q=selected_q, item_id=selected_item_id, sort_by='description', sort_dir='desc' if selected_sort_by == 'description' and selected_sort_dir == 'asc' else 'asc') }}">Descripción{% if selected_sort_by == 'description' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
-          <th><a href="{{ url_for('items', category_id=selected_category_id, trackable=selected_trackable, q=selected_q, item_id=selected_item_id, sort_by='is_active', sort_dir='desc' if selected_sort_by == 'is_active' and selected_sort_dir == 'asc' else 'asc') }}">Activo{% if selected_sort_by == 'is_active' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th><a href="{{ url_with(sort_by='code', sort_dir='desc' if selected_sort_by == 'code' and selected_sort_dir == 'asc' else 'asc', page=1) }}">Código{% if selected_sort_by == 'code' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th><a href="{{ url_with(sort_by='name', sort_dir='desc' if selected_sort_by == 'name' and selected_sort_dir == 'asc' else 'asc', page=1) }}">Nombre{% if selected_sort_by == 'name' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th><a href="{{ url_with(sort_by='category', sort_dir='desc' if selected_sort_by == 'category' and selected_sort_dir == 'asc' else 'asc', page=1) }}">Categoría{% if selected_sort_by == 'category' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th><a href="{{ url_with(sort_by='trackable', sort_dir='desc' if selected_sort_by == 'trackable' and selected_sort_dir == 'asc' else 'asc', page=1) }}">Rastreable{% if selected_sort_by == 'trackable' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th class="num"><a href="{{ url_with(sort_by='stock_min', sort_dir='desc' if selected_sort_by == 'stock_min' and selected_sort_dir == 'asc' else 'asc', page=1) }}">Stock seg.{% if selected_sort_by == 'stock_min' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th><a href="{{ url_with(sort_by='description', sort_dir='desc' if selected_sort_by == 'description' and selected_sort_dir == 'asc' else 'asc', page=1) }}">Descripción{% if selected_sort_by == 'description' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          <th><a href="{{ url_with(sort_by='is_active', sort_dir='desc' if selected_sort_by == 'is_active' and selected_sort_dir == 'asc' else 'asc', page=1) }}">Activo{% if selected_sort_by == 'is_active' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
           <th>Proveedores</th>
           <th>Link de referencia</th>
           {% if can_edit_items %}<th>Acciones</th>{% endif %}
@@ -98,6 +112,7 @@
       </tbody>
     </table>
   </div>
+  {{ pagination(page_obj, "ítem", "ítems") }}
 </div>
 
 {% if can_edit_items %}

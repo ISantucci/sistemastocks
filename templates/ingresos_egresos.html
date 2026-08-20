@@ -23,7 +23,7 @@
 
 {% if can_edit %}
 <div class="card">
-  <form method="post" id="io-form" action="{{ url_for('in_out') }}">
+  <form method="post" id="io-form" action="{{ url_for('in_out') }}" data-confirm-move="Confirmar ingreso / egreso">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="form-grid">
       <div class="field">
@@ -58,7 +58,7 @@
 </div>
 
 <template id="io-line-template">
-  <div class="io-line">
+  <div class="io-line" data-confirm-row>
     <div class="field">
       <label>Ítem</label>
       <select name="item_id[]" class="io-item" required>
@@ -115,20 +115,29 @@
     return IO_ALL_ITEMS;
   }
 
-  function applyItemsToLine(line){
-    var sel = line.querySelector('.io-item');
-    var ts = sel.tomselect;
-    if(!ts) return;
-    var allowed = allowedItems();
-    var cur = ts.getValue();
-    ts.clearOptions();
-    allowed.forEach(function(o){ ts.addOption(o); });
-    ts.refreshOptions(false);
-    if(cur && !allowed.some(function(o){ return o.value === cur; })){
-      ts.clear(true);   // el ítem elegido ya no aplica al tipo actual
-    } else if(cur){
-      ts.setValue(cur, true);
-    }
+  // Un item = una sola fila: el dedupe saca de cada listado lo ya elegido en
+  // las otras filas. El backend igual rechaza item_id[] repetidos.
+  // Perezoso a proposito: este <script> inline corre ANTES que los <script src>
+  // de base.html (van al final del body), asi que initLineDedupe todavia no
+  // existe en el top-level. Llamarlo aca arriba rompe toda la pantalla.
+  var _ioDedupe = null;
+  function ioDedupe() {
+    if (!_ioDedupe) { _ioDedupe = initLineDedupe({ itemSel: '.io-item', optionsFor: allowedItems }); }
+    return _ioDedupe;
+  }
+
+  // Recalcula los listados de TODAS las filas. Primero limpia lo que dejo de
+  // aplicar al tipo actual (ej. un item sin stock en Jaula al pasar a EGRESO).
+  function applyItemsToAllLines(){
+    var ok = {};
+    allowedItems().forEach(function(o){ ok[o.value] = true; });
+    document.querySelectorAll('.io-item').forEach(function(sel){
+      var ts = sel.tomselect;
+      if(!ts) return;
+      var cur = String(ts.getValue() || '');
+      if(cur && !ok[cur]){ ts.clear(true); }   // ya no aplica al tipo actual
+    });
+    ioDedupe().refresh();
   }
 
   // Tope de cantidad: en EGRESO, la cantidad no puede superar el stock de la Jaula.
@@ -241,7 +250,10 @@
       new TomSelect(sel, { create:false, sortField:{field:'text',direction:'asc'}, maxOptions:null,
                            placeholder:'Buscá un ítem...', onChange:function(){ refreshLine(line); } });
     }
-    sel.addEventListener('change', function(){ refreshLine(line); });
+    sel.addEventListener('change', function(){
+      refreshLine(line);
+      ioDedupe().refresh();   // liberar/tomar el item en las demas filas
+    });
     // Si cambia la cantidad: se limpian los seriales elegidos y se aplica el tope.
     line.querySelector('.io-qty').addEventListener('input', function(){
       line.querySelector('.io-serials').value = '';
@@ -249,8 +261,12 @@
       updateSnBtn(line);
     });
     line.querySelector('.io-sn-btn').addEventListener('click', function(){ openSn(line); });
-    line.querySelector('.io-remove').addEventListener('click', function(){ line.remove(); });
-    applyItemsToLine(line);   // filtra ítems según el tipo actual
+    // Al borrar la fila, su item vuelve a estar disponible en las demas.
+    line.querySelector('.io-remove').addEventListener('click', function(){
+      line.remove();
+      ioDedupe().refresh();
+    });
+    applyItemsToAllLines();   // filtra por tipo actual + saca los ya elegidos
     refreshLine(line);
   }
 
@@ -286,9 +302,8 @@
     // Al cambiar ingreso/egreso: se re-filtran los ítems (egreso = solo Jaula) y
     // se re-evalúan las filas (S/N + tope de cantidad).
     document.getElementById('io-tipo').addEventListener('change', function(){
-      document.querySelectorAll('.io-line').forEach(function(l){
-        applyItemsToLine(l); refreshLine(l);
-      });
+      applyItemsToAllLines();
+      document.querySelectorAll('.io-line').forEach(function(l){ refreshLine(l); });
     });
     addLine(); addLine(); addLine();
   });

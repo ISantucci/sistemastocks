@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_pagination.html" import pagination %}
 {% block title %}Reparaciones · TNGStocks{% endblock %}
 {% block page_title %}Reparaciones{% endblock %}
 {% block content %}
@@ -34,7 +35,9 @@
             {% if me.role == "LECTOR" %}
             <span class="muted">Solo lectura</span>
             {% else %}
-            <form method="post" class="pending-action">
+            <form method="post" class="pending-action"
+                  data-confirm-move="Confirmar resolución de reparación"
+                  data-confirm-context="{{ r.item.code }} - {{ r.item.name }} · {{ fmt_qty(r.quantity, r.item) }}">
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <input type="hidden" name="repair_id" value="{{ r.id }}">
               <div class="check-inline" style="gap:14px; flex-wrap:wrap;">
@@ -108,7 +111,9 @@
             {% if me.role == "LECTOR" %}
             <span class="muted">Solo lectura</span>
             {% else %}
-            <form method="post" class="pending-action">
+            <form method="post" class="pending-action"
+                  data-confirm-move="Confirmar reparación en proveedor"
+                  data-confirm-context="{{ r.item.code }} - {{ r.item.name }} · {{ fmt_qty(r.quantity, r.item) }} · genera ingreso + remito">
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <input type="hidden" name="repair_id" value="{{ r.id }}">
               <input type="hidden" name="repair_action" value="reparado_proveedor">
@@ -211,5 +216,6 @@
       </tbody>
     </table>
   </div>
+  {{ pagination(page_obj, "registro", "registros") }}
 </div>
 {% endblock %}

@@ -606,3 +606,33 @@ input, select, textarea{ box-sizing: border-box; }
   @page{ margin:0; }
   body{ padding:10mm; }
 }
+
+/* ---------- Paginación de listados (macro templates/_pagination.html) ----------
+   Se agrega al final para no alterar ninguna regla existente. */
+.pagination-bar{
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 13px;
+}
+.pagination-count{ color: var(--text-muted); }
+.pagination-nav{ display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.pagination-nav .page-link{
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 32px; height: 32px; padding: 0 8px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface); color: var(--text);
+  text-decoration: none; font-size: 13px; line-height: 1;
+}
+.pagination-nav a.page-link:hover{ background: var(--accent-soft); border-color: var(--accent); color: var(--accent-soft-text); }
+.pagination-nav .page-link.current{ background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.pagination-nav .page-link.disabled{ color: var(--text-faint); background: var(--surface-2); cursor: default; }
+.pagination-nav .page-gap{ padding: 0 4px; color: var(--text-faint); }
+.pagination-perpage{ display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-muted); }
+.pagination-perpage select{ width: auto; min-width: 80px; }
+@media (max-width: 640px){
+  .pagination-bar{ justify-content: center; }
+  .pagination-nav{ justify-content: center; }
+}

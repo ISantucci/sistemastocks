@@ -34,16 +34,22 @@ GET_MATRIX = [
     ("/", {"ADMIN", "SUPERVISOR", "TECNICO", "LECTOR"}),
     ("/stock", {"ADMIN", "SUPERVISOR", "TECNICO", "LECTOR"}),
     ("/stock/export.csv", {"ADMIN", "SUPERVISOR", "TECNICO", "LECTOR"}),
-    ("/items", {"ADMIN", "SUPERVISOR", "TECNICO", "LECTOR"}),
+    # El TECNICO NO entra al catalogo: ve los items de su camioneta desde
+    # /stock, no la seccion Items. Confirmado con Ignacio (2026-08-13).
+    ("/items", {"ADMIN", "SUPERVISOR", "LECTOR"}),
     ("/perfil", {"ADMIN", "SUPERVISOR", "TECNICO", "LECTOR"}),
     ("/remitos", {"ADMIN", "SUPERVISOR", "TECNICO", "LECTOR"}),
     # El SUPERVISOR gestiona el catálogo de ítems igual que el ADMIN.
     ("/items/new", {"ADMIN", "SUPERVISOR"}),
     ("/items/export.xlsx", {"ADMIN", "SUPERVISOR", "LECTOR"}),
-    ("/movements", {"ADMIN", "SUPERVISOR"}),
+    # El TECNICO tiene vista ACOTADA de movimientos (solo sus ubicaciones).
+    # Lo que no puede es mover desde una ubicacion ajena ni generar
+    # pendientes: eso se verifica en test_tecnico_scope.py.
+    ("/movements", {"ADMIN", "SUPERVISOR", "TECNICO", "LECTOR"}),
     ("/movements/bulk", {"ADMIN", "SUPERVISOR"}),
     ("/movements/export.csv", {"ADMIN", "SUPERVISOR"}),
-    ("/pending-deliveries", {"ADMIN", "SUPERVISOR"}),
+    # El TECNICO ve SUS pendientes (la pantalla filtra por objeto).
+    ("/pending-deliveries", {"ADMIN", "SUPERVISOR", "TECNICO"}),
     ("/stock-alerts", {"ADMIN", "SUPERVISOR"}),
     ("/categories", {"ADMIN", "SUPERVISOR"}),
     ("/locations", {"ADMIN", "SUPERVISOR"}),

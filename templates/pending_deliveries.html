@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_pagination.html" import pagination %}
 {% block title %}Pendientes · TNGStocks{% endblock %}
 {% block page_title %}Pendientes de entrega{% endblock %}
 {% block content %}
@@ -116,7 +117,9 @@
             {% if me.role == "TECNICO" %}
             {% if not p.returned %}<span class="muted">Solo lectura</span>{% endif %}
             {% elif not p.returned %}
-            <form method="post" class="pending-action">
+            <form method="post" class="pending-action"
+                  data-confirm-move="Confirmar devolución"
+                  data-confirm-context="{{ ret_item.code }} - {{ ret_item.name }} · {{ fmt_qty(p.return_qty or p.movement.qty, ret_item) }} · responsable: {{ p.responsible_to.full_name }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <input type="hidden" name="pending_id" value="{{ p.id }}">
               <div class="check-inline" style="gap:14px;">
@@ -155,5 +158,6 @@
       </tbody>
     </table>
   </div>
+  {{ pagination(page_obj, "pendiente", "pendientes") }}
 </div>
 {% endblock %}

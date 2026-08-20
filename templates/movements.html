@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_pagination.html" import pagination %}
 {% block title %}Movimientos · TNGStocks{% endblock %}
 {% block page_title %}Movimientos{% endblock %}
 {% block content %}
@@ -12,7 +13,7 @@
 {% if me.role != "LECTOR" %}
 <div class="card">
   <div class="card-header"><span class="card-title">Registrar movimiento</span></div>
-  <form method="post">
+  <form method="post" data-confirm-move="Confirmar movimiento">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="form-grid">
       <div class="field">
@@ -211,7 +212,9 @@
     <table class="data-table">
       <thead>
         <tr>
-          <th>ID</th>
+          {# Estos dos usan url_with(), que conserva solo los filtros vigentes
+             sin tener que repetirlos uno por uno como los headers de al lado. #}
+          <th><a href="{{ url_with(sort_by='id', sort_dir='asc' if selected_sort_by == 'id' and selected_sort_dir == 'desc' else 'desc', page=None) }}">ID{% if selected_sort_by == 'id' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
           <th><a href="{{ url_for('movements', from_date=from_date, to_date=to_date, item_id=item_filter, user_id=user_filter, limit=limit, sort_by='date', sort_dir='asc' if selected_sort_by == 'date' and selected_sort_dir == 'desc' else 'desc') }}">Fecha{% if selected_sort_by == 'date' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
           <th>Hora</th>
           <th><a href="{{ url_for('movements', from_date=from_date, to_date=to_date, item_id=item_filter, user_id=user_filter, limit=limit, sort_by='item', sort_dir='desc' if selected_sort_by == 'item' and selected_sort_dir == 'asc' else 'asc') }}">Item{% if selected_sort_by == 'item' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
@@ -219,6 +222,12 @@
           <th>Desde</th><th>Hacia</th>
           <th><a href="{{ url_for('movements', from_date=from_date, to_date=to_date, item_id=item_filter, user_id=user_filter, limit=limit, sort_by='user', sort_dir='desc' if selected_sort_by == 'user' and selected_sort_dir == 'asc' else 'asc') }}">Responsable{% if selected_sort_by == 'user' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
           <th>Observación</th>
+          {% if me.role in ["ADMIN", "SUPERVISOR"] %}
+          {# Ordena por ESTADO de reversión (normal / revertido / reversión).
+             Que el botón "Revertir" esté disponible no es un dato guardado, así
+             que no puede entrar en el orden: ver la nota en movements(). #}
+          <th><a href="{{ url_with(sort_by='action', sort_dir='asc' if selected_sort_by == 'action' and selected_sort_dir == 'desc' else 'desc', page=None) }}" title="Ordena por estado: normales, revertidos y reversiones">Acción{% if selected_sort_by == 'action' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          {% endif %}
         </tr>
       </thead>
       <tbody>
@@ -233,13 +242,36 @@
           <td>{{ m.to_location.name }}</td>
           <td>{{ m.user.full_name }}</td>
           <td>{{ m.observation or "" }}</td>
+          {% if me.role in ["ADMIN", "SUPERVISOR"] %}
+          <td class="actions-cell">
+            {% if m.reverted_at %}
+              <span class="badge badge-warn" title="Revertido por {{ m.reverted_by.full_name if m.reverted_by else '—' }} el {{ m.reverted_at.strftime('%Y-%m-%d %H:%M') }}">Revertido</span>
+            {% elif m.reverses_movement_id %}
+              <span class="badge badge-warn">Reversión</span>
+            {% elif m.id in revertibles %}
+              {# Ventana corta para deshacer un movimiento recién cargado. Genera
+                 un contra-movimiento; no borra nada. El backend revalida todo. #}
+              <form method="post" action="{{ url_for('movement_revert', movement_id=m.id, **movements_view_args()) }}"
+                    style="margin:0;"
+                    data-confirm-move="Revertir movimiento"
+                    data-confirm-danger
+                    data-confirm-context="{{ m.number }} · {{ m.item.code }} - {{ m.item.name }} · {{ fmt_qty(m.qty, m.item) }} · vuelve de {{ m.to_location.name }} a {{ m.from_location.name }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <button type="submit" class="btn btn-danger btn-sm" title="Disponible {{ revert_minutes }} minutos desde la carga">Revertir</button>
+              </form>
+            {% else %}
+              <span class="muted">—</span>
+            {% endif %}
+          </td>
+          {% endif %}
         </tr>
         {% else %}
-        <tr><td colspan="9" class="muted">Sin movimientos.</td></tr>
+        <tr><td colspan="10" class="muted">Sin movimientos.</td></tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
+  {{ pagination(page_obj, "movimiento", "movimientos") }}
 </div>
 
 <script>
@@ -333,6 +365,11 @@ document.addEventListener("DOMContentLoaded", function () {
   }
 
   var toSel = document.getElementById("to_location_id");
+
+  // "Hacia" no ofrece la ubicación elegida en "Desde" (y viceversa). El backend
+  // ya lo rechaza; esto evita que el usuario llegue a mandarlo.
+  initFromToExclusion({ from: fromSel, to: toSel });
+
   var scrapBox = document.getElementById("scrap_reason_box");
   var descartes_id = "{{ descartes_id or '' }}";
   function toggleScrap() {

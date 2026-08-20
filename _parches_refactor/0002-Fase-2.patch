@@ -1,0 +1,527 @@
+From b886efe81f66af1dabbbbed3922a255cbca4cb73 Mon Sep 17 00:00:00 2001
+From: c <a@b>
+Date: Tue, 18 Aug 2026 12:49:09 +0000
+Subject: [PATCH 2/7] Fase 2: mapa de stock bajo demanda
+ (/api/stock/by-location + umbral)
+
+---
+ app.py                         |  71 +++++++++++-
+ static/js/app.js               |  51 +++++++++
+ templates/item_usage.html      |   8 +-
+ templates/movements.html       |  12 ++-
+ templates/movements_bulk.html  |   8 +-
+ templates/scrap_report.html    |   8 +-
+ tests/test_stock_map_remoto.py | 190 +++++++++++++++++++++++++++++++++
+ 7 files changed, 338 insertions(+), 10 deletions(-)
+ create mode 100644 tests/test_stock_map_remoto.py
+
+diff --git a/app.py b/app.py
+index 65db434..655506d 100644
+--- a/app.py
++++ b/app.py
+@@ -3375,6 +3375,62 @@ def build_stock_maps(location_ids=None):
+     return stock_map, stock_qty_map
+ 
+ 
++# Cuantas filas de stock se pueden embeber en el HTML antes de pasar a modo
++# remoto. Mismo criterio que ITEM_PICKER_MAX_INLINE: por debajo del umbral el
++# comportamiento es EXACTAMENTE el historico (todo embebido); por encima, el
++# navegador pide solo la ubicacion que el usuario elige.
++#
++# El default (5000) esta muy por encima del volumen actual (~400 filas medidas
++# el 2026-08-18), asi que hoy no cambia nada. Lo nuevo se activa por opcion, no
++# por sorpresa. Bajarlo a 0 fuerza el modo remoto (util para probarlo).
++STOCK_MAP_MAX_INLINE = int(os.environ.get("STOCK_MAP_MAX_INLINE", "5000"))
++
++
++def stock_maps_for_render(location_ids=None):
++    """Igual que build_stock_maps() pero decide si conviene embeber o no.
++
++    Devuelve (stock_map, stock_qty_map, remoto):
++      - remoto=False -> mapas completos, como siempre.
++      - remoto=True  -> mapas VACIOS; el front los pide por /api/stock/by-location
++        a medida que el usuario elige la ubicacion de origen.
++    """
++    q = Stock.query.filter(Stock.quantity > 0)
++    if location_ids is not None:
++        ids = list(location_ids) or [-1]
++        q = q.filter(Stock.location_id.in_(ids))
++
++    if q.order_by(None).count() > STOCK_MAP_MAX_INLINE:
++        return {}, {}, True
++
++    stock_map, stock_qty_map = build_stock_maps(location_ids)
++    return stock_map, stock_qty_map, False
++
++
++@app.route("/api/stock/by-location")
++@login_required
++def api_stock_by_location():
++    """Stock de UNA ubicacion, para el modo remoto del selector de items.
++
++    El alcance se resuelve con la misma regla que las pantallas: si el usuario es
++    TECNICO y pide una ubicacion de la que no es responsable, la respuesta es
++    vacia. Dejar la API abierta y acotar solo el HTML seria seguridad visual.
++    """
++    raw = (request.args.get("location_id") or "").strip()
++    if not raw.isdigit():
++        return jsonify({"items": [], "qty": {}})
++
++    loc_id = int(raw)
++    if getattr(current_user, "role", None) == "TECNICO":
++        if loc_id not in set(tech_location_ids_for(current_user)):
++            return jsonify({"items": [], "qty": {}})
++
++    stock_map, stock_qty_map = build_stock_maps(location_ids=[loc_id])
++    return jsonify({
++        "items": stock_map.get(loc_id, []),
++        "qty": stock_qty_map.get(str(loc_id), {}),
++    })
++
++
+ def item_picker_options(selected_value=None, value_field="code", base_query=None):
+     """Opciones para un <select> de items. Devuelve (opciones, es_remoto).
+ 
+@@ -3920,7 +3976,7 @@ def movements():
+     # Mapa ubicacion -> items con stock (>0), para filtrar el selector "Item" segun "Desde".
+     # Mismo alcance que build_units_map() unas lineas mas abajo: al TECNICO solo se
+     # le mandan sus ubicaciones. Antes se mandaban todas y se leian con F12.
+-    stock_map, stock_qty_map = build_stock_maps(
++    stock_map, stock_qty_map, stock_remote = stock_maps_for_render(
+         location_ids=tech_location_ids if is_tecnico else None
+     )
+ 
+@@ -3944,6 +4000,7 @@ def movements():
+         page_obj=logs_page,
+         stock_map=stock_map,
+         stock_qty_map=stock_qty_map,
++        stock_remote=stock_remote,
+         external_location_ids=external_location_ids,
+         units_map=units_map,
+         serialized_item_ids=serialized_item_ids,
+@@ -4184,7 +4241,7 @@ def movements_bulk():
+ 
+     # Mapa ubicacion -> items con stock (>0), para filtrar el selector "Item" segun "Desde".
+     # /movements/bulk es solo ADMIN/SUPERVISOR: alcance completo, sin cambios.
+-    stock_map, stock_qty_map = build_stock_maps()
++    stock_map, stock_qty_map, stock_remote = stock_maps_for_render()
+ 
+     # Externas: ofrecer todos los items al elegirlas como origen (no tienen stock).
+     external_location_ids = [l.id for l in locations_list if l.is_external]
+@@ -4196,6 +4253,7 @@ def movements_bulk():
+         descartes_id=_descartes_b.id if _descartes_b else None,
+         stock_map=stock_map,
+         stock_qty_map=stock_qty_map,
++        stock_remote=stock_remote,
+         external_location_ids=external_location_ids,
+     )
+ 
+@@ -4295,7 +4353,8 @@ def item_usage():
+                 "item_usage.html",
+                 items=[], is_tecnico=True, locations=[], movements=[],
+                 page_obj=PageResult([], 1, 100, 0),
+-                stock_map={}, stock_qty_map={}, serialized_item_ids=[],
++                stock_map={}, stock_qty_map={}, stock_remote=False,
++                serialized_item_ids=[],
+                 users=[], from_date="", to_date="",
+                 item_filter="", user_filter="", limit="100",
+                 selected_sort_by="date", selected_sort_dir="desc",
+@@ -4482,7 +4541,7 @@ def item_usage():
+     users_list = User.query.order_by(User.username).all()
+ 
+     # Mismo alcance que /movements: al TECNICO solo sus ubicaciones.
+-    stock_map, stock_qty_map = build_stock_maps(
++    stock_map, stock_qty_map, stock_remote = stock_maps_for_render(
+         location_ids=tech_location_ids if is_tecnico else None
+     )
+ 
+@@ -4497,6 +4556,7 @@ def item_usage():
+         is_tecnico=is_tecnico,
+         stock_map=stock_map,
+         stock_qty_map=stock_qty_map,
++        stock_remote=stock_remote,
+         serialized_item_ids=serialized_item_ids,
+         users=users_list,
+         from_date=f_date_from,
+@@ -5722,7 +5782,7 @@ def scrap_report():
+     items_all = Item.query.filter_by(is_active=True).order_by(Item.code).all()
+     users_list = User.query.order_by(User.username).all()
+     # /scrap es solo ADMIN/SUPERVISOR: alcance completo, sin cambios.
+-    stock_map, stock_qty_map = build_stock_maps()
++    stock_map, stock_qty_map, stock_remote = stock_maps_for_render()
+ 
+     serialized_item_ids = [it.id for it in items_all if it.serialized]
+ 
+@@ -5735,6 +5795,7 @@ def scrap_report():
+         items=items_all,
+         stock_map=stock_map,
+         stock_qty_map=stock_qty_map,
++        stock_remote=stock_remote,
+         serialized_item_ids=serialized_item_ids,
+         users=users_list,
+         from_date=f_date_from,
+diff --git a/static/js/app.js b/static/js/app.js
+index 07715b1..9b1b847 100644
+--- a/static/js/app.js
++++ b/static/js/app.js
+@@ -188,3 +188,54 @@ function togglePw(inputId, btn) {
+   el.type = (el.type === 'password') ? 'text' : 'password';
+   if (btn) btn.style.color = (el.type === 'text') ? 'var(--accent)' : 'var(--text-muted)';
+ }
++
++/* ---------- Carga del mapa de stock bajo demanda (Fase 2) ----------
++ *
++ * Historico: el servidor embebia la tabla `stock` COMPLETA dentro del HTML de
++ * cada pantalla de carga. El peso crecia de forma lineal con el inventario, en
++ * cada request, sin cachear.
++ *
++ * Ahora, si el servidor decide que el mapa es demasiado grande (ver
++ * STOCK_MAP_MAX_INLINE en app.py) manda los mapas VACIOS y marca remote=true.
++ * En ese caso se pide solo la ubicacion elegida, cuando se la elige.
++ *
++ * Por debajo del umbral el servidor sigue embebiendo todo y esta funcion es un
++ * passthrough: el comportamiento es identico al de siempre.
++ */
++function makeStockLoader(stockMap, stockQtyMap, remote, url) {
++  var pendientes = {};
++  url = url || "/api/stock/by-location";
++
++  return function ensureStock(locId, cb) {
++    locId = String(locId == null ? "" : locId);
++    // Sin modo remoto, sin ubicacion, o ya cacheada: seguir de largo.
++    if (!remote || !locId || stockMap[locId] !== undefined) {
++      if (cb) cb();
++      return;
++    }
++    if (pendientes[locId]) { pendientes[locId].push(cb); return; }
++    pendientes[locId] = [cb];
++
++    var terminar = function () {
++      var cbs = pendientes[locId] || [];
++      delete pendientes[locId];
++      cbs.forEach(function (f) { if (f) f(); });
++    };
++
++    fetch(url + "?location_id=" + encodeURIComponent(locId), {
++      credentials: "same-origin",
++      headers: { "Accept": "application/json" }
++    })
++      .then(function (r) { return r.ok ? r.json() : { items: [], qty: {} }; })
++      .then(function (d) {
++        stockMap[locId] = d.items || [];
++        stockQtyMap[locId] = d.qty || {};
++      })
++      .catch(function () {
++        // Ante un error de red no inventamos stock: la ubicacion queda vacia.
++        stockMap[locId] = [];
++        stockQtyMap[locId] = {};
++      })
++      .then(terminar, terminar);
++  };
++}
+diff --git a/templates/item_usage.html b/templates/item_usage.html
+index 7fe0f23..5e60197 100644
+--- a/templates/item_usage.html
++++ b/templates/item_usage.html
+@@ -183,6 +183,10 @@ document.addEventListener("DOMContentLoaded", function () {
+   }
+   var stockMap = {{ stock_map|tojson }};
+   var stockQtyMap = {{ stock_qty_map|tojson }};
++  // Fase 2: si el servidor decidio no embeber el mapa (inventario grande),
++  // ensureStock() lo pide por ubicacion antes de usarlo. Con el mapa embebido
++  // es un passthrough sincronico y el flujo es identico al historico.
++  var ensureStock = makeStockLoader(stockMap, stockQtyMap, {{ stock_remote|tojson }});
+   var serializedItems = ({{ serialized_item_ids|tojson }} || []).map(String);
+   var fromSel = document.getElementById("from_location_id");
+ 
+@@ -263,7 +267,9 @@ document.addEventListener("DOMContentLoaded", function () {
+   addUsageLine();
+ 
+   if (fromSel && fromSel.tagName === "SELECT") {
+-    fromSel.addEventListener("change", function () { applyStockFilterAllLines(); });
++    fromSel.addEventListener("change", function () {
++      ensureStock(fromSel.value, applyStockFilterAllLines);
++    });
+   }
+ });
+ </script>
+diff --git a/templates/movements.html b/templates/movements.html
+index 134b621..a5f9dc3 100644
+--- a/templates/movements.html
++++ b/templates/movements.html
+@@ -258,6 +258,10 @@ document.addEventListener("DOMContentLoaded", function () {
+   // Item dinamico segun "Desde": solo se ofrecen items con stock (>0) en esa ubicacion.
+   var stockMap = {{ stock_map|tojson }};
+   var stockQtyMap = {{ stock_qty_map|tojson }};
++  // Fase 2: si el servidor decidio no embeber el mapa (inventario grande),
++  // ensureStock() lo pide por ubicacion antes de usarlo. Con el mapa embebido
++  // es un passthrough sincronico y el flujo es identico al historico.
++  var ensureStock = makeStockLoader(stockMap, stockQtyMap, {{ stock_remote|tojson }});
+   var externalLocIds = ({{ external_location_ids|tojson }} || []).map(String);
+   var fromSel = document.getElementById("from_location_id");
+   var itemEl = document.getElementById("item_id");
+@@ -328,10 +332,14 @@ document.addEventListener("DOMContentLoaded", function () {
+       clampMovQty();
+     };
+ 
++    var refreshItemsConStock = function () {
++      ensureStock(fromSel ? fromSel.value : "", refreshItems);
++    };
++
+     if (fromSel && fromSel.tagName === "SELECT") {
+-      fromSel.addEventListener("change", refreshItems);
++      fromSel.addEventListener("change", refreshItemsConStock);
+     }
+-    refreshItems();
++    refreshItemsConStock();
+   }
+ 
+   var toSel = document.getElementById("to_location_id");
+diff --git a/templates/movements_bulk.html b/templates/movements_bulk.html
+index 1355ad2..17bf50b 100644
+--- a/templates/movements_bulk.html
++++ b/templates/movements_bulk.html
+@@ -107,6 +107,10 @@
+   var descartes_id = "{{ descartes_id or '' }}";
+   var stockMap = {{ stock_map|tojson }};
+   var stockQtyMap = {{ stock_qty_map|tojson }};
++  // Fase 2: si el servidor decidio no embeber el mapa (inventario grande),
++  // ensureStock() lo pide por ubicacion antes de usarlo. Con el mapa embebido
++  // es un passthrough sincronico y el flujo es identico al historico.
++  var ensureStock = makeStockLoader(stockMap, stockQtyMap, {{ stock_remote|tojson }});
+   var externalLocIds = ({{ external_location_ids|tojson }} || []).map(String);
+ 
+   // Tope de cantidad por fila: no se puede mover más de lo que hay en el origen.
+@@ -248,7 +252,9 @@
+     var bulkFromSel = document.getElementById("bulk_from_location_id");
+     if (bulkFromSel) {
+       bulkFromSel.addEventListener("change", function () {
+-        applyStockFilterAllLines(); clampBulkAll();
++        ensureStock(bulkFromSel.value, function () {
++          applyStockFilterAllLines(); clampBulkAll();
++        });
+       });
+     }
+   });
+diff --git a/templates/scrap_report.html b/templates/scrap_report.html
+index 34b1dd7..6ae7879 100644
+--- a/templates/scrap_report.html
++++ b/templates/scrap_report.html
+@@ -188,6 +188,10 @@ document.addEventListener("DOMContentLoaded", function () {
+   }
+   var stockMap = {{ stock_map|tojson }};
+   var stockQtyMap = {{ stock_qty_map|tojson }};
++  // Fase 2: si el servidor decidio no embeber el mapa (inventario grande),
++  // ensureStock() lo pide por ubicacion antes de usarlo. Con el mapa embebido
++  // es un passthrough sincronico y el flujo es identico al historico.
++  var ensureStock = makeStockLoader(stockMap, stockQtyMap, {{ stock_remote|tojson }});
+   var fromSel = document.getElementById("from_location_id");
+ 
+   // Lista de ítems seleccionables (excluye serializados: van por Movimientos).
+@@ -267,7 +271,9 @@ document.addEventListener("DOMContentLoaded", function () {
+   addScrapLine();
+ 
+   if (fromSel && fromSel.tagName === "SELECT") {
+-    fromSel.addEventListener("change", function () { applyStockFilterAllLines(); });
++    fromSel.addEventListener("change", function () {
++      ensureStock(fromSel.value, applyStockFilterAllLines);
++    });
+   }
+ });
+ </script>
+diff --git a/tests/test_stock_map_remoto.py b/tests/test_stock_map_remoto.py
+new file mode 100644
+index 0000000..46c1b87
+--- /dev/null
++++ b/tests/test_stock_map_remoto.py
+@@ -0,0 +1,190 @@
++"""Fase 2 — el mapa de stock deja de viajar entero dentro del HTML.
++
++Que se cubre:
++  - Por debajo del umbral NO cambia nada (mapas embebidos, como siempre).
++  - Por encima del umbral el HTML va sin mapa y marca el modo remoto.
++  - El endpoint /api/stock/by-location devuelve lo mismo que iba embebido.
++  - El endpoint respeta el alcance del TECNICO (si no, seria seguridad visual).
++"""
++import json
++import re
++
++import pytest
++from conftest import make_user, make_item, make_location, login
++
++
++@pytest.fixture()
++def esc(A):
++    A.app.config["WTF_CSRF_ENABLED"] = False
++
++    tec = make_user(A, "tec", "TECNICO")
++    make_user(A, "adm2", "ADMIN")
++
++    jaula = make_location(A, A.LOCATION_JAULA_TNG)
++    mi_cam = make_location(A, "Camioneta Mia", is_truck=True)
++    otra = make_location(A, "Camioneta Ajena", is_truck=True)
++
++    A.db.session.add(A.LocationResponsible(location_id=mi_cam.id, user_id=tec.id))
++    A.db.session.commit()
++
++    it_mio = make_item(A, code="MIO-001", name="Item mio")
++    it_ajeno = make_item(A, code="AJE-001", name="Item ajeno")
++    it_jaula = make_item(A, code="JAU-001", name="Item de jaula")
++
++    A.upsert_stock(it_mio.id, mi_cam.id, 7)
++    A.upsert_stock(it_ajeno.id, otra.id, 9)
++    A.upsert_stock(it_jaula.id, jaula.id, 100)
++    A.db.session.commit()
++
++    return {"tec": tec, "jaula": jaula, "mi_cam": mi_cam, "otra": otra,
++            "it_mio": it_mio, "it_ajeno": it_ajeno, "it_jaula": it_jaula}
++
++
++def _como(A, username):
++    c = A.app.test_client()
++    login(c, username)
++    return c
++
++
++def _var(html, nombre):
++    m = re.search(rf"var {nombre} = (.*?);\n", html, re.S)
++    return json.loads(m.group(1)) if m else None
++
++
++@pytest.fixture()
++def umbral(A):
++    """Permite mover STOCK_MAP_MAX_INLINE dentro de un test y restaurarlo."""
++    original = A.STOCK_MAP_MAX_INLINE
++    yield lambda v: setattr(A, "STOCK_MAP_MAX_INLINE", v)
++    A.STOCK_MAP_MAX_INLINE = original
++
++
++# ---------------------------------------------------------- modo embebido
++
++@pytest.mark.parametrize("ruta", ["/movements", "/item-usage", "/movements/bulk", "/scrap"])
++def test_por_debajo_del_umbral_sigue_embebido(A, esc, umbral, ruta):
++    """El default no debe cambiar el comportamiento historico."""
++    umbral(5000)
++    html = _como(A, "adm2").get(ruta).get_data(as_text=True)
++    assert _var(html, "stockQtyMap"), f"{ruta} dejo de embeber el mapa sin superar el umbral"
++
++
++def test_umbral_por_defecto_es_holgado(A):
++    """Guarda contra bajar el default sin querer: hoy hay ~400 filas en prod."""
++    assert A.STOCK_MAP_MAX_INLINE >= 1000
++
++
++# ------------------------------------------------------------ modo remoto
++
++@pytest.mark.parametrize("ruta", ["/movements", "/item-usage", "/movements/bulk", "/scrap"])
++def test_por_encima_del_umbral_el_html_va_sin_mapa(A, esc, umbral, ruta):
++    umbral(0)
++    html = _como(A, "adm2").get(ruta).get_data(as_text=True)
++    assert _var(html, "stockQtyMap") == {}
++    assert _var(html, "stockMap") == {}
++
++
++def _sembrar_stock(A, loc, n, prefijo):
++    cat = A.Category.query.first()
++    for i in range(n):
++        A.db.session.add(A.Item(code=f"{prefijo}-{i:04d}", name=f"Item {i}",
++                                category_id=cat.id, is_active=True))
++    A.db.session.commit()
++    for it in A.Item.query.filter(A.Item.code.like(f"{prefijo}-%")).all():
++        A.upsert_stock(it.id, loc.id, 5)
++    A.db.session.commit()
++
++
++def _peso_mapa(html):
++    m = re.search(r"var stockQtyMap = (.*?);\n", html, re.S)
++    return len(m.group(1).encode()) if m else 0
++
++
++def test_el_mapa_no_crece_con_el_inventario_en_modo_remoto(A, esc, umbral):
++    """La prueba de fondo de la Fase 2: mas stock no debe pesar mas mapa."""
++    umbral(0)
++    c = _como(A, "adm2")
++    antes = _peso_mapa(c.get("/movements").get_data(as_text=True))
++
++    _sembrar_stock(A, esc["jaula"], 300, "BULK")
++
++    despues = _peso_mapa(c.get("/movements").get_data(as_text=True))
++    assert despues == antes, "el mapa de stock volvio a crecer con el inventario"
++    assert _var(c.get("/movements").get_data(as_text=True), "stockQtyMap") == {}
++
++
++def test_en_modo_embebido_el_mapa_si_crece(A, esc, umbral):
++    """Contraprueba del test anterior: sin modo remoto, el problema existe.
++
++    Sirve para que el test de arriba no pase por accidente (por ejemplo si un dia
++    stockQtyMap deja de emitirse y ambos pesos dan 0).
++    """
++    umbral(999_999)
++    c = _como(A, "adm2")
++    antes = _peso_mapa(c.get("/movements").get_data(as_text=True))
++    _sembrar_stock(A, esc["jaula"], 300, "BULK")
++    assert _peso_mapa(c.get("/movements").get_data(as_text=True)) > antes * 5
++
++
++@pytest.mark.xfail(reason="Limitacion conocida: el <select> de items de estas 4 "
++                          "pantallas se sigue renderizando completo. No usan "
++                          "item_picker_options(). Queda como hallazgo aparte.",
++                   strict=True)
++def test_el_select_de_items_todavia_se_embebe_completo(A, esc, umbral):
++    """Documenta lo que la Fase 2 NO resolvio, para que no se pierda.
++
++    Medido: con 300 items el HTML de /movements crece ~64 KB aunque el mapa de
++    stock vaya vacio. El peso ya no viene del stock sino del catalogo.
++    """
++    umbral(0)
++    c = _como(A, "adm2")
++    antes = len(c.get("/movements").get_data())
++    _sembrar_stock(A, esc["jaula"], 300, "BULK")
++    despues = len(c.get("/movements").get_data())
++    assert despues - antes < 10_000
++
++
++# ------------------------------------------------------------- el endpoint
++
++def test_endpoint_devuelve_lo_mismo_que_iba_embebido(A, esc):
++    c = _como(A, "adm2")
++    embebido = _var(c.get("/movements").get_data(as_text=True), "stockQtyMap")
++
++    r = c.get(f"/api/stock/by-location?location_id={esc['jaula'].id}")
++    assert r.status_code == 200
++    assert r.get_json()["qty"] == embebido[str(esc["jaula"].id)]
++    assert esc["it_jaula"].id in r.get_json()["items"]
++
++
++def test_endpoint_requiere_login(A, esc):
++    r = A.app.test_client().get(f"/api/stock/by-location?location_id={esc['jaula'].id}")
++    assert r.status_code in (301, 302, 401)
++
++
++@pytest.mark.parametrize("valor", ["", "abc", "-1", "999999", "1 OR 1=1"])
++def test_endpoint_tolera_basura(A, esc, valor):
++    r = _como(A, "adm2").get("/api/stock/by-location", query_string={"location_id": valor})
++    assert r.status_code == 200
++    assert r.get_json() == {"items": [], "qty": {}} or r.get_json()["items"] == []
++
++
++# ------------------------------------------- alcance del tecnico en la API
++
++def test_tecnico_accede_a_su_ubicacion(A, esc):
++    r = _como(A, "tec").get(f"/api/stock/by-location?location_id={esc['mi_cam'].id}")
++    assert r.status_code == 200
++    assert esc["it_mio"].id in r.get_json()["items"]
++
++
++@pytest.mark.parametrize("clave", ["otra", "jaula"])
++def test_tecnico_no_accede_a_ubicacion_ajena(A, esc, clave):
++    """Acotar el HTML y dejar la API abierta seria mover el agujero, no cerrarlo."""
++    r = _como(A, "tec").get(f"/api/stock/by-location?location_id={esc[clave].id}")
++    assert r.status_code == 200
++    assert r.get_json() == {"items": [], "qty": {}}
++
++
++def test_tecnico_sin_ubicaciones_no_accede_a_nada(A, esc):
++    make_user(A, "tec_pelado", "TECNICO")
++    r = _como(A, "tec_pelado").get(f"/api/stock/by-location?location_id={esc['mi_cam'].id}")
++    assert r.get_json() == {"items": [], "qty": {}}

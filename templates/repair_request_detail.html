@@ -112,7 +112,8 @@
     Si no vas a entregar <b>nada</b>, no cierres con 0: usá «Rechazar solicitud» más abajo.
   </p>
   <form method="post" action="{{ url_for('repair_request_close', rr_id=rr.id) }}"
-        onsubmit="return confirm('¿Cerrar la solicitud {{ rr.number }} y generar los movimientos de entrega?');">
+        data-confirm-move="Confirmar entrega de repuestos"
+        data-confirm-context="Solicitud {{ rr.number }} · Jaula &rarr; {{ rr.dest_location.name if rr.dest_location else 'camioneta' }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
     {% for ln in rr.lines %}

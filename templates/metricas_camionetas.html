@@ -2,7 +2,8 @@
 {% block page_title %}Métricas{% endblock %}
 {% block extra_head %}
 <link rel="stylesheet" href="{{ url_for('static', filename='css/metricas.css') }}">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+{%- set _chart = vendor_asset('chartjs') %}
+<script src="{{ _chart.url }}"{% if _chart.integrity %} integrity="{{ _chart.integrity }}"{% endif %}{% if not _chart.is_local %} crossorigin="anonymous" referrerpolicy="no-referrer"{% endif %}></script>
 {% endblock %}
 {% block title %}Métricas · Camionetas{% endblock %}
 {% block content %}

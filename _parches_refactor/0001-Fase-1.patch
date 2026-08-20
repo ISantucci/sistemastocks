@@ -1,0 +1,200 @@
+From 0bda338cc76f65a97f2c132ff242001e96cff0a6 Mon Sep 17 00:00:00 2001
+From: c <a@b>
+Date: Tue, 18 Aug 2026 12:41:05 +0000
+Subject: [PATCH 1/7] Fase 1: alcance del TECNICO en stock_map/stock_qty_map
+
+---
+ app.py                      | 68 +++++++++++++++++++++++++------------
+ tests/test_tecnico_scope.py | 68 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 114 insertions(+), 22 deletions(-)
+
+diff --git a/app.py b/app.py
+index 5b6f56a..65db434 100644
+--- a/app.py
++++ b/app.py
+@@ -3344,6 +3344,37 @@ def items_visible_query():
+     )
+ 
+ 
++def build_stock_maps(location_ids=None):
++    """Mapas de stock para los selectores de las pantallas de carga.
++
++    Devuelve (stock_map, stock_qty_map):
++      - stock_map     -> { loc_id(int): [item_id, ...] }        filtra el select "Item"
++      - stock_qty_map -> { loc_id(str): { item_id(str): qty } } tope de cantidad
++
++    location_ids: si se pasa, limita a esas ubicaciones (ej. camionetas del
++    tecnico). Si es None devuelve todo, que es el comportamiento historico y el
++    que siguen viendo ADMIN / SUPERVISOR / LECTOR.
++
++    Este helper existe para que el alcance viva en UN solo lugar. Antes el bloque
++    estaba copiado en cuatro handlers y ninguna copia filtraba, mientras que
++    build_units_map() -- tres lineas mas abajo en el mismo handler -- si lo
++    hacia. Resultado: el TECNICO recibia el stock de TODAS las ubicaciones,
++    incluidas camionetas ajenas. La pantalla no lo mostraba, pero el dato viajaba
++    en el HTML y se leia con F12: seguridad visual, no real.
++    """
++    q = Stock.query.filter(Stock.quantity > 0)
++    if location_ids is not None:
++        ids = list(location_ids) or [-1]
++        q = q.filter(Stock.location_id.in_(ids))
++
++    stock_map = {}
++    stock_qty_map = {}
++    for s in q.all():
++        stock_map.setdefault(s.location_id, []).append(s.item_id)
++        stock_qty_map.setdefault(str(s.location_id), {})[str(s.item_id)] = s.quantity
++    return stock_map, stock_qty_map
++
++
+ def item_picker_options(selected_value=None, value_field="code", base_query=None):
+     """Opciones para un <select> de items. Devuelve (opciones, es_remoto).
+ 
+@@ -3886,12 +3917,12 @@ def movements():
+ 
+     users_list = User.query.order_by(User.username).all()
+ 
+-    # Mapa ubicacion -> items con stock (>0), para filtrar el selector "Item" segun "Desde"
+-    stock_map = {}
+-    stock_qty_map = {}  # {loc_id(str): {item_id(str): qty}} para el tope de cantidad
+-    for s in Stock.query.filter(Stock.quantity > 0).all():
+-        stock_map.setdefault(s.location_id, []).append(s.item_id)
+-        stock_qty_map.setdefault(str(s.location_id), {})[str(s.item_id)] = s.quantity
++    # Mapa ubicacion -> items con stock (>0), para filtrar el selector "Item" segun "Desde".
++    # Mismo alcance que build_units_map() unas lineas mas abajo: al TECNICO solo se
++    # le mandan sus ubicaciones. Antes se mandaban todas y se leian con F12.
++    stock_map, stock_qty_map = build_stock_maps(
++        location_ids=tech_location_ids if is_tecnico else None
++    )
+ 
+     # Ubicaciones externas (Proveedor/Baja): no tienen stock propio, por eso el
+     # selector "Item" debe ofrecer TODOS los items al elegirlas como origen.
+@@ -4151,12 +4182,9 @@ def movements_bulk():
+ 
+     _descartes_b = Location.query.filter_by(name="Descartes").first()
+ 
+-    # Mapa ubicacion -> items con stock (>0), para filtrar el selector "Item" segun "Desde"
+-    stock_map = {}
+-    stock_qty_map = {}  # {loc_id(str): {item_id(str): qty}} para el tope de cantidad
+-    for s in Stock.query.filter(Stock.quantity > 0).all():
+-        stock_map.setdefault(s.location_id, []).append(s.item_id)
+-        stock_qty_map.setdefault(str(s.location_id), {})[str(s.item_id)] = s.quantity
++    # Mapa ubicacion -> items con stock (>0), para filtrar el selector "Item" segun "Desde".
++    # /movements/bulk es solo ADMIN/SUPERVISOR: alcance completo, sin cambios.
++    stock_map, stock_qty_map = build_stock_maps()
+ 
+     # Externas: ofrecer todos los items al elegirlas como origen (no tienen stock).
+     external_location_ids = [l.id for l in locations_list if l.is_external]
+@@ -4453,11 +4481,10 @@ def item_usage():
+ 
+     users_list = User.query.order_by(User.username).all()
+ 
+-    stock_map = {}
+-    stock_qty_map = {}  # {loc_id(str): {item_id(str): qty}} para el tope de cantidad
+-    for s in Stock.query.filter(Stock.quantity > 0).all():
+-        stock_map.setdefault(s.location_id, []).append(s.item_id)
+-        stock_qty_map.setdefault(str(s.location_id), {})[str(s.item_id)] = s.quantity
++    # Mismo alcance que /movements: al TECNICO solo sus ubicaciones.
++    stock_map, stock_qty_map = build_stock_maps(
++        location_ids=tech_location_ids if is_tecnico else None
++    )
+ 
+     serialized_item_ids = [it.id for it in items if it.serialized]
+ 
+@@ -5694,11 +5721,8 @@ def scrap_report():
+     )
+     items_all = Item.query.filter_by(is_active=True).order_by(Item.code).all()
+     users_list = User.query.order_by(User.username).all()
+-    stock_map = {}
+-    stock_qty_map = {}  # {loc_id(str): {item_id(str): qty}} para el tope de cantidad
+-    for s in Stock.query.filter(Stock.quantity > 0).all():
+-        stock_map.setdefault(s.location_id, []).append(s.item_id)
+-        stock_qty_map.setdefault(str(s.location_id), {})[str(s.item_id)] = s.quantity
++    # /scrap es solo ADMIN/SUPERVISOR: alcance completo, sin cambios.
++    stock_map, stock_qty_map = build_stock_maps()
+ 
+     serialized_item_ids = [it.id for it in items_all if it.serialized]
+ 
+diff --git a/tests/test_tecnico_scope.py b/tests/test_tecnico_scope.py
+index 55178ce..4306bc3 100644
+--- a/tests/test_tecnico_scope.py
++++ b/tests/test_tecnico_scope.py
+@@ -11,6 +11,7 @@ Reglas confirmadas con Ignacio (2026-08-13):
+      su camioneta (ubicación asignada).
+   3. El lector ve las solicitudes de compra pero no las genera.
+ """
++import json
+ import re
+ 
+ import pytest
+@@ -198,3 +199,70 @@ def test_lector_no_puede_generar_solicitudes(A, esc):
+     r = _como(A, "lec").post("/solicitudes-compra/new", data={})
+     assert r.status_code in (302, 403)
+     assert A.PurchaseRequest.query.count() == n0
++
++
++# --------------------------------------- regla 2 (bis): el mapa de stock del HTML
++#
++# Estos tests cubren el agujero real que existia antes de la Fase 1: la pantalla
++# NO mostraba el stock ajeno, pero el dato viajaba igual dentro del <script> y se
++# leia con F12. No alcanza con mirar la tabla: hay que mirar lo que se serializa.
++
++
++def _stock_qty_map(html):
++    """Extrae la variable stockQtyMap embebida en el HTML."""
++    m = re.search(r"var stockQtyMap = (.*?);\n", html, re.S)
++    return json.loads(m.group(1)) if m else None
++
++
++@pytest.mark.parametrize("ruta", ["/movements", "/item-usage"])
++def test_tecnico_no_recibe_stock_de_ubicaciones_ajenas(A, esc, ruta):
++    """El HTML no debe contener el stock de la camioneta del otro tecnico."""
++    html = _como(A, "tec_a").get(ruta).get_data(as_text=True)
++    mapa = _stock_qty_map(html)
++    assert mapa is not None, f"{ruta} ya no embebe stockQtyMap: revisar este test"
++
++    ajenas = {str(esc["truck_b"].id), str(esc["dep"].id)}
++    assert not (set(mapa) & ajenas), (
++        f"{ruta} le filtro al tecnico ubicaciones ajenas: {set(mapa) & ajenas}"
++    )
++    assert str(esc["truck_a"].id) in mapa, "el tecnico perdio SU propia ubicacion"
++
++
++@pytest.mark.parametrize("ruta", ["/movements", "/item-usage"])
++def test_tecnico_no_recibe_cantidades_de_items_ajenos(A, esc, ruta):
++    """Ni el item de la otra camioneta ni el del deposito deben aparecer."""
++    html = _como(A, "tec_a").get(ruta).get_data(as_text=True)
++    mapa = _stock_qty_map(html)
++    visibles = {int(i) for por_loc in mapa.values() for i in por_loc}
++    assert esc["it_b"].id not in visibles
++    assert esc["it_dep"].id not in visibles
++    assert esc["it_a"].id in visibles
++
++
++@pytest.mark.parametrize("ruta", ["/movements", "/item-usage"])
++def test_admin_sigue_viendo_el_mapa_completo(A, esc, ruta):
++    """Contraprueba: para ADMIN nada cambia respecto del comportamiento previo."""
++    make_user(A, "adm2", "ADMIN")
++    html = _como(A, "adm2").get(ruta).get_data(as_text=True)
++    mapa = _stock_qty_map(html)
++    for loc in ("truck_a", "truck_b", "dep"):
++        assert str(esc[loc].id) in mapa, f"ADMIN perdio {loc}: regresion"
++
++
++def test_tecnico_sin_ubicacion_no_recibe_nada(A, esc):
++    """Sin ubicaciones asignadas el mapa va vacio, no completo."""
++    make_user(A, "tec_solo", "TECNICO")
++    html = _como(A, "tec_solo").get("/movements").get_data(as_text=True)
++    assert _stock_qty_map(html) == {}
++
++
++def test_build_stock_maps_filtra_por_ubicacion(A, esc):
++    """Prueba directa del helper, sin pasar por HTTP."""
++    with A.app.app_context():
++        completo, _ = A.build_stock_maps()
++        acotado, qty = A.build_stock_maps(location_ids=[esc["truck_a"].id])
++        assert set(acotado) == {esc["truck_a"].id}
++        assert len(completo) > len(acotado)
++        # lista vacia = ninguna ubicacion, no "todas"
++        vacio, _ = A.build_stock_maps(location_ids=[])
++        assert vacio == {}

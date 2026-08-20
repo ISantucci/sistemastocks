@@ -14,7 +14,7 @@
 <div class="page-header"><div><h2>Carga múltiple</h2><p>Cargá varios ítems en un mismo movimiento.</p></div></div>
 
 <div class="card">
-  <form method="post" id="bulk-form">
+  <form method="post" id="bulk-form" data-confirm-move="Confirmar carga múltiple">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="form-grid">
       <div class="field">
@@ -53,7 +53,7 @@
 </div>
 
 <template id="bulk-line-template">
-  <div class="bulk-line">
+  <div class="bulk-line" data-confirm-row>
     <div class="bulk-item-select field">
       <label>Item</label>
       <select name="item_id[]" class="bulk-item" required>
@@ -146,20 +146,43 @@
     return { locId: locId, set: set, all: isExternal };
   }
 
-  function applyStockFilterToLine(el) {
-    if (!el || !el.tomselect) return;
-    var ts = el.tomselect;
+  // Opciones permitidas por STOCK para las filas (sin considerar el dedupe).
+  // Externa (Proveedor/Baja): todos los ítems; interna: solo con stock.
+  function bulkStockOptions() {
     var info = allowedForCurrentFrom();
-    ts.clear(true);
-    ts.clearOptions();
-    // Externa (Proveedor/Baja): todos los ítems; interna: solo con stock.
-    allBulkItems.forEach(function (o) { if (info.all || info.set[o.value]) ts.addOption(o); });
-    ts.refreshOptions(false);
-    if (!info.locId) { ts.disable(); } else { ts.enable(); }
+    if (!info.locId) return [];
+    return allBulkItems.filter(function (o) { return info.all || info.set[o.value]; });
   }
 
-  function applyStockFilterAllLines() {
-    document.querySelectorAll(".bulk-item").forEach(applyStockFilterToLine);
+  // Un ítem = una sola fila: el dedupe saca de cada listado lo ya elegido en
+  // las otras filas. El backend igual rechaza item_id[] repetidos.
+  //
+  // OJO (no mover a nivel top-level): este <script> inline se ejecuta ANTES que
+  // los <script src> de base.html, que van al final del <body>. Acá arriba
+  // todavía no existe initLineDedupe, así que llamarlo directo tira
+  // ReferenceError y se cae TODO el script de la pantalla (no se arma ninguna
+  // fila y "+ Agregar item" deja de responder). Por eso se crea perezoso: la
+  // primera llamada real ocurre ya dentro de DOMContentLoaded.
+  var _bulkDedupe = null;
+  function bulkDedupe() {
+    if (!_bulkDedupe) {
+      _bulkDedupe = initLineDedupe({
+        itemSel: ".bulk-item",
+        optionsFor: bulkStockOptions,
+        enabledFor: function () { return !!allowedForCurrentFrom().locId; }
+      });
+    }
+    return _bulkDedupe;
+  }
+
+  function applyStockFilterAllLines() { bulkDedupe().refresh(); }
+
+  // Cambio de "Desde": cambia el universo de stock, se limpia lo ya elegido.
+  function resetStockFilterAllLines() {
+    document.querySelectorAll(".bulk-item").forEach(function (el) {
+      if (el.tomselect) el.tomselect.clear(true);
+    });
+    bulkDedupe().refresh();
   }
 
   function initTomSelectFor(el) {
@@ -171,9 +194,14 @@
       placeholder: "Elegí la ubicación de origen primero...",
       closeAfterSelect: true,
       onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
-      onChange: function () { this.blur(); clampBulkQty(el.closest(".bulk-line")); }
+      onChange: function () {
+        this.blur();
+        clampBulkQty(el.closest(".bulk-line"));
+        // Liberar/tomar el ítem en las demás filas.
+        applyStockFilterAllLines();
+      }
     });
-    applyStockFilterToLine(el);
+    applyStockFilterAllLines();
   }
 
   function applyDescartes(isDescartes) {
@@ -225,7 +253,11 @@
     pendingFlag.addEventListener("change", togglePendingComment);
     togglePendingComment();
 
-    removeBtn.addEventListener("click", function () { line.remove(); });
+    // Al borrar la fila, su ítem vuelve a estar disponible en las demás.
+    removeBtn.addEventListener("click", function () {
+      line.remove();
+      applyStockFilterAllLines();
+    });
   }
 
   function addBulkLine() {
@@ -245,10 +277,17 @@
     bulkToSel.addEventListener("change", function () {
       applyDescartes(this.value === descartes_id);
     });
+    // "Hacia" no ofrece la ubicación elegida en "Desde" (y viceversa). El
+    // backend ya lo rechaza; esto evita que el usuario llegue a mandarlo.
+    initFromToExclusion({
+      from: document.getElementById("bulk_from_location_id"),
+      to: bulkToSel
+    });
+
     var bulkFromSel = document.getElementById("bulk_from_location_id");
     if (bulkFromSel) {
       bulkFromSel.addEventListener("change", function () {
-        applyStockFilterAllLines(); clampBulkAll();
+        resetStockFilterAllLines(); clampBulkAll();
       });
     }
   });

@@ -1,7 +1,28 @@
-flask
-flask_sqlalchemy
-flask-login
-flask-wtf
-waitress
-flask-limiter
-openpyxl
+# Dependencias de PRODUCCION, fijadas por version.
+#
+# Por que estan pinneadas: sin version, un `pip install -r requirements.txt`
+# en un rebuild puede traer una version distinta a la que corre hoy en la EC2
+# y cambiar el comportamiento (o romper el arranque) sin que nadie haya tocado
+# una linea de codigo. Las versiones de abajo son las que ya estaban instaladas
+# y validadas.
+#
+# Para actualizar: cambiar la version aca, correr `pytest` y recien despues
+# desplegar. Nunca actualizar directamente en produccion.
+
+Flask==3.1.3
+Flask-SQLAlchemy==3.1.1
+Flask-Login==0.6.3
+Flask-WTF==1.3.0
+flask-limiter==4.1.1
+waitress==3.0.2
+openpyxl==3.1.5
+
+# Transitivas relevantes (se fijan para que el build sea reproducible).
+SQLAlchemy==2.0.51
+Werkzeug==3.1.8
+Jinja2==3.1.6
+WTForms==3.2.2
+itsdangerous==2.2.0
+MarkupSafe==3.0.3
+click==8.4.2
+blinker==1.9.0

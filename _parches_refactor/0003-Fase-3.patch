@@ -1,0 +1,230 @@
+From fc9ee3cc87258673b7d0533a86d49b677b4b913c Mon Sep 17 00:00:00 2001
+From: c <a@b>
+Date: Tue, 18 Aug 2026 12:55:24 +0000
+Subject: [PATCH 3/7] Fase 3: paginacion real en /ingresos-egresos y
+ /stock-alerts + fin del N+1 de RemitoLine
+
+---
+ app.py                          |  37 +++++++++++-
+ templates/ingresos_egresos.html |   2 +
+ templates/stock_alerts.html     |   2 +
+ tests/test_pagination.py        | 102 ++++++++++++++++++++++++++++++++
+ 4 files changed, 140 insertions(+), 3 deletions(-)
+
+diff --git a/app.py b/app.py
+index 655506d..16ac0cf 100644
+--- a/app.py
++++ b/app.py
+@@ -6244,6 +6244,18 @@ def stock_alerts():
+     keyfn = keyfns.get(sort_by, keyfns["code"])
+     alerts.sort(key=keyfn, reverse=(sort_dir == "desc"))
+ 
++    # Paginacion en memoria, a proposito: is_alert_stock() es una regla de
++    # negocio en Python (no se puede expresar en SQL sin duplicarla), asi que la
++    # lista se filtra y se ordena entera y despues se corta. Acota el HTML, que
++    # es lo que crecia sin limite. La consulta sigue trayendo el universo de
++    # items con stock_min > 0, que es un subconjunto chico y acotado del catalogo.
++    _total = len(alerts)
++    _per_page = per_page_from_request()
++    _page = page_from_request()
++    _desde = (_page - 1) * _per_page
++    alerts_page = PageResult(alerts[_desde:_desde + _per_page], _page, _per_page, _total)
++    alerts = alerts_page.items
++
+     locations_list = Location.query.order_by(Location.name).all()
+     items_list = Item.query.filter_by(is_active=True).order_by(Item.code).all()
+     categories_list = Category.query.order_by(Category.name).all()
+@@ -6251,6 +6263,7 @@ def stock_alerts():
+     return render_template(
+         "stock_alerts.html",
+         alerts=alerts,
++        page_obj=alerts_page,
+         locations=locations_list,
+         items=items_list,
+         categories=categories_list,
+@@ -7981,12 +7994,29 @@ def in_out():
+     suppliers_list = Supplier.query.filter_by(is_active=True).order_by(Supplier.contact_name).all()
+     items_list = Item.query.filter_by(is_active=True).order_by(Item.code).all()
+ 
+-    logs = (
++    # Antes: .limit(300).all(). Ese tope ESCONDIA filas sin avisar -- no habia
++    # "pagina 2" ni aviso -- lo cual en un sistema de trazabilidad es peor que
++    # paginar: el que mira la pantalla cree que esta viendo todo. Ahora es
++    # paginacion real, con el mismo helper que el resto de los listados.
++    logs_q = (
+         Movement.query.filter(Movement.supplier_id.isnot(None))
+-        .order_by(Movement.created_at.desc()).limit(300).all()
++        .order_by(Movement.created_at.desc())
+     )
++    logs_page = paginate(logs_q)
++    logs = logs_page.items
++
+     # Remito por movimiento (para el link/estado de impresion).
+-    line_map = {ln.movement_id: ln.remito for ln in RemitoLine.query.all()}
++    # Antes: RemitoLine.query.all(), que traia la tabla ENTERA y ademas disparaba
++    # un SELECT por cada ln.remito (N+1). Ahora solo las lineas de los
++    # movimientos de esta pagina, con el remito ya cargado.
++    line_map = {}
++    if logs:
++        _ids = [m.id for m in logs]
++        for ln in (RemitoLine.query
++                   .options(db.joinedload(RemitoLine.remito))
++                   .filter(RemitoLine.movement_id.in_(_ids))
++                   .all()):
++            line_map[ln.movement_id] = ln.remito
+ 
+     # Seriales disponibles en Jaula (para egreso de serializados).
+     jaula_units = {}
+@@ -8010,6 +8040,7 @@ def in_out():
+         items=items_list,
+         jaula_stock=jaula_stock,
+         logs=logs,
++        page_obj=logs_page,
+         line_map=line_map,
+         jaula_units=jaula_units,
+         serialized_item_ids=serialized_item_ids,
+diff --git a/templates/ingresos_egresos.html b/templates/ingresos_egresos.html
+index 6967715..e73b896 100644
+--- a/templates/ingresos_egresos.html
++++ b/templates/ingresos_egresos.html
+@@ -1,4 +1,5 @@
+ {% extends "base.html" %}
++{% from "_pagination.html" import pagination %}
+ {% block title %}Ingresos/Egresos · TNGStocks{% endblock %}
+ {% block page_title %}Ingresos/Egresos{% endblock %}
+ {% block content %}
+@@ -329,5 +330,6 @@
+       </tbody>
+     </table>
+   </div>
++  {{ pagination(page_obj) }}
+ </div>
+ {% endblock %}
+diff --git a/templates/stock_alerts.html b/templates/stock_alerts.html
+index b965a30..913469c 100644
+--- a/templates/stock_alerts.html
++++ b/templates/stock_alerts.html
+@@ -1,4 +1,5 @@
+ {% extends "base.html" %}
++{% from "_pagination.html" import pagination %}
+ {% block title %}Alertas de Stock · TNGStocks{% endblock %}
+ {% block page_title %}Alertas de Stock{% endblock %}
+ {% block content %}
+@@ -69,6 +70,7 @@
+       </tbody>
+     </table>
+   </div>
++  {{ pagination(page_obj) }}
+ </div>
+ {% else %}
+ <div class="card"><p style="color:var(--ok, #1f6b1f); font-weight:600; margin:0;">Sin alertas — todos los ítems están sobre el mínimo.</p></div>
+diff --git a/tests/test_pagination.py b/tests/test_pagination.py
+index f6fad2c..244a8d1 100644
+--- a/tests/test_pagination.py
++++ b/tests/test_pagination.py
+@@ -201,3 +201,105 @@ def test_selector_items_pasa_a_remoto_con_catalogo_grande(admin, monkeypatch):
+     assert "js-buscar-remoto" in html
+     assert "/api/items/search" in html
+     assert "CAB-004" not in html, "el catálogo no debe volcarse en el HTML"
++
++
++# ------------------------------------------------- /ingresos-egresos (Fase 3)
++#
++# Esta pantalla tenia un .limit(300) fijo que escondia filas SIN AVISAR: no
++# habia "pagina 2" ni mensaje. En un sistema de trazabilidad eso es peor que
++# paginar, porque el que mira cree que esta viendo todo.
++
++
++def _sembrar_in_out(A, n):
++    """n movimientos con proveedor (los que lista Ingresos/Egresos)."""
++    jaula = make_location(A, A.LOCATION_JAULA_TNG)
++    prov = make_location(A, A.LOCATION_PROVEEDOR, is_external=True)
++    it = make_item(A, code="IO-001", name="Item IO")
++    s = A.Supplier(contact_name="Proveedor Uno")
++    A.db.session.add(s)
++    A.db.session.commit()
++    for i in range(n):
++        A.db.session.add(A.Movement(
++            item_id=it.id, qty=1,
++            from_location_id=prov.id, to_location_id=jaula.id,
++            user_id=1, supplier_id=s.id,
++            year=2026, seq=i + 1, number=f"MOV-{i + 1:03d}",
++        ))
++    A.db.session.commit()
++    return it
++
++
++def test_ingresos_egresos_pagina(admin):
++    A, c = admin
++    _sembrar_in_out(A, 40)
++    html = c.get("/ingresos-egresos?limit=10").get_data(as_text=True)
++    assert _rows_en_tabla(html) == 10
++
++
++def test_ingresos_egresos_ya_no_esconde_filas(admin):
++    """El tope mudo de 300 no debe volver: la fila 301 tiene que ser alcanzable."""
++    A, c = admin
++    _sembrar_in_out(A, 305)
++
++    total_visto = 0
++    for page in range(1, 5):
++        html = c.get(f"/ingresos-egresos?limit=100&page={page}").get_data(as_text=True)
++        total_visto += _rows_en_tabla(html)
++    assert total_visto == 305, f"se perdieron filas: {total_visto} de 305"
++
++
++def test_ingresos_egresos_declara_el_total(admin):
++    """La barra de paginacion tiene que decir cuantas filas hay en serio."""
++    A, c = admin
++    _sembrar_in_out(A, 305)
++    html = c.get("/ingresos-egresos?limit=50").get_data(as_text=True)
++    assert "305" in html, "el total real no aparece en la pantalla"
++
++
++def test_ingresos_egresos_no_carga_toda_la_tabla_de_lineas(admin):
++    """line_map debe acotarse a la pagina, no a RemitoLine entero."""
++    A, c = admin
++    it = _sembrar_in_out(A, 40)
++    # Un remito con una linea de un movimiento que NO esta en la pagina 1.
++    viejo = A.Movement.query.order_by(A.Movement.id.asc()).first()
++    rem = A.Remito(number="R-0001", year=2026, seq=1,
++                   from_location_id=viejo.from_location_id,
++                   to_location_id=viejo.to_location_id,
++                   created_by_user_id=1)
++    A.db.session.add(rem)
++    A.db.session.commit()
++    A.db.session.add(A.RemitoLine(remito_id=rem.id, movement_id=viejo.id))
++    A.db.session.commit()
++
++    r = c.get("/ingresos-egresos?limit=5")
++    assert r.status_code == 200
++
++
++# ------------------------------------------------------ /stock-alerts (Fase 3)
++
++
++def test_stock_alerts_pagina(admin):
++    A, c = admin
++    loc = make_location(A, "Deposito Alertas")
++    for i in range(30):
++        it = make_item(A, code=f"AL-{i:03d}", name=f"Alerta {i}", stock_min=10)
++        A.upsert_stock(it.id, loc.id, 1)   # por debajo del minimo => alerta
++    A.db.session.commit()
++
++    html = c.get("/stock-alerts?limit=10").get_data(as_text=True)
++    assert _rows_en_tabla(html) == 10
++
++
++def test_stock_alerts_no_pierde_alertas_al_paginar(admin):
++    A, c = admin
++    loc = make_location(A, "Deposito Alertas")
++    for i in range(30):
++        it = make_item(A, code=f"AL-{i:03d}", name=f"Alerta {i}", stock_min=10)
++        A.upsert_stock(it.id, loc.id, 1)
++    A.db.session.commit()
++
++    vistos = 0
++    for page in (1, 2, 3):
++        html = c.get(f"/stock-alerts?limit=10&page={page}").get_data(as_text=True)
++        vistos += _rows_en_tabla(html)
++    assert vistos == 30

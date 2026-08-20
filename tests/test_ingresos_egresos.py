@@ -161,7 +161,13 @@ def test_egreso_mayor_al_stock_se_rechaza(A, client):
     assert A.Movement.query.filter(A.Movement.supplier_id == s.id).count() == 0
 
 
-def test_ingreso_egreso_no_aparece_en_movements(A, client):
+def test_ingreso_egreso_aparece_en_movements_pero_no_en_el_export(A, client):
+    """El LISTADO de /movements incluye ingresos/egresos; el EXPORT CSV no.
+
+    Es deliberado (_build_movements_query(include_supplier=...)): en pantalla
+    conviene ver todo junto, pero el CSV mantiene el alcance historico de
+    movimientos internos.
+    """
     _admin(client)
     _base(A)
     it = make_item(A, code="CAB-300", name="Cable 300")
@@ -170,10 +176,14 @@ def test_ingreso_egreso_no_aparece_en_movements(A, client):
         "tipo": "INGRESO", "supplier_id": str(s.id),
         "item_id[]": [str(it.id)], "qty[]": ["3"], "line_serials[]": [""],
     }, follow_redirects=True)
-    html = client.get("/movements").get_data(as_text=True)
     m = A.Movement.query.filter(A.Movement.supplier_id == s.id).first()
-    assert m.number not in html
+    assert m is not None
 
+    html = client.get("/movements").get_data(as_text=True)
+    assert m.number in html, "el listado debe mostrar los ingresos/egresos"
+
+    csv_text = client.get("/movements/export.csv").get_data(as_text=True)
+    assert m.number not in csv_text, "el export mantiene solo movimientos internos"
 
 def test_marcar_remito_impreso(A, client):
     _admin(client)

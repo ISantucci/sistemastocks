@@ -1,0 +1,98 @@
+# =============================================================================
+# Apache - vhost de ejemplo para SistemaStocksTNG
+# =============================================================================
+# ESTE ARCHIVO NO SE APLICA SOLO. Es una referencia para comparar contra la
+# configuracion real del servidor. Copiar, adaptar rutas/certificados y recien
+# entonces recargar Apache. Probar SIEMPRE con `httpd -t` (o `apachectl -t`)
+# antes de reiniciar.
+#
+# Problemas que corrige respecto de lo observado desde afuera:
+#
+#  1) La redireccion HTTP -> HTTPS generaba una ruta con doble barra:
+#     https://stocks.tngtickets.com//stock
+#     Causa tipica: usar `Redirect permanent / https://host/` o un RewriteRule
+#     con `$1` cuando la captura ya incluye la barra inicial, de forma que la
+#     barra se concatena dos veces. La forma correcta es usar %{REQUEST_URI},
+#     que YA viene con la barra inicial (ver abajo).
+#
+#  2) Se publicaba el stack completo (Apache/mod_wsgi por HTTP, waitress por
+#     HTTPS). Se corrige con ServerTokens/ServerSignature y limpiando el header
+#     Server en el proxy.
+#
+#  3) Faltaba HSTS. Se agrega SOLO en el vhost 443, nunca en el 80.
+# =============================================================================
+
+# --- Global (httpd.conf): no publicar version ni modulos ---------------------
+ServerTokens Prod
+ServerSignature Off
+TraceEnable Off
+
+# =============================================================================
+# VHOST 80 - unica funcion: mandar todo a HTTPS
+# =============================================================================
+<VirtualHost *:80>
+    ServerName stocks.tngtickets.com
+
+    # Redireccion correcta: %{REQUEST_URI} ya empieza con "/", por eso NO se
+    # escribe una barra despues del host. Escribir "https://%{HTTP_HOST}/%{REQUEST_URI}"
+    # es exactamente lo que produce el "//stock".
+    RewriteEngine On
+    RewriteCond %{HTTPS} off
+    RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [R=301,L]
+
+    # NO poner HSTS aca: en el vhost 80 no tiene efecto util y confunde.
+</VirtualHost>
+
+# =============================================================================
+# VHOST 443 - termina TLS y hace de proxy hacia waitress
+# =============================================================================
+<VirtualHost *:443>
+    ServerName stocks.tngtickets.com
+
+    SSLEngine on
+    SSLCertificateFile      "C:/ruta/al/certificado.crt"
+    SSLCertificateKeyFile   "C:/ruta/al/privada.key"
+    SSLCertificateChainFile "C:/ruta/a/la/cadena.crt"
+
+    SSLProtocol             -all +TLSv1.2 +TLSv1.3
+    SSLHonorCipherOrder     off
+    SSLSessionTickets       off
+
+    # --- Proxy hacia waitress -------------------------------------------------
+    # waitress escucha SOLO en loopback (APP_HOST=127.0.0.1). Verificar que el
+    # puerto 5000 NO este abierto en el firewall hacia Internet.
+    ProxyPreserveHost On
+    ProxyPass        / http://127.0.0.1:5000/
+    ProxyPassReverse / http://127.0.0.1:5000/
+
+    # Sin estas cabeceras la app no puede saber que la conexion original fue
+    # HTTPS, y por lo tanto el HSTS condicional nunca se activa.
+    RequestHeader set X-Forwarded-Proto "https"
+    RequestHeader set X-Forwarded-Port  "443"
+
+    # --- Cabeceras de seguridad ----------------------------------------------
+    # HSTS: activar SOLO cuando HTTPS ya funciona bien en todo el dominio.
+    # Recomendado: empezar con max-age chico (300) durante unos dias, verificar
+    # que nada quedo colgado en HTTP, y recien despues subir a un anio.
+    # Header always set Strict-Transport-Security "max-age=300"
+    Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+    # El resto de las cabeceras (CSP, Permissions-Policy, X-Frame-Options,
+    # Referrer-Policy, etc.) las pone la aplicacion en app.py, en un solo lugar.
+    # No duplicarlas aca para no terminar con dos fuentes de verdad.
+
+    # No revelar el backend.
+    Header always unset Server
+    Header always unset X-Powered-By
+    Header always set Server "TNGStocks"
+
+    ErrorLog  "logs/stocks-error.log"
+    CustomLog "logs/stocks-access.log" combined
+</VirtualHost>
+
+# Modulos necesarios (descomentar en httpd.conf si faltan):
+#   LoadModule rewrite_module      modules/mod_rewrite.so
+#   LoadModule headers_module      modules/mod_headers.so
+#   LoadModule proxy_module        modules/mod_proxy.so
+#   LoadModule proxy_http_module   modules/mod_proxy_http.so
+#   LoadModule ssl_module          modules/mod_ssl.so
