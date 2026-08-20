@@ -219,19 +219,31 @@ document.addEventListener("DOMContentLoaded", function () {
     if (!isNaN(v) && v > mx) { qty.value = mx; }
   }
 
-  function applyStockFilterToLine(el) {
-    if (!el || !el.tomselect) return;
-    var ts = el.tomselect;
+  // Opciones permitidas por STOCK para las filas (sin considerar el dedupe).
+  function scrapStockOptions() {
     var info = allowedForCurrentFrom();
-    ts.clear(true);
-    ts.clearOptions();
-    allScrapItems.forEach(function (o) { if (info.set[o.value]) ts.addOption(o); });
-    ts.refreshOptions(false);
-    if (!info.locId) { ts.disable(); } else { ts.enable(); }
+    if (!info.locId) return [];
+    return allScrapItems.filter(function (o) { return !!info.set[o.value]; });
   }
 
-  function applyStockFilterAllLines() {
-    document.querySelectorAll(".scrap-item").forEach(applyStockFilterToLine);
+  // Un item = una sola fila: el dedupe saca de cada listado lo ya elegido en
+  // las otras filas. El backend igual rechaza item_id[] repetidos.
+  // OJO: por eso un mismo item no se puede descartar con dos motivos distintos
+  // en la misma carga; hay que hacer dos cargas.
+  var scrapDedupe = initLineDedupe({
+    itemSel: ".scrap-item",
+    optionsFor: scrapStockOptions,
+    enabledFor: function () { return !!allowedForCurrentFrom().locId; }
+  });
+
+  function applyStockFilterAllLines() { scrapDedupe.refresh(); }
+
+  // Cambio de "Desde": cambia el universo de stock, se limpia lo ya elegido.
+  function resetStockFilterAllLines() {
+    document.querySelectorAll(".scrap-item").forEach(function (el) {
+      if (el.tomselect) el.tomselect.clear(true);
+    });
+    scrapDedupe.refresh();
   }
 
   function initTomSelectFor(el) {
@@ -242,9 +254,14 @@ document.addEventListener("DOMContentLoaded", function () {
       placeholder: "Elegí la ubicación de origen primero...",
       closeAfterSelect: true,
       onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
-      onChange: function () { this.blur(); clampScrapQty(el.closest(".scrap-line")); }
+      onChange: function () {
+        this.blur();
+        clampScrapQty(el.closest(".scrap-line"));
+        // Liberar/tomar el item en las demas filas.
+        applyStockFilterAllLines();
+      }
     });
-    applyStockFilterToLine(el);
+    applyStockFilterAllLines();
   }
 
   function wireScrapLine(line) {
@@ -253,7 +270,13 @@ document.addEventListener("DOMContentLoaded", function () {
     initTomSelectFor(itemSelect);
     var qtyEl = line.querySelector('input[name="qty[]"]');
     if (qtyEl) { qtyEl.addEventListener("input", function () { clampScrapQty(line); }); }
-    if (removeBtn) { removeBtn.addEventListener("click", function () { line.remove(); }); }
+    // Al borrar la fila, su item vuelve a estar disponible en las demas.
+    if (removeBtn) {
+      removeBtn.addEventListener("click", function () {
+        line.remove();
+        applyStockFilterAllLines();
+      });
+    }
   }
 
   function addScrapLine() {
@@ -267,7 +290,7 @@ document.addEventListener("DOMContentLoaded", function () {
   addScrapLine();
 
   if (fromSel && fromSel.tagName === "SELECT") {
-    fromSel.addEventListener("change", function () { applyStockFilterAllLines(); });
+    fromSel.addEventListener("change", function () { resetStockFilterAllLines(); });
   }
 });
 </script>

@@ -365,6 +365,11 @@ document.addEventListener("DOMContentLoaded", function () {
   }
 
   var toSel = document.getElementById("to_location_id");
+
+  // "Hacia" no ofrece la ubicación elegida en "Desde" (y viceversa). El backend
+  // ya lo rechaza; esto evita que el usuario llegue a mandarlo.
+  initFromToExclusion({ from: fromSel, to: toSel });
+
   var scrapBox = document.getElementById("scrap_reason_box");
   var descartes_id = "{{ descartes_id or '' }}";
   function toggleScrap() {

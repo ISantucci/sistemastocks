@@ -161,6 +161,20 @@
 
   function openRemitoModal() { openModal('modal-remito-new'); }
 
+  // "Hacia" no ofrece la ubicación elegida en "Desde", igual que en Movimientos
+  // y Carga múltiple. El backend ya rechaza la relación consigo misma y el
+  // fragmento AJAX ya avisaba; esto la saca directamente del desplegable.
+  //
+  // Va dentro de DOMContentLoaded a propósito: este <script> inline corre ANTES
+  // que los <script src> de base.html (están al final del body), así que acá
+  // arriba initFromToExclusion todavía no existe.
+  document.addEventListener('DOMContentLoaded', function () {
+    initFromToExclusion({
+      from: document.getElementById('rm-from'),
+      to: document.getElementById('rm-to')
+    });
+  });
+
   function onLocChange(which) {
     loadResponsables(which);
     loadRemitoMovs();
@@ -203,7 +217,14 @@
     var body = document.getElementById('rm-mov-body');
     var chkAll = document.getElementById('rm-check-all');
     if (chkAll) chkAll.checked = false;
-    if (!from || !to) return;
+    if (!from || !to) {
+      // Sin la relación completa no puede quedar en pantalla la lista anterior:
+      // si "Hacia" se limpió (porque pasó a ser igual a "Desde"), esos
+      // movimientos ya no corresponden y están tildados. El backend igual los
+      // descarta por no pertenecer a la relación, pero no deben verse.
+      body.innerHTML = '<tr><td colspan="6" class="muted">Elegí Desde y Hacia para ver los movimientos.</td></tr>';
+      return;
+    }
     body.innerHTML = '<tr><td colspan="6" class="muted">Cargando...</td></tr>';
     fetch(REMITO_MOVS_URL + '?from_location_id=' + encodeURIComponent(from) + '&to_location_id=' + encodeURIComponent(to)
           + '&date_from=' + encodeURIComponent(dFrom) + '&date_to=' + encodeURIComponent(dTo))

@@ -124,14 +124,30 @@
 {% if me and me.role == "TECNICO" and trucks and items %}
 <script>
 document.addEventListener("DOMContentLoaded", function () {
+  var allRrItems = [
+    {% for it in items %}{ value: "{{ it.id }}", text: "{{ (it.code ~ ' - ' ~ it.name)|e }}" },
+    {% endfor %}
+  ];
+
+  // Un repuesto = una sola fila: el dedupe saca de cada listado lo ya elegido
+  // en las otras filas. El backend igual rechaza item_id[] repetidos.
+  var rrDedupe = initLineDedupe({
+    itemSel: '.rr-line select[name="item_id[]"]',
+    optionsFor: function () { return allRrItems; }
+  });
+
   function wireLine(line) {
     var rm = line.querySelector(".remove-line-btn");
-    if (rm) rm.addEventListener("click", function () { line.remove(); });
+    // Al borrar la fila, su repuesto vuelve a estar disponible en las demas.
+    if (rm) rm.addEventListener("click", function () { line.remove(); rrDedupe.refresh(); });
     // Selector de repuesto buscable/tipeable (las lineas se clonan, el init
     // global de TomSelect no las alcanza, asi que lo inicializamos por linea).
     var sel = line.querySelector('select[name="item_id[]"]');
     if (sel && window.TomSelect && !sel.tomselect) {
       new TomSelect(sel, window.TS_SINGLE_OPTS);
+    }
+    if (sel) {
+      sel.addEventListener("change", function () { rrDedupe.refresh(); });
     }
   }
   function addLine() {
@@ -139,6 +155,7 @@ document.addEventListener("DOMContentLoaded", function () {
     var cont = document.getElementById("rr-lines");
     cont.appendChild(tpl.content.cloneNode(true));
     wireLine(cont.lastElementChild);
+    rrDedupe.refresh();
   }
   document.getElementById("add-line-btn").addEventListener("click", addLine);
   addLine();

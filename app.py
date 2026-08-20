@@ -4265,6 +4265,11 @@ def movements_bulk():
             pending_responsible_id = first_resp.user_id
 
         parsed_lines = []
+        # Un item = una sola linea. Cargarlo dos veces rompe la trazabilidad
+        # (dos movimientos separados del mismo item) y permite pasarse del stock
+        # real, porque el tope de cantidad del front es por fila. El front ya lo
+        # saca del listado de las otras filas; esto es la validacion real.
+        seen_items = {}
 
         # Validaciones por linea
         for idx, line in enumerate(lines, start=1):
@@ -4292,6 +4297,15 @@ def movements_bulk():
             if not it or not it.is_active:
                 flash(f"Linea {idx}: el item seleccionado no existe o esta inactivo.", "error")
                 return redirect(url_for("movements_bulk"))
+
+            if item_id in seen_items:
+                flash(
+                    f"Linea {idx}: «{it.code} - {it.name}» ya esta cargado en la "
+                    f"linea {seen_items[item_id]}. Sumá la cantidad en una sola linea.",
+                    "error",
+                )
+                return redirect(url_for("movements_bulk"))
+            seen_items[item_id] = idx
 
             # Serializados: la carga múltiple no permite elegir seriales, así que
             # se bloquea para no desincronizar las unidades. Se usa Movimientos.
@@ -4555,7 +4569,10 @@ def item_usage():
         qtys = request.form.getlist("qty[]")
 
         # Limpieza de filas vacías + validación todo-o-nada (nada se toca hasta el try).
+        # Un ítem = una sola línea (ver nota en movements_bulk): el front lo saca
+        # del listado de las otras filas, acá está la validación real.
         parsed_lines = []
+        seen_items = {}
         for idx in range(len(item_ids)):
             item_raw = (item_ids[idx] or "").strip()
             qty_raw = (qtys[idx] or "").strip() if idx < len(qtys) else ""
@@ -4587,6 +4604,15 @@ def item_usage():
                     "error",
                 )
                 return redirect(url_for("item_usage"))
+
+            if item.id in seen_items:
+                flash(
+                    f"Línea {len(parsed_lines) + 1}: «{item.code} - {item.name}» ya está "
+                    f"cargado en la línea {seen_items[item.id]}. Sumá la cantidad en una sola línea.",
+                    "error",
+                )
+                return redirect(url_for("item_usage"))
+            seen_items[item.id] = len(parsed_lines) + 1
 
             parsed_lines.append({"item": item, "qty": qty})
 
@@ -5810,7 +5836,11 @@ def scrap_report():
         reasons = request.form.getlist("scrap_reason[]")
 
         # Validación todo-o-nada (nada se toca hasta el try).
+        # Un ítem = una sola línea (ver nota en movements_bulk). Consecuencia
+        # buscada: para descartar el mismo ítem con dos motivos distintos hay
+        # que hacer dos cargas.
         parsed_lines = []
+        seen_items = {}
         for idx in range(len(item_ids)):
             item_raw = (item_ids[idx] or "").strip()
             qty_raw = (qtys[idx] or "").strip() if idx < len(qtys) else ""
@@ -5845,6 +5875,15 @@ def scrap_report():
                     "error",
                 )
                 return redirect(url_for("scrap_report"))
+
+            if item.id in seen_items:
+                flash(
+                    f"Línea {n}: «{item.code} - {item.name}» ya está cargado en la "
+                    f"línea {seen_items[item.id]}. Sumá la cantidad en una sola línea.",
+                    "error",
+                )
+                return redirect(url_for("scrap_report"))
+            seen_items[item.id] = n
 
             parsed_lines.append({"item": item, "qty": qty, "reason": reason_raw})
 
@@ -6788,6 +6827,8 @@ def repair_request_new():
     qtys = request.form.getlist("qty[]")
 
     parsed = []
+    # Un repuesto = una sola línea (ver nota en movements_bulk).
+    seen_items = {}
     for idx in range(len(item_ids)):
         item_raw = (item_ids[idx] or "").strip()
         qty_raw = (qtys[idx] or "").strip() if idx < len(qtys) else ""
@@ -6811,6 +6852,14 @@ def repair_request_new():
         if jaula_stock.get(item.id, 0) <= 0:
             flash(f"«{item.code} - {item.name}» no tiene stock en la Jaula, no se puede solicitar.", "error")
             return redirect(url_for("repair_requests"))
+        if item.id in seen_items:
+            flash(
+                f"Línea {n}: «{item.code} - {item.name}» ya está cargado en la "
+                f"línea {seen_items[item.id]}. Sumá la cantidad en una sola línea.",
+                "error",
+            )
+            return redirect(url_for("repair_requests"))
+        seen_items[item.id] = n
         parsed.append((item.id, qty))
 
     if not parsed:
@@ -8023,6 +8072,7 @@ def in_out():
         # Se valida TODO antes de tocar nada (operación todo-o-nada).
         planned = []  # {it, qty, new_serials, out_units}
         seen_serials = set()  # evita repetir un serial entre filas
+        seen_items = {}       # un item = una sola fila (ver nota en movements_bulk)
         for idx in range(len(item_ids)):
             item_raw = (item_ids[idx] or "").strip()
             qty_raw = (qtys[idx] or "").strip() if idx < len(qtys) else ""
@@ -8037,6 +8087,15 @@ def in_out():
             if not it or not it.is_active:
                 flash("Hay una fila con un ítem inexistente o dado de baja.", "error")
                 return redirect(url_for("in_out"))
+
+            if it.id in seen_items:
+                flash(
+                    f"«{it.code} - {it.name}» está cargado en más de una fila. "
+                    "Sumá la cantidad en una sola fila.",
+                    "error",
+                )
+                return redirect(url_for("in_out"))
+            seen_items[it.id] = True
 
             out_units = []
             if it.serialized and tipo == "EGRESO":

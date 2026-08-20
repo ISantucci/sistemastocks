@@ -211,6 +211,7 @@
 <script src="{{ _ts_js.url }}"{% if _ts_js.integrity %} integrity="{{ _ts_js.integrity }}"{% endif %}{% if not _ts_js.is_local %} crossorigin="anonymous" referrerpolicy="no-referrer"{% endif %}></script>
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 <script src="{{ url_for('static', filename='js/serial_picker.js') }}"></script>
+<script src="{{ url_for('static', filename='js/line_dedupe.js') }}"></script>
 <script src="{{ url_for('static', filename='js/confirm_move.js') }}"></script>
 {% if current_user.is_authenticated and not embed %}
 <script>

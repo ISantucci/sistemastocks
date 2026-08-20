@@ -215,19 +215,29 @@ document.addEventListener("DOMContentLoaded", function () {
     if (!isNaN(v) && v > mx) { qty.value = mx; }
   }
 
-  function applyStockFilterToLine(el) {
-    if (!el || !el.tomselect) return;
-    var ts = el.tomselect;
+  // Opciones permitidas por STOCK para las filas (sin considerar el dedupe).
+  function usageStockOptions() {
     var info = allowedForCurrentFrom();
-    ts.clear(true);
-    ts.clearOptions();
-    allUsageItems.forEach(function (o) { if (info.set[o.value]) ts.addOption(o); });
-    ts.refreshOptions(false);
-    if (!info.locId) { ts.disable(); } else { ts.enable(); }
+    if (!info.locId) return [];
+    return allUsageItems.filter(function (o) { return !!info.set[o.value]; });
   }
 
-  function applyStockFilterAllLines() {
-    document.querySelectorAll(".usage-item").forEach(applyStockFilterToLine);
+  // Un item = una sola fila: el dedupe saca de cada listado lo ya elegido en
+  // las otras filas. El backend igual rechaza item_id[] repetidos.
+  var usageDedupe = initLineDedupe({
+    itemSel: ".usage-item",
+    optionsFor: usageStockOptions,
+    enabledFor: function () { return !!allowedForCurrentFrom().locId; }
+  });
+
+  function applyStockFilterAllLines() { usageDedupe.refresh(); }
+
+  // Cambio de "Desde": cambia el universo de stock, se limpia lo ya elegido.
+  function resetStockFilterAllLines() {
+    document.querySelectorAll(".usage-item").forEach(function (el) {
+      if (el.tomselect) el.tomselect.clear(true);
+    });
+    usageDedupe.refresh();
   }
 
   function initTomSelectFor(el) {
@@ -238,9 +248,14 @@ document.addEventListener("DOMContentLoaded", function () {
       placeholder: "Elegí la ubicación de origen primero...",
       closeAfterSelect: true,
       onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
-      onChange: function () { this.blur(); clampUsageQty(el.closest(".usage-line")); }
+      onChange: function () {
+        this.blur();
+        clampUsageQty(el.closest(".usage-line"));
+        // Liberar/tomar el item en las demas filas.
+        applyStockFilterAllLines();
+      }
     });
-    applyStockFilterToLine(el);
+    applyStockFilterAllLines();
   }
 
   function wireUsageLine(line) {
@@ -249,7 +264,13 @@ document.addEventListener("DOMContentLoaded", function () {
     initTomSelectFor(itemSelect);
     var qtyEl = line.querySelector('input[name="qty[]"]');
     if (qtyEl) { qtyEl.addEventListener("input", function () { clampUsageQty(line); }); }
-    if (removeBtn) { removeBtn.addEventListener("click", function () { line.remove(); }); }
+    // Al borrar la fila, su item vuelve a estar disponible en las demas.
+    if (removeBtn) {
+      removeBtn.addEventListener("click", function () {
+        line.remove();
+        applyStockFilterAllLines();
+      });
+    }
   }
 
   function addUsageLine() {
@@ -263,7 +284,7 @@ document.addEventListener("DOMContentLoaded", function () {
   addUsageLine();
 
   if (fromSel && fromSel.tagName === "SELECT") {
-    fromSel.addEventListener("change", function () { applyStockFilterAllLines(); });
+    fromSel.addEventListener("change", function () { resetStockFilterAllLines(); });
   }
 });
 </script>
