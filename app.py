@@ -7946,6 +7946,15 @@ SUPPLIER_ROLES = ("ADMIN", "SUPERVISOR")
 INOUT_VIEW_ROLES = ("ADMIN", "SUPERVISOR", "LECTOR")
 INOUT_EDIT_ROLES = ("ADMIN", "SUPERVISOR")
 
+# Motivos de EGRESO. El motivo se guarda en la observación (movimiento y remito):
+# no hay columna nueva, para no migrar la base. "REPARACION" además deja el ítem
+# esperando devolución en /reparaciones (sección "En proveedor").
+EGRESO_MOTIVOS = {
+    "DEVOLUCION": "Devolución",
+    "REPARACION": "Reparación",
+    "OTRO": "Otro",
+}
+
 
 def get_jaula_location():
     return Location.query.filter_by(name=LOCATION_JAULA_TNG).first()
@@ -8043,10 +8052,18 @@ def in_out():
         tipo = request.form.get("tipo", "").strip().upper()  # INGRESO / EGRESO
         supplier_raw = request.form.get("supplier_id", "").strip()
         observation = (request.form.get("observation", "") or "").strip() or None
+        motivo = request.form.get("motivo", "").strip().upper()  # solo EGRESO
 
         if tipo not in ("INGRESO", "EGRESO"):
             flash("Elegí si es ingreso o egreso.", "error")
             return redirect(url_for("in_out"))
+        if tipo == "EGRESO":
+            if motivo not in EGRESO_MOTIVOS:
+                flash("Elegí el motivo del egreso.", "error")
+                return redirect(url_for("in_out"))
+        else:
+            motivo = ""  # el ingreso no lleva motivo
+        motivo_label = EGRESO_MOTIVOS.get(motivo)
         if not supplier_raw.isdigit():
             flash("Elegí un proveedor.", "error")
             return redirect(url_for("in_out"))
@@ -8154,6 +8171,8 @@ def in_out():
             # Un solo remito agrupa toda la operación.
             ry, rseq, rnumber = next_remito_number()
             r_obs = f"{tipo_label} · {supplier.contact_name}"
+            if motivo_label:
+                r_obs = f"{r_obs} · {motivo_label}"
             if observation:
                 r_obs = f"{r_obs} · {observation}"
             r = Remito(
@@ -8167,6 +8186,12 @@ def in_out():
             db.session.add(r)
             db.session.flush()
 
+            # Egreso por reparación: los ítems no serializados quedan esperando
+            # devolución en /reparaciones ("En proveedor"). Los serializados no,
+            # porque esa pantalla todavía no resuelve reparaciones por serial.
+            repairs_creadas = 0
+            serializados_sin_repair = []
+
             for p in planned:
                 it, qty = p["it"], p["qty"]
                 if not from_ext:
@@ -8174,9 +8199,14 @@ def in_out():
                 if not to_ext:
                     upsert_stock(it.id, to_id, qty)
 
-                obs_final = observation
+                # El motivo del egreso va al principio de la observación.
+                obs_base = observation
+                if motivo_label:
+                    obs_base = f"{motivo_label} · {observation}" if observation else motivo_label
+
+                obs_final = obs_base
                 if p["out_units"]:
-                    obs_final = serial_obs(observation, [u.serial for u in p["out_units"]])
+                    obs_final = serial_obs(obs_base, [u.serial for u in p["out_units"]])
 
                 y, seq, number = next_movement_number()
                 m = Movement(
@@ -8195,11 +8225,36 @@ def in_out():
 
                 db.session.add(RemitoLine(remito_id=r.id, movement_id=m.id))
 
+                if motivo == "REPARACION":
+                    if it.serialized:
+                        serializados_sin_repair.append(it.code)
+                    else:
+                        db.session.add(Repair(
+                            item_id=it.id,
+                            quantity=qty,
+                            status="EN_PROVEEDOR",
+                            source_location_id=from_id,
+                            created_by_user_id=current_user.id,
+                        ))
+                        repairs_creadas += 1
+
             db.session.commit()
-            flash(
+            msg = (
                 f"{tipo_label} registrado ({len(planned)} ítem/s). "
-                f"Remito {rnumber} generado — acordate de imprimirlo.", "ok",
+                f"Remito {rnumber} generado — acordate de imprimirlo."
             )
+            if repairs_creadas:
+                msg += (
+                    f" {repairs_creadas} ítem/s quedaron esperando devolución "
+                    "en Reparaciones (En proveedor)."
+                )
+            flash(msg, "ok")
+            if serializados_sin_repair:
+                flash(
+                    "Ítems serializados egresados sin quedar en Reparaciones "
+                    f"({', '.join(serializados_sin_repair)}): esa pantalla todavía "
+                    "no maneja seriales. Seguilos desde Movimientos.", "error",
+                )
         except Exception as e:
             db.session.rollback()
             flash(f"No se pudo registrar: {e}", "error")

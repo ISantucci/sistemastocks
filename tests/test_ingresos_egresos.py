@@ -65,7 +65,7 @@ def test_egreso_descuenta_jaula(A, client):
     s = _mk_supplier(A)
 
     client.post("/ingresos-egresos", data={
-        "tipo": "EGRESO", "supplier_id": str(s.id),
+        "tipo": "EGRESO", "motivo": "OTRO", "supplier_id": str(s.id),
         "item_id[]": [str(it.id)], "qty[]": ["2"], "line_serials[]": [""],
     }, follow_redirects=True)
     assert A.Stock.query.filter_by(item_id=it.id, location_id=jaula.id).first().quantity == 3
@@ -108,7 +108,7 @@ def test_egreso_serializado_elige_seriales(A, client):
     s = _mk_supplier(A)
 
     r = client.post("/ingresos-egresos", data={
-        "tipo": "EGRESO", "supplier_id": str(s.id),
+        "tipo": "EGRESO", "motivo": "OTRO", "supplier_id": str(s.id),
         "item_id[]": [str(it.id)], "qty[]": ["1"], "line_serials[]": ["SN-1"],
     }, follow_redirects=True)
     assert r.status_code == 200
@@ -135,7 +135,7 @@ def test_egreso_serializado_sin_seriales_se_rechaza(A, client):
     s = _mk_supplier(A)
 
     client.post("/ingresos-egresos", data={
-        "tipo": "EGRESO", "supplier_id": str(s.id),
+        "tipo": "EGRESO", "motivo": "OTRO", "supplier_id": str(s.id),
         "item_id[]": [str(it.id)], "qty[]": ["1"], "line_serials[]": [""],
     }, follow_redirects=True)
     # Stock intacto y no se generó movimiento
@@ -153,7 +153,7 @@ def test_egreso_mayor_al_stock_se_rechaza(A, client):
     A.db.session.commit()
     s = _mk_supplier(A)
     client.post("/ingresos-egresos", data={
-        "tipo": "EGRESO", "supplier_id": str(s.id),
+        "tipo": "EGRESO", "motivo": "OTRO", "supplier_id": str(s.id),
         "item_id[]": [str(it.id)], "qty[]": ["10"], "line_serials[]": [""],
     }, follow_redirects=True)
     # Stock intacto (no dejó sobregirar)
@@ -197,3 +197,184 @@ def test_marcar_remito_impreso(A, client):
     rem = A.Remito.query.filter_by(print_pending=True).first()
     client.post(f"/remitos/{rem.id}/impreso", follow_redirects=True)
     assert A.Remito.query.get(rem.id).print_pending is False
+
+
+# ---------------------------------------------------------------------------
+# Motivo del egreso (Devolución / Reparación / Otro)
+#
+# Por qué: un egreso sin motivo no deja rastro de para qué salió la mercadería.
+# Con motivo "Reparación" además queda esperando devolución en /reparaciones.
+# ---------------------------------------------------------------------------
+
+def _egreso_loc(A, code, qty=5, serialized=False):
+    jaula = make_location(A, "Jaula TNG")
+    make_location(A, "Proveedor", is_external=True)
+    it = make_item(A, code=code, name=f"Item {code}")
+    if serialized:
+        it.serialized = True
+    A.db.session.add(A.Stock(item_id=it.id, location_id=jaula.id, quantity=qty))
+    A.db.session.commit()
+    return jaula, it
+
+
+def test_egreso_sin_motivo_se_rechaza(A, client):
+    _admin(client)
+    jaula, it = _egreso_loc(A, "MOT-001")
+    s = _mk_supplier(A)
+    client.post("/ingresos-egresos", data={
+        "tipo": "EGRESO", "supplier_id": str(s.id),
+        "item_id[]": [str(it.id)], "qty[]": ["2"], "line_serials[]": [""],
+    }, follow_redirects=True)
+    # Nada se movió: sin motivo el egreso no se registra.
+    assert A.Stock.query.filter_by(item_id=it.id, location_id=jaula.id).first().quantity == 5
+    assert A.Movement.query.filter(A.Movement.supplier_id == s.id).count() == 0
+
+
+def test_egreso_motivo_invalido_se_rechaza(A, client):
+    _admin(client)
+    jaula, it = _egreso_loc(A, "MOT-002")
+    s = _mk_supplier(A)
+    client.post("/ingresos-egresos", data={
+        "tipo": "EGRESO", "motivo": "CUALQUIERA", "supplier_id": str(s.id),
+        "item_id[]": [str(it.id)], "qty[]": ["2"], "line_serials[]": [""],
+    }, follow_redirects=True)
+    assert A.Stock.query.filter_by(item_id=it.id, location_id=jaula.id).first().quantity == 5
+    assert A.Movement.query.filter(A.Movement.supplier_id == s.id).count() == 0
+
+
+def test_ingreso_no_necesita_motivo(A, client):
+    # El motivo es solo del egreso: el ingreso sigue funcionando igual que antes.
+    _admin(client)
+    _base(A)
+    it = make_item(A, code="MOT-003", name="Item MOT-003")
+    s = _mk_supplier(A)
+    r = client.post("/ingresos-egresos", data={
+        "tipo": "INGRESO", "supplier_id": str(s.id),
+        "item_id[]": [str(it.id)], "qty[]": ["4"], "line_serials[]": [""],
+    }, follow_redirects=True)
+    assert r.status_code == 200
+    m = A.Movement.query.filter(A.Movement.supplier_id == s.id).first()
+    assert m is not None
+    assert (m.observation or "") == ""  # sin motivo en la observación
+
+
+def test_egreso_devolucion_deja_el_motivo_en_la_observacion(A, client):
+    _admin(client)
+    jaula, it = _egreso_loc(A, "MOT-004")
+    s = _mk_supplier(A)
+    client.post("/ingresos-egresos", data={
+        "tipo": "EGRESO", "motivo": "DEVOLUCION", "supplier_id": str(s.id),
+        "observation": "vino fallado",
+        "item_id[]": [str(it.id)], "qty[]": ["2"], "line_serials[]": [""],
+    }, follow_redirects=True)
+
+    m = A.Movement.query.filter(A.Movement.supplier_id == s.id).first()
+    assert m is not None
+    assert "Devolución" in m.observation and "vino fallado" in m.observation
+
+    rem = A.Remito.query.order_by(A.Remito.id.desc()).first()
+    assert "Devolución" in rem.observation
+
+    # Devolución NO genera reparación pendiente.
+    assert A.Repair.query.count() == 0
+    assert A.Stock.query.filter_by(item_id=it.id, location_id=jaula.id).first().quantity == 3
+
+
+def test_egreso_reparacion_queda_esperando_en_proveedor(A, client):
+    _admin(client)
+    jaula, it = _egreso_loc(A, "MOT-005")
+    s = _mk_supplier(A)
+    client.post("/ingresos-egresos", data={
+        "tipo": "EGRESO", "motivo": "REPARACION", "supplier_id": str(s.id),
+        "item_id[]": [str(it.id)], "qty[]": ["5"], "line_serials[]": [""],
+    }, follow_redirects=True)
+
+    # El stock salió de la Jaula (igual que antes).
+    assert A.Stock.query.filter_by(item_id=it.id, location_id=jaula.id).first().quantity == 0
+
+    # Y quedó una reparación esperando devolución del proveedor.
+    reps = A.Repair.query.all()
+    assert len(reps) == 1
+    r = reps[0]
+    assert r.status == "EN_PROVEEDOR"
+    assert r.item_id == it.id and r.quantity == 5
+    assert r.source_location_id == jaula.id
+
+    # Se ve en la sección "En proveedor" de /reparaciones.
+    html = client.get("/reparaciones").get_data(as_text=True)
+    assert "MOT-005" in html
+
+    m = A.Movement.query.filter(A.Movement.supplier_id == s.id).first()
+    assert "Reparación" in m.observation
+
+
+def test_egreso_reparacion_se_cierra_con_el_flujo_existente(A, client):
+    # Al volver del proveedor se cierra con el botón que ya existía: el stock
+    # vuelve a la Jaula y la reparación queda REPARADO.
+    _admin(client)
+    jaula, it = _egreso_loc(A, "MOT-006", qty=3)
+    make_location(A, "En reparación")
+    s = _mk_supplier(A)
+    client.post("/ingresos-egresos", data={
+        "tipo": "EGRESO", "motivo": "REPARACION", "supplier_id": str(s.id),
+        "item_id[]": [str(it.id)], "qty[]": ["3"], "line_serials[]": [""],
+    }, follow_redirects=True)
+    rep = A.Repair.query.first()
+
+    client.post("/reparaciones", data={
+        "repair_id": str(rep.id), "repair_action": "reparado_proveedor",
+        "supplier_id": str(s.id),
+    }, follow_redirects=True)
+
+    rep = A.Repair.query.get(rep.id)
+    assert rep.status == "REPARADO" and rep.resolved_at is not None
+    assert A.Stock.query.filter_by(item_id=it.id, location_id=jaula.id).first().quantity == 3
+
+
+def test_egreso_reparacion_multi_item_crea_una_reparacion_por_linea(A, client):
+    _admin(client)
+    jaula, it1 = _egreso_loc(A, "MOT-007", qty=4)
+    it2 = make_item(A, code="MOT-008", name="Item MOT-008")
+    A.db.session.add(A.Stock(item_id=it2.id, location_id=jaula.id, quantity=2))
+    A.db.session.commit()
+    s = _mk_supplier(A)
+
+    client.post("/ingresos-egresos", data={
+        "tipo": "EGRESO", "motivo": "REPARACION", "supplier_id": str(s.id),
+        "item_id[]": [str(it1.id), str(it2.id)],
+        "qty[]": ["4", "2"], "line_serials[]": ["", ""],
+    }, follow_redirects=True)
+
+    reps = {r.item_id: r for r in A.Repair.query.all()}
+    assert set(reps) == {it1.id, it2.id}
+    assert reps[it1.id].quantity == 4 and reps[it2.id].quantity == 2
+    assert all(r.status == "EN_PROVEEDOR" for r in reps.values())
+
+
+def test_egreso_reparacion_serializado_no_crea_reparacion(A, client):
+    # /reparaciones todavía no resuelve seriales: no se crea una fila que
+    # después no se pueda cerrar. El egreso sí se registra.
+    _admin(client)
+    jaula, it = _egreso_loc(A, "MOT-009", qty=2, serialized=True)
+    A.db.session.add(A.ItemUnit(item_id=it.id, serial="SNR-1",
+                                status=A.UNIT_EN_STOCK, location_id=jaula.id))
+    A.db.session.commit()
+    s = _mk_supplier(A)
+
+    client.post("/ingresos-egresos", data={
+        "tipo": "EGRESO", "motivo": "REPARACION", "supplier_id": str(s.id),
+        "item_id[]": [str(it.id)], "qty[]": ["1"], "line_serials[]": ["SNR-1"],
+    }, follow_redirects=True)
+
+    assert A.Repair.query.count() == 0
+    m = A.Movement.query.filter(A.Movement.supplier_id == s.id).first()
+    assert m is not None and "Reparación" in m.observation
+    assert A.Stock.query.filter_by(item_id=it.id, location_id=jaula.id).first().quantity == 1
+
+
+def test_form_egreso_tiene_el_selector_de_motivo(A, client):
+    _admin(client)
+    _base(A)
+    html = client.get("/ingresos-egresos").get_data(as_text=True)
+    assert 'name="motivo"' in html
+    assert 'value="REPARACION"' in html
