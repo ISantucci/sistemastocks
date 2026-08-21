@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}Costos · Valorización · TNGStocks{% endblock %}
+{% block page_title %}Costos — Valorización del stock{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <h2>¿Cuánto vale el stock?</h2>
+    <p>
+      Foto del momento: cantidad en stock × precio promedio del ítem. Solo lectura.
+    </p>
+  </div>
+  <a href="{{ url_for('costos_ingresos') }}" class="btn btn-secondary">Ver registro de ingresos</a>
+</div>
+
+<div class="card">
+  <p style="font-size:2rem; margin:0;"><strong>{{ fmt_money(snap.total_cents) }}</strong></p>
+  <p class="muted" style="margin-top:4px;">
+    Valor de {{ snap.items_valorizados }} ítem(s) con precio conocido.
+  </p>
+</div>
+
+{% if snap.sin_costo_items %}
+<div class="card">
+  <span class="badge badge-warn">Sin costo conocido</span>
+  <strong>{{ snap.sin_costo_items }} ítem(s)</strong> con
+  <strong>{{ snap.sin_costo_unidades }} unidad(es)</strong> en stock quedan
+  <b>fuera</b> de ese total.
+  <p class="muted" style="margin-bottom:0;">
+    No valen cero: todavía no tienen precio. Son ítems que entraron antes de que
+    existiera la sección Costos, o que llegaron por un camino que no es una compra
+    (devolución de un pendiente, sobrante de conteo, retorno de reparación, ajuste
+    de stock). Van a valorizarse solos en cuanto se registre un ingreso con precio.
+  </p>
+</div>
+{% endif %}
+
+<div class="card">
+  <div class="card-header"><span class="card-title">Valor por ubicación</span></div>
+  <table class="data-table">
+    <thead><tr><th>Ubicación</th><th class="num">Valor</th></tr></thead>
+    <tbody>
+      {% for loc, cents in por_ubicacion %}
+      <tr>
+        <td>{{ loc.name }}{% if loc.is_truck %} <span class="badge badge-neutral">camioneta</span>{% endif %}</td>
+        <td class="num">{{ fmt_money(cents) }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="2" class="muted">Todavía no hay stock valorizado.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <div class="card-header"><span class="card-title">Valor por categoría</span></div>
+  <table class="data-table">
+    <thead><tr><th>Categoría</th><th class="num">Valor</th></tr></thead>
+    <tbody>
+      {% for nombre, cents in por_categoria %}
+      <tr><td>{{ nombre }}</td><td class="num">{{ fmt_money(cents) }}</td></tr>
+      {% else %}
+      <tr><td colspan="2" class="muted">Todavía no hay stock valorizado.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="table-card">
+  <div class="card-header"><span class="card-title">Detalle por ítem</span></div>
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Ítem</th>
+          <th class="num">En stock</th>
+          <th class="num">Promedio simple</th>
+          <th class="num">Promedio ponderado</th>
+          <th class="num">Valor</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for d in detalle %}
+        <tr>
+          <td>{{ d.item.code }} — {{ d.item.name }}</td>
+          <td class="num">{{ fmt_qty(d.qty, d.item) }}</td>
+          <td class="num">{{ fmt_money(d.avg) }}</td>
+          <td class="num">{{ fmt_money(d.pond) }}</td>
+          <td class="num">{% if d.avg is none %}<span class="muted">sin costo</span>{% else %}{{ fmt_money(d.valor) }}{% endif %}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="muted">Sin stock para valorizar.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <p class="muted" style="margin:0;">
+    <b>Cómo leer estos números.</b> El promedio <b>simple</b> trata cada compra por
+    igual, sin importar cuántas unidades trajo, y es el que se usa para valorizar.
+    El <b>ponderado</b> pesa cada compra por su cantidad: cuando los dos se separan
+    mucho, es porque el precio de ese ítem depende bastante de cómo se compra.
+  </p>
+</div>
+{% endblock %}

@@ -132,6 +132,22 @@
       {% endif %}
       {% if me and me.role in ["ADMIN", "SUPERVISOR", "LECTOR"] %}
       <div class="nav-group">
+        <div class="nav-group-title">Costos</div>
+        <a href="{{ url_for('costos_ingresos') }}" class="nav-link {% if request.endpoint == 'costos_ingresos' %}active{% endif %}">
+          <span class="nav-icon">&#9776;</span><span class="nav-label">Ingresos</span>
+        </a>
+        <a href="{{ url_for('costos_valorizacion') }}" class="nav-link {% if request.endpoint == 'costos_valorizacion' %}active{% endif %}">
+          <span class="nav-icon">&#9632;</span><span class="nav-label">Valorizacion</span>
+        </a>
+        {% if me.role == "ADMIN" %}
+        <a href="{{ url_for('costos_parametros') }}" class="nav-link {% if request.endpoint == 'costos_parametros' %}active{% endif %}">
+          <span class="nav-icon">&#9881;</span><span class="nav-label">Parametros</span>
+        </a>
+        {% endif %}
+      </div>
+      {% endif %}
+      {% if me and me.role in ["ADMIN", "SUPERVISOR", "LECTOR"] %}
+      <div class="nav-group">
         <div class="nav-group-title">Métricas</div>
         <a href="{{ url_for('metricas') }}" class="nav-link {% if request.endpoint in ['metricas', 'metricas_compras', 'metricas_consumo', 'metricas_descartes', 'metricas_camionetas', 'metricas_inventario', 'metricas_movimientos', 'metricas_reparaciones'] %}active{% endif %}">
           <span class="nav-icon">&#9186;</span><span class="nav-label">Métricas</span>
@@ -145,7 +161,7 @@
           <span class="nav-icon">&#9707;</span><span class="nav-label">Conteo de stock</span>
         </a>
         <a href="{{ url_for('descartes_historial') }}" class="nav-link {% if request.endpoint == 'descartes_historial' %}active{% endif %}">
-          <span class="nav-icon">&#9851;</span><span class="nav-label">Basura</span>
+          <span class="nav-icon">&#9851;</span><span class="nav-label">Scrap</span>
         </a>
         {% if me.role == "ADMIN" %}
         <a href="{{ url_for('admin_panel') }}" class="nav-link {% if request.endpoint == 'admin_panel' %}active{% endif %}">

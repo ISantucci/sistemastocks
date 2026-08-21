@@ -44,6 +44,7 @@ def test_ingreso_multi_item_un_remito(A, client):
         "item_id[]": [str(i1.id), str(i2.id)],
         "qty[]": ["7", "3"],
         "line_serials[]": ["", ""],
+        "line_total[]": ["1000,00", "1000,00"],
     }, follow_redirects=True)
     assert r.status_code == 200
 
@@ -84,6 +85,7 @@ def test_ingreso_serializado_solo_suma_stock(A, client):
     r = client.post("/ingresos-egresos", data={
         "tipo": "INGRESO", "supplier_id": str(s.id),
         "item_id[]": [str(it.id)], "qty[]": ["3"], "line_serials[]": [""],
+        "line_total[]": ["1000,00"],
     }, follow_redirects=True)
     assert r.status_code == 200
 
@@ -175,6 +177,7 @@ def test_ingreso_egreso_aparece_en_movements_pero_no_en_el_export(A, client):
     client.post("/ingresos-egresos", data={
         "tipo": "INGRESO", "supplier_id": str(s.id),
         "item_id[]": [str(it.id)], "qty[]": ["3"], "line_serials[]": [""],
+        "line_total[]": ["1000,00"],
     }, follow_redirects=True)
     m = A.Movement.query.filter(A.Movement.supplier_id == s.id).first()
     assert m is not None
@@ -193,6 +196,7 @@ def test_marcar_remito_impreso(A, client):
     client.post("/ingresos-egresos", data={
         "tipo": "INGRESO", "supplier_id": str(s.id),
         "item_id[]": [str(it.id)], "qty[]": ["1"], "line_serials[]": [""],
+        "line_total[]": ["1000,00"],
     }, follow_redirects=True)
     rem = A.Remito.query.filter_by(print_pending=True).first()
     client.post(f"/remitos/{rem.id}/impreso", follow_redirects=True)
@@ -251,6 +255,7 @@ def test_ingreso_no_necesita_motivo(A, client):
     r = client.post("/ingresos-egresos", data={
         "tipo": "INGRESO", "supplier_id": str(s.id),
         "item_id[]": [str(it.id)], "qty[]": ["4"], "line_serials[]": [""],
+        "line_total[]": ["1000,00"],
     }, follow_redirects=True)
     assert r.status_code == 200
     m = A.Movement.query.filter(A.Movement.supplier_id == s.id).first()
@@ -272,8 +277,12 @@ def test_egreso_devolucion_deja_el_motivo_en_la_observacion(A, client):
     assert m is not None
     assert "Devolución" in m.observation and "vino fallado" in m.observation
 
+    # El remito separa las dos cosas: el motivo va en el CONCEPTO (lo pone el
+    # sistema) y la observación queda con lo que escribió la persona, sin
+    # mezclarse. Antes iban concatenados en observation.
     rem = A.Remito.query.order_by(A.Remito.id.desc()).first()
-    assert "Devolución" in rem.observation
+    assert "Devolución" in rem.concept
+    assert rem.observation == "vino fallado"
 
     # Devolución NO genera reparación pendiente.
     assert A.Repair.query.count() == 0

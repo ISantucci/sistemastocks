@@ -80,6 +80,9 @@
           <th class="num"><a href="{{ url_with(sort_by='stock_min', sort_dir='desc' if selected_sort_by == 'stock_min' and selected_sort_dir == 'asc' else 'asc', page=1) }}">Stock seg.{% if selected_sort_by == 'stock_min' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
           <th><a href="{{ url_with(sort_by='description', sort_dir='desc' if selected_sort_by == 'description' and selected_sort_dir == 'asc' else 'asc', page=1) }}">Descripción{% if selected_sort_by == 'description' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
           <th><a href="{{ url_with(sort_by='is_active', sort_dir='desc' if selected_sort_by == 'is_active' and selected_sort_dir == 'asc' else 'asc', page=1) }}">Activo{% if selected_sort_by == 'is_active' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          {% if can_see_costs %}
+          <th class="num"><a href="{{ url_with(sort_by='avg_price', sort_dir='desc' if selected_sort_by == 'avg_price' and selected_sort_dir == 'asc' else 'asc', page=1) }}">Precio prom.{% if selected_sort_by == 'avg_price' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+          {% endif %}
           <th>Proveedores</th>
           <th>Link de referencia</th>
           {% if can_edit_items %}<th>Acciones</th>{% endif %}
@@ -100,6 +103,18 @@
           <td class="num">{{ "-" if it.trackable else it.stock_min }}</td>
           <td>{{ it.description or "" }}</td>
           <td>{% if it.is_active %}<span class="badge badge-ok">Activo</span>{% else %}<span class="badge badge-danger">Inactivo</span>{% endif %}</td>
+          {% if can_see_costs %}
+          {# Tocando el precio se abre el historial de ingresos de ese ítem. Se
+             carga por AJAX al abrir: meter el historial completo de cada fila en
+             el HTML volvería a inflar esta pantalla, que ya renderiza un modal
+             de edición por fila. #}
+          <td class="num">
+            {% set avg = avg_prices.get(it.id) %}
+            {% if avg %}
+              <a href="#" onclick="verHistorialPrecios({{ it.id }}); return false;" title="Ver historial de precios">{{ fmt_money(avg) }}</a>
+            {% else %}—{% endif %}
+          </td>
+          {% endif %}
           <td>{{ item_supplier_names(it) or "—" }}</td>
           <td>{% if it.reference_link %}<a href="{{ it.reference_link }}" target="_blank" rel="noopener noreferrer">Abrir</a>{% else %}—{% endif %}</td>
           {% if can_edit_items %}
@@ -107,13 +122,84 @@
           {% endif %}
         </tr>
         {% else %}
-        <tr><td colspan="{% if can_edit_items %}10{% else %}9{% endif %}" class="muted">Sin ítems.</td></tr>
+        <tr><td colspan="{{ (10 if can_edit_items else 9) + (1 if can_see_costs else 0) }}" class="muted">Sin ítems.</td></tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
   {{ pagination(page_obj, "ítem", "ítems") }}
 </div>
+
+{% if can_see_costs %}
+<!-- Modal: historial de precios de un ítem (se llena por AJAX al abrirlo) -->
+<div class="modal-overlay" id="modal-precios">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">Historial de precios</span>
+      <button type="button" class="modal-close" onclick="closeModal('modal-precios')">&times;</button>
+    </div>
+    <div class="modal-body" id="precios-body" style="max-height:60vh; overflow:auto;"></div>
+    <div class="modal-footer">
+      <button type="button" class="btn btn-secondary" onclick="closeModal('modal-precios')">Cerrar</button>
+    </div>
+  </div>
+</div>
+<script>
+  // El contenido se inserta con textContent / createElement, nunca con innerHTML
+  // sobre datos: los nombres de ítems y proveedores los escribe el usuario y no
+  // se pueden interpretar como HTML.
+  function verHistorialPrecios(itemId){
+    var body = document.getElementById('precios-body');
+    body.textContent = 'Cargando...';
+    openModal('modal-precios');
+    fetch('/costos/item/' + itemId + '/historial', {credentials:'same-origin'})
+      .then(function(r){ if(!r.ok) throw new Error('http'); return r.json(); })
+      .then(function(d){
+        body.textContent = '';
+
+        var h = document.createElement('p');
+        h.appendChild(document.createElement('strong')).textContent = d.item;
+        body.appendChild(h);
+
+        var res = document.createElement('p');
+        res.className = 'muted';
+        res.textContent = 'Promedio simple: ' + d.promedio_simple
+                        + ' · Ponderado por cantidad: ' + d.promedio_ponderado;
+        body.appendChild(res);
+
+        if(!d.ingresos.length){
+          var p = document.createElement('p');
+          p.className = 'muted';
+          p.textContent = 'Este ítem todavía no tuvo ningún ingreso con precio.';
+          body.appendChild(p);
+          return;
+        }
+
+        var tbl = document.createElement('table');
+        tbl.className = 'data-table';
+        var thead = document.createElement('thead');
+        var htr = document.createElement('tr');
+        ['Fecha','Proveedor','Cantidad','Precio unit.','Total',''].forEach(function(t){
+          var th = document.createElement('th'); th.textContent = t; htr.appendChild(th);
+        });
+        thead.appendChild(htr); tbl.appendChild(thead);
+
+        var tb = document.createElement('tbody');
+        d.ingresos.forEach(function(r){
+          var tr = document.createElement('tr');
+          [r.fecha, r.proveedor, r.cantidad, r.precio, r.total,
+           r.editado ? 'corregido' : ''].forEach(function(v){
+            var td = document.createElement('td'); td.textContent = v; tr.appendChild(td);
+          });
+          tb.appendChild(tr);
+        });
+        tbl.appendChild(tb);
+        body.appendChild(tbl);
+      })
+      .catch(function(){ body.textContent = 'No se pudo cargar el historial.'; });
+  }
+</script>
+{% endif %}
 
 {% if can_edit_items %}
 <!-- Modal: nuevo item -->
