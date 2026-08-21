@@ -994,9 +994,16 @@ class PendingDelivery(db.Model):
     comment = db.Column(db.Text)
     returned = db.Column(db.Boolean, default=False, nullable=False)
 
+    # Quién devolvió y cuándo (aditivo, nullable). 'responsible_to' es a quién se
+    # le entregó; la persona que trae la devolución puede ser otra (otro técnico
+    # de la misma camioneta). Filas viejas quedan en NULL = "no registrado".
+    returned_at = db.Column(db.DateTime, nullable=True)
+    returned_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+
     movement = db.relationship("Movement")
     responsible_from = db.relationship("User", foreign_keys=[responsible_from_id])
     responsible_to = db.relationship("User", foreign_keys=[responsible_to_id])
+    returned_by = db.relationship("User", foreign_keys=[returned_by_user_id])
     item = db.relationship("Item", foreign_keys=[item_id])
     return_item = db.relationship("Item", foreign_keys=[return_item_id])
 
@@ -1064,9 +1071,30 @@ class Scrap(db.Model):
     reason = db.Column(db.String(255), nullable=True)
     user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
 
+    # De qué circuito vino la baja (aditivo, nullable). Sirve para leer el
+    # historial: no es lo mismo un descarte decidido que un faltante de conteo.
+    # Filas viejas quedan en NULL y se muestran como "—".
+    source = db.Column(db.String(20), nullable=True)
+
     item = db.relationship("Item")
     location = db.relationship("Location")
     user = db.relationship("User")
+
+
+# Orígenes posibles de un descarte (columna Scrap.source). Solo etiquetan de
+# dónde salió la baja; no cambian ninguna lógica de stock.
+SCRAP_SOURCES = {
+    "MANUAL": "Descarte manual",
+    "MOVIMIENTO": "Movimiento a Descartes",
+    "PENDIENTE": "Devolución de pendiente",
+    "REPARACION": "Reparación descartada",
+    "CONTEO": "Faltante de conteo",
+}
+
+
+def scrap_source_label(value) -> str:
+    """Etiqueta legible del origen. NULL (registros viejos) -> '—'."""
+    return SCRAP_SOURCES.get(value or "", "—")
 
 
 class Repair(db.Model):
@@ -2311,7 +2339,6 @@ def admin_adjust_stock():
         location_id = request.form.get("location_id", "").strip()
         action = request.form.get("action", "").strip()  # SUMAR / RESTAR
         qty_raw = request.form.get("qty", "").strip()
-        reason = (request.form.get("reason", "") or "").strip()
 
         if not (item_id.isdigit() and location_id.isdigit()):
             flash("Item y ubicación son obligatorios.", "error")
@@ -2327,10 +2354,6 @@ def admin_adjust_stock():
                 raise ValueError()
         except Exception:
             flash("Cantidad inválida (debe ser > 0).", "error")
-            return redirect(url_for("admin_adjust_stock"))
-
-        if not reason:
-            flash("La observación/motivo es obligatoria para ajustar stock.", "error")
             return redirect(url_for("admin_adjust_stock"))
 
         item_id = int(item_id)
@@ -2357,8 +2380,9 @@ def admin_adjust_stock():
         # Esta herramienta es para corregir errores sin dejar registro. Solo
         # modifica el stock de la ubicación elegida; NO genera Movement, NO toca
         # Descartes y NO alimenta métricas. Para ajustes trazables se usa Conteo.
-        # El 'reason' se mantiene obligatorio solo como recordatorio operativo,
-        # pero no se persiste en ningún lado.
+        # Antes se pedía un motivo obligatorio que no se guardaba en ningún lado:
+        # se sacó del formulario para no prometer una trazabilidad que no existe.
+        # La pantalla ahora avisa explícitamente que el ajuste no deja registro.
         try:
             if action == "SUMAR":
                 upsert_stock(item_id, location_id, qty)
@@ -2444,8 +2468,13 @@ def conteo():
             .all()
         )
 
-        # Diferencias: para cada item se lee "contado_<id>". Vacio/invalido => no se toca.
+        # Diferencias: para cada item se lee "contado_<id>".
+        #   - vacío           -> el ítem no se contó (se ignora, es lo esperado).
+        #   - no entero >= 0  -> ERROR. Antes se ignoraba en silencio y el ítem
+        #     quedaba como "no contado" sin que nadie se enterara: en un conteo,
+        #     un renglón que se saltea solo es el peor resultado posible.
         diffs = []
+        invalidos = []
         for stock, item in stock_rows:
             raw = request.form.get(f"contado_{item.id}", "").strip()
             if raw == "":
@@ -2455,6 +2484,7 @@ def conteo():
                 if contado < 0:
                     raise ValueError()
             except Exception:
+                invalidos.append(f"{item.code} ({raw})")
                 continue
             if contado != stock.quantity:
                 diffs.append({
@@ -2463,6 +2493,16 @@ def conteo():
                     "contado": contado,
                     "delta": contado - stock.quantity,
                 })
+
+        if invalidos:
+            flash(
+                "Hay cantidades contadas que no son un número entero mayor o "
+                "igual a 0 (dejalas vacías si no contaste ese ítem): "
+                + "; ".join(invalidos[:10])
+                + ("; …" if len(invalidos) > 10 else ""),
+                "error",
+            )
+            return redirect(url_for("conteo", location_id=location.id))
 
         if action == "preview":
             if not diffs:
@@ -2518,6 +2558,18 @@ def conteo():
                         upsert_stock(item.id, location.id, delta)  # delta < 0
                         upsert_stock(item.id, baja.id, -delta)
                         from_id, to_id = location.id, baja.id
+                        # El faltante termina en Descartes, así que también es una
+                        # baja: se registra en `scrap` como cualquier otro descarte.
+                        # Antes no se hacía y lo perdido por conteo no aparecía ni en
+                        # el historial de descartes ni en las métricas.
+                        db.session.add(Scrap(
+                            item_id=item.id,
+                            location_id=location.id,
+                            quantity=-delta,
+                            reason=f"Faltante de conteo · {motivo}",
+                            user_id=current_user.id,
+                            source="CONTEO",
+                        ))
 
                     y, seq, number = next_movement_number()
                     db.session.add(Movement(
@@ -2573,6 +2625,84 @@ def conteo():
         stock_rows=stock_rows,
         diffs=None,
         motivo="",
+    )
+
+
+# ---- BASURA / DESCARTES (solo lectura) ----
+# Vista dedicada a ver QUÉ se tiró, sin el formulario de carga. Junta en una
+# sola pantalla todos los orígenes de baja: descarte manual, movimiento a
+# Descartes, devolución de un pendiente, reparación descartada y faltante de
+# conteo. Es SELECT puro: no crea, no modifica y no borra nada.
+
+@app.route("/descartes", methods=["GET"])
+@login_required
+@role_required("ADMIN", "SUPERVISOR")
+def descartes_historial():
+    f_date_from = (request.args.get("from_date") or "").strip()
+    f_date_to = (request.args.get("to_date") or "").strip()
+    f_item = (request.args.get("item_id") or "").strip()
+    f_source = (request.args.get("source") or "").strip().upper()
+    f_reason = (request.args.get("reason") or "").strip()
+
+    # Los filtros se arman como lista de condiciones para usar exactamente las
+    # mismas en el listado y en el total (que se calcula en SQL, no en Python).
+    conds = []
+    if f_date_from:
+        _d = _parse_date_arg(f_date_from)
+        if _d:
+            conds.append(Scrap.created_at >= datetime(_d.year, _d.month, _d.day))
+        else:
+            f_date_from = ""
+    if f_date_to:
+        _d = _parse_date_arg(f_date_to)
+        if _d:
+            conds.append(
+                Scrap.created_at <= datetime(_d.year, _d.month, _d.day, 23, 59, 59)
+            )
+        else:
+            f_date_to = ""
+    if f_item.isdigit():
+        conds.append(Scrap.item_id == int(f_item))
+    else:
+        f_item = ""
+    if f_source in SCRAP_SOURCES:
+        conds.append(Scrap.source == f_source)
+    elif f_source == "SIN_DATO":
+        conds.append(Scrap.source.is_(None))
+    else:
+        f_source = ""
+    if f_reason:
+        conds.append(Scrap.reason == f_reason)
+
+    q = Scrap.query.filter(*conds)
+
+    total_unidades = (
+        db.session.query(func.coalesce(func.sum(Scrap.quantity), 0))
+        .filter(*conds)
+        .scalar()
+    ) or 0
+
+    scraps_page = paginate(q.order_by(Scrap.created_at.desc()))
+
+    items_list = Item.query.order_by(Item.code).all()
+    reasons = [
+        r[0] for r in db.session.query(Scrap.reason).distinct().order_by(Scrap.reason)
+        if r[0]
+    ]
+
+    return render_template(
+        "descartes.html",
+        scraps=scraps_page.items,
+        page_obj=scraps_page,
+        items=items_list,
+        sources=SCRAP_SOURCES,
+        reasons=reasons,
+        total_unidades=total_unidades,
+        from_date=f_date_from,
+        to_date=f_date_to,
+        item_filter=f_item,
+        source_filter=f_source,
+        reason_filter=f_reason,
     )
 
 
@@ -3856,12 +3986,12 @@ def movements():
                 flash("La ubicación destino no existe.", "error")
                 return redirect(url_for("movements"))
 
-            first_resp = LocationResponsible.query.filter_by(location_id=to_id).first()
-            if not first_resp:
-                flash("La ubicación destino no tiene responsable asignado. Editá la ubicación antes de generar un pendiente.", "error")
+            pending_responsible_id, resp_err = resolve_pending_responsible(
+                to_id, request.form.get("pending_responsible_id")
+            )
+            if resp_err:
+                flash(resp_err, "error")
                 return redirect(url_for("movements"))
-
-            pending_responsible_id = first_resp.user_id
 
         # Resolver item/cantidad de devolucion esperada (solo si hay pendiente).
         pending_return_item_id = None  # None = mismo item entregado
@@ -3950,6 +4080,7 @@ def movements():
                     quantity=qty,
                     reason=scrap_reason,
                     user_id=current_user.id,
+                    source="MOVIMIENTO",
                 ))
 
             # Movimiento manual hacia "En reparación": además de mover el stock,
@@ -4061,6 +4192,7 @@ def movements():
         items=items_list,
         locations=locations_list,
         from_locations=from_locations,
+        responsibles_map=location_responsibles_map(locations_list),
         logs=logs,
         page_obj=logs_page,
         stock_map=stock_map,
@@ -4257,12 +4389,12 @@ def movements_bulk():
                 flash("La ubicacion destino no existe.", "error")
                 return redirect(url_for("movements_bulk"))
 
-            first_resp = LocationResponsible.query.filter_by(location_id=to_id).first()
-            if not first_resp:
-                flash("La ubicacion destino no tiene responsable asignado. Edita la ubicacion antes de generar pendientes.", "error")
+            pending_responsible_id, resp_err = resolve_pending_responsible(
+                to_id, request.form.get("pending_responsible_id")
+            )
+            if resp_err:
+                flash(resp_err, "error")
                 return redirect(url_for("movements_bulk"))
-
-            pending_responsible_id = first_resp.user_id
 
         parsed_lines = []
         # Un item = una sola linea. Cargarlo dos veces rompe la trazabilidad
@@ -4403,6 +4535,7 @@ def movements_bulk():
                         quantity=qty,
                         reason=line["scrap_reason"],
                         user_id=current_user.id,
+                        source="MOVIMIENTO",
                     ))
 
                 created_count += 1
@@ -4432,6 +4565,7 @@ def movements_bulk():
         "movements_bulk.html",
         items=items_list,
         locations=locations_list,
+        responsibles_map=location_responsibles_map(locations_list),
         descartes_id=_descartes_b.id if _descartes_b else None,
         stock_map=stock_map,
         stock_qty_map=stock_qty_map,
@@ -5062,11 +5196,83 @@ def fmt_qty(qty, item=None):
     return f"{qty}"
 
 
+def location_responsible_users(location_id):
+    """Usuarios responsables de una ubicación, en orden estable (por nombre).
+
+    Antes se usaba `.first()` sin orden: con dos responsables en la misma
+    camioneta, el pendiente podía quedar a nombre de cualquiera de los dos y el
+    criterio podía cambiar entre consultas. Ahora hay un orden fijo y, cuando
+    hay más de uno, la pantalla pide elegir.
+    """
+    if not location_id:
+        return []
+    return (
+        User.query.join(
+            LocationResponsible, LocationResponsible.user_id == User.id
+        )
+        .filter(LocationResponsible.location_id == location_id)
+        .order_by(User.full_name, User.username, User.id)
+        .all()
+    )
+
+
+def location_responsibles_map(locations):
+    """{loc_id(str): [{id, name}, ...]} para los selectores del front."""
+    out = {}
+    for loc in locations or []:
+        out[str(loc.id)] = [
+            {"id": u.id, "name": (u.full_name or u.username)}
+            for u in location_responsible_users(loc.id)
+        ]
+    return out
+
+
+def resolve_pending_responsible(location_id, raw_value):
+    """Responsable al que queda un pendiente. Devuelve (user_id, error).
+
+    - Sin responsables en la ubicación -> error (igual que antes).
+    - Uno solo -> ese, se elija o no.
+    - Varios -> hay que elegir uno, y tiene que ser responsable de ESA ubicación.
+    """
+    resp = location_responsible_users(location_id)
+    if not resp:
+        return None, ("La ubicación destino no tiene responsable asignado. "
+                      "Editá la ubicación antes de generar un pendiente.")
+    raw = (raw_value or "").strip()
+    if raw.isdigit():
+        chosen = int(raw)
+        if chosen in {u.id for u in resp}:
+            return chosen, None
+        return None, "El responsable elegido no es responsable de la ubicación destino."
+    if len(resp) == 1:
+        return resp[0].id, None
+    return None, ("La ubicación destino tiene más de un responsable: elegí a "
+                  "nombre de quién queda el pendiente.")
+
+
+def pending_return_units(p) -> int:
+    """Cuántas unidades mueve la devolución de UN pendiente.
+
+    Hoy todos se crean de a una unidad (`return_qty=1`). Las filas anteriores a
+    esa columna quedaron en NULL: ahí el pendiente representaba el movimiento
+    entero, así que se reparte la cantidad del movimiento entre los pendientes
+    de ese mismo movimiento (mínimo 1). Nunca devuelve más de lo entregado.
+    """
+    if getattr(p, "return_qty", None):
+        return int(p.return_qty)
+    mov = getattr(p, "movement", None)
+    mov_qty = int(getattr(mov, "qty", 1) or 1)
+    n = PendingDelivery.query.filter_by(movement_id=p.movement_id).count() or 1
+    return max(1, mov_qty // n)
+
+
 @app.context_processor
 def inject_stock_helpers():
     return {
         "stock_level_class": stock_level_class,
         "fmt_qty": fmt_qty,
+        "pending_return_units": pending_return_units,
+        "scrap_source_label": scrap_source_label,
     }
 
 @app.context_processor
@@ -5292,9 +5498,29 @@ def pending_deliveries():
         return_action = request.form.get("return_action", "return")
         scrap_reason = request.form.get("scrap_reason", "Otro").strip() or "Otro"
 
+        # Quién trae la devolución. Por defecto, la persona a la que se le
+        # entregó; se puede elegir otro responsable de la misma ubicación (dos
+        # técnicos en la misma camioneta). Solo se registra: no cambia stock.
+        returned_by_candidates = location_responsible_users(
+            original_movement.to_location_id if original_movement else None
+        )
+        candidate_ids = {u.id for u in returned_by_candidates}
+        candidate_ids.add(p.responsible_to_id)
+        rb_raw = (request.form.get("returned_by_user_id") or "").strip()
+        if rb_raw.isdigit() and int(rb_raw) in candidate_ids:
+            returned_by_id = int(rb_raw)
+        elif rb_raw.isdigit():
+            flash(
+                "Quien devuelve tiene que ser el responsable del pendiente o un "
+                "responsable de la ubicación donde estaba la mercadería.", "error",
+            )
+            return redirect(url_for("pending_deliveries"))
+        else:
+            returned_by_id = p.responsible_to_id
+
         try:
             # Cantidad e item que efectivamente vuelven (defaults = lo entregado).
-            qty = p.return_qty if p.return_qty else original_movement.qty
+            qty = pending_return_units(p)
             returns_item_id = p.return_item_id or original_movement.item_id
             # Swap: vuelve un item DISTINTO al entregado.
             is_swap = bool(p.return_item_id) and p.return_item_id != original_movement.item_id
@@ -5380,6 +5606,7 @@ def pending_deliveries():
                     quantity=qty,
                     reason=scrap_reason,
                     user_id=current_user.id,
+                    source="PENDIENTE",
                 ))
             elif return_action == "repair":
                 db.session.add(Repair(
@@ -5392,6 +5619,13 @@ def pending_deliveries():
                 ))
 
             p.returned = True
+            p.returned_at = now_ar()
+            p.returned_by_user_id = returned_by_id
+            # Pendientes anteriores a la columna `return_qty` quedaron en NULL.
+            # Al cerrarlos se completa con la cantidad que efectivamente volvió,
+            # así el registro deja de ser ambiguo. No se borra ni se pisa nada.
+            if not p.return_qty:
+                p.return_qty = qty
             db.session.commit()
             accion = {"scrap": "Scrap", "repair": "Reparación"}.get(return_action, "Devuelto")
             flash(f"Pendiente cerrado ({number}). Acción: {accion}.", "ok")
@@ -5501,9 +5735,24 @@ def pending_deliveries():
         items_list = Item.query.order_by(Item.code).all()
         users_list = User.query.order_by(User.username).all()
 
+    # Candidatos de "quién devuelve" por pendiente: los responsables de la
+    # ubicación donde quedó la mercadería, más el responsable del pendiente.
+    returner_options = {}
+    for _p in pendings:
+        _opts = []
+        _seen = set()
+        _loc_id = _p.movement.to_location_id if _p.movement else None
+        for _u in location_responsible_users(_loc_id):
+            _opts.append(_u)
+            _seen.add(_u.id)
+        if _p.responsible_to and _p.responsible_to.id not in _seen:
+            _opts.insert(0, _p.responsible_to)
+        returner_options[_p.id] = _opts
+
     return render_template(
         "pending_deliveries.html",
         pendings=pendings,
+        returner_options=returner_options,
         page_obj=pendings_page,
         items=items_list,
         users=users_list,
@@ -5923,6 +6172,7 @@ def scrap_report():
                     quantity=qty,
                     reason=reason,
                     user_id=current_user.id,
+                    source="MANUAL",
                 ))
                 created += 1
 
@@ -6259,6 +6509,7 @@ def reparaciones():
                     quantity=qty,
                     reason=reason,
                     user_id=current_user.id,
+                    source="REPARACION",
                 ))
 
             r.status = "REPARADO" if action == "reparado" else "DESCARTADO"
@@ -6932,6 +7183,7 @@ def repair_request_detail(rr_id: int):
         jaula_units=jaula_units,
         jaula_stock=jaula_stock,
         items=items_list,
+        dest_responsibles=location_responsible_users(rr.dest_location_id),
     )
 
 
@@ -7104,11 +7356,12 @@ def repair_request_close(rr_id: int):
             p["pending_return_qty"] = int(rq_raw)
 
     if any_pending:
-        first_resp = LocationResponsible.query.filter_by(location_id=dest_id).first()
-        if not first_resp:
-            flash("El destino no tiene responsable asignado. Editá la ubicación antes de generar un pendiente.", "error")
+        pending_responsible_id, resp_err = resolve_pending_responsible(
+            dest_id, request.form.get("pending_responsible_id")
+        )
+        if resp_err:
+            flash(resp_err, "error")
             return redirect(url_for("repair_request_detail", rr_id=rr.id))
-        pending_responsible_id = first_resp.user_id
 
     try:
         created = 0
@@ -7946,6 +8199,15 @@ SUPPLIER_ROLES = ("ADMIN", "SUPERVISOR")
 INOUT_VIEW_ROLES = ("ADMIN", "SUPERVISOR", "LECTOR")
 INOUT_EDIT_ROLES = ("ADMIN", "SUPERVISOR")
 
+# Motivos de EGRESO. El motivo se guarda en la observación (movimiento y remito):
+# no hay columna nueva, para no migrar la base. "REPARACION" además deja el ítem
+# esperando devolución en /reparaciones (sección "En proveedor").
+EGRESO_MOTIVOS = {
+    "DEVOLUCION": "Devolución",
+    "REPARACION": "Reparación",
+    "OTRO": "Otro",
+}
+
 
 def get_jaula_location():
     return Location.query.filter_by(name=LOCATION_JAULA_TNG).first()
@@ -8043,10 +8305,18 @@ def in_out():
         tipo = request.form.get("tipo", "").strip().upper()  # INGRESO / EGRESO
         supplier_raw = request.form.get("supplier_id", "").strip()
         observation = (request.form.get("observation", "") or "").strip() or None
+        motivo = request.form.get("motivo", "").strip().upper()  # solo EGRESO
 
         if tipo not in ("INGRESO", "EGRESO"):
             flash("Elegí si es ingreso o egreso.", "error")
             return redirect(url_for("in_out"))
+        if tipo == "EGRESO":
+            if motivo not in EGRESO_MOTIVOS:
+                flash("Elegí el motivo del egreso.", "error")
+                return redirect(url_for("in_out"))
+        else:
+            motivo = ""  # el ingreso no lleva motivo
+        motivo_label = EGRESO_MOTIVOS.get(motivo)
         if not supplier_raw.isdigit():
             flash("Elegí un proveedor.", "error")
             return redirect(url_for("in_out"))
@@ -8154,6 +8424,8 @@ def in_out():
             # Un solo remito agrupa toda la operación.
             ry, rseq, rnumber = next_remito_number()
             r_obs = f"{tipo_label} · {supplier.contact_name}"
+            if motivo_label:
+                r_obs = f"{r_obs} · {motivo_label}"
             if observation:
                 r_obs = f"{r_obs} · {observation}"
             r = Remito(
@@ -8167,6 +8439,12 @@ def in_out():
             db.session.add(r)
             db.session.flush()
 
+            # Egreso por reparación: los ítems no serializados quedan esperando
+            # devolución en /reparaciones ("En proveedor"). Los serializados no,
+            # porque esa pantalla todavía no resuelve reparaciones por serial.
+            repairs_creadas = 0
+            serializados_sin_repair = []
+
             for p in planned:
                 it, qty = p["it"], p["qty"]
                 if not from_ext:
@@ -8174,9 +8452,14 @@ def in_out():
                 if not to_ext:
                     upsert_stock(it.id, to_id, qty)
 
-                obs_final = observation
+                # El motivo del egreso va al principio de la observación.
+                obs_base = observation
+                if motivo_label:
+                    obs_base = f"{motivo_label} · {observation}" if observation else motivo_label
+
+                obs_final = obs_base
                 if p["out_units"]:
-                    obs_final = serial_obs(observation, [u.serial for u in p["out_units"]])
+                    obs_final = serial_obs(obs_base, [u.serial for u in p["out_units"]])
 
                 y, seq, number = next_movement_number()
                 m = Movement(
@@ -8195,11 +8478,36 @@ def in_out():
 
                 db.session.add(RemitoLine(remito_id=r.id, movement_id=m.id))
 
+                if motivo == "REPARACION":
+                    if it.serialized:
+                        serializados_sin_repair.append(it.code)
+                    else:
+                        db.session.add(Repair(
+                            item_id=it.id,
+                            quantity=qty,
+                            status="EN_PROVEEDOR",
+                            source_location_id=from_id,
+                            created_by_user_id=current_user.id,
+                        ))
+                        repairs_creadas += 1
+
             db.session.commit()
-            flash(
+            msg = (
                 f"{tipo_label} registrado ({len(planned)} ítem/s). "
-                f"Remito {rnumber} generado — acordate de imprimirlo.", "ok",
+                f"Remito {rnumber} generado — acordate de imprimirlo."
             )
+            if repairs_creadas:
+                msg += (
+                    f" {repairs_creadas} ítem/s quedaron esperando devolución "
+                    "en Reparaciones (En proveedor)."
+                )
+            flash(msg, "ok")
+            if serializados_sin_repair:
+                flash(
+                    "Ítems serializados egresados sin quedar en Reparaciones "
+                    f"({', '.join(serializados_sin_repair)}): esa pantalla todavía "
+                    "no maneja seriales. Seguilos desde Movimientos.", "error",
+                )
         except Exception as e:
             db.session.rollback()
             flash(f"No se pudo registrar: {e}", "error")

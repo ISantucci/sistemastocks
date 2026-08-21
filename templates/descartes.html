@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% from "_pagination.html" import pagination %}
+{% block title %}Basura · TNGStocks{% endblock %}
+{% block page_title %}Basura (descartes){% endblock %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <h2>Basura</h2>
+    <p>
+      Todo lo que se dio de baja, sin importar por dónde entró: descarte manual,
+      movimiento a Descartes, devolución de un pendiente, reparación descartada
+      o faltante de conteo. Pantalla de <b>solo lectura</b>.
+    </p>
+  </div>
+  <a href="{{ url_for('scrap_report') }}" class="btn btn-secondary">Registrar un descarte</a>
+</div>
+
+<details class="filters-collapse" id="trashFilters">
+<summary class="filters-toggle">
+  <span class="nav-icon">&#9776;</span> Filtros
+  <span class="filters-caret">&#9662;</span>
+</summary>
+<div class="card">
+  <form method="get" class="filters-grid">
+    <div class="field">
+      <label>Desde</label>
+      <input type="date" name="from_date" value="{{ from_date }}">
+    </div>
+    <div class="field">
+      <label>Hasta</label>
+      <input type="date" name="to_date" value="{{ to_date }}">
+    </div>
+    <div class="field">
+      <label>Ítem</label>
+      <select name="item_id" class="js-buscar">
+        <option value="">Todos</option>
+        {% for it in items %}
+          <option value="{{ it.id }}" {% if item_filter and (item_filter|string) == (it.id|string) %}selected{% endif %}>{{ it.code }} - {{ it.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label>Origen</label>
+      <select name="source">
+        <option value="">Todos</option>
+        {% for key, label in sources.items() %}
+          <option value="{{ key }}" {% if source_filter == key %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+        <option value="SIN_DATO" {% if source_filter == "SIN_DATO" %}selected{% endif %}>Sin dato (registros viejos)</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Motivo</label>
+      <select name="reason">
+        <option value="">Todos</option>
+        {% for r in reasons %}
+          <option value="{{ r }}" {% if reason_filter == r %}selected{% endif %}>{{ r }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field-actions">
+      <button type="submit" class="btn btn-primary">Aplicar filtros</button>
+      <a href="{{ url_for('descartes_historial') }}" class="btn btn-secondary">Limpiar</a>
+    </div>
+  </form>
+</div>
+</details>
+
+<div class="card">
+  <strong>Total con estos filtros:</strong> {{ total_unidades }} unidad(es) dadas de baja.
+</div>
+
+<div class="table-card">
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Fecha</th>
+          <th>Ítem</th>
+          <th class="num">Cantidad</th>
+          <th>Salió de</th>
+          <th>Motivo</th>
+          <th>Origen</th>
+          <th>Registró</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for s in scraps %}
+        <tr>
+          <td>{{ s.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+          <td>{{ s.item.code }} — {{ s.item.name }}</td>
+          <td class="num">{{ fmt_qty(s.quantity, s.item) }}</td>
+          <td>{{ s.location.name if s.location else "—" }}</td>
+          <td><span class="badge badge-danger">{{ s.reason or "—" }}</span></td>
+          <td><span class="badge badge-neutral">{{ scrap_source_label(s.source) }}</span></td>
+          <td>{{ s.user.full_name or s.user.username if s.user else "—" }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7" class="muted">Sin descartes con esos filtros.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {{ pagination(page_obj, "descarte", "descartes") }}
+</div>
+{% endblock %}

@@ -2,8 +2,10 @@
 {% block content %}
   <h2>Ajuste de stock</h2>
   <p class="muted">
-    Corrige cantidades sin tocar SQL. <b>No genera movimiento ni queda en el historial</b>
-    (para ajustes trazables usá Conteo). Modifica el stock de la ubicación directamente.
+    Corrige cantidades sin tocar SQL. <b>No genera movimiento, no pide motivo y no queda
+    registrado en ningún lado</b>: no vas a poder saber después quién lo hizo ni por qué.
+    Si querés que el ajuste quede trazado, usá <b>Conteo de stock</b>, que genera el
+    movimiento correspondiente. Modifica el stock de la ubicación directamente.
   </p>
 
   <form method="post" style="max-width:720px;">
@@ -44,10 +46,9 @@
         <input type="number" name="qty" min="1" value="1" required>
       </div>
 
-      <div class="filter-item" style="grid-column: span 2;">
-        <label>Motivo / Observación (obligatorio)</label>
-        <input name="reason" placeholder="Ej: conteo físico / corrección / ajuste por devolución" required>
-      </div>
+      {# El motivo se sacó: era obligatorio y no se guardaba en ningún lado, así
+         que pedía escribir algo que no quedaba registrado. Si hace falta dejar
+         rastro del ajuste, el camino es Conteo, que sí genera movimiento. #}
     </div>
 
     <div class="filters-actions" style="margin-top:10px;">

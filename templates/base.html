@@ -144,6 +144,9 @@
         <a href="{{ url_for('conteo') }}" class="nav-link {% if request.endpoint == 'conteo' %}active{% endif %}">
           <span class="nav-icon">&#9707;</span><span class="nav-label">Conteo de stock</span>
         </a>
+        <a href="{{ url_for('descartes_historial') }}" class="nav-link {% if request.endpoint == 'descartes_historial' %}active{% endif %}">
+          <span class="nav-icon">&#9851;</span><span class="nav-label">Basura</span>
+        </a>
         {% if me.role == "ADMIN" %}
         <a href="{{ url_for('admin_panel') }}" class="nav-link {% if request.endpoint == 'admin_panel' %}active{% endif %}">
           <span class="nav-icon">&#9881;</span><span class="nav-label">Admin</span>

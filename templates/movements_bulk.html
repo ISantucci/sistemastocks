@@ -35,6 +35,14 @@
           {% endfor %}
         </select>
       </div>
+      {# A nombre de quién quedan los pendientes de esta carga. Aparece solo si
+         alguna línea genera pendiente. Si el destino tiene un solo responsable
+         se completa solo; con varios hay que elegir. #}
+      <div class="field" id="bulk_pending_resp_box" style="display:none;">
+        <label>Pendientes a nombre de</label>
+        <select name="pending_responsible_id" id="bulk_pending_responsible_id"></select>
+        <span class="muted" id="bulk_pending_resp_hint" style="font-weight:400;"></span>
+      </div>
       <div class="field" style="grid-column:1 / -1; max-width:700px;">
         <label>Observación</label>
         <input type="text" name="observation" style="width:100%;">
@@ -94,7 +102,7 @@
           <option value="{{ i.id }}">{{ i.code }} - {{ i.name }}</option>
         {% endfor %}
       </select>
-      <input type="number" name="pending_return_qty[]" min="1" placeholder="Cant. a devolver (igual a la entregada)" style="width:100%;">
+      <input type="number" name="pending_return_qty[]" class="pending-return-qty" min="1" placeholder="Cant. a devolver (igual a la entregada)" style="width:100%;">
     </div>
     <div class="field">
       <label>&nbsp;</label>
@@ -126,8 +134,68 @@
     var v = parseInt(qty.value, 10);
     if (!isNaN(v) && v > mx) { qty.value = mx; }
   }
+  // Tope de "cantidad a devolver" por fila: nunca más de lo que se entrega en
+  // esa línea. El backend ya lo rechaza (y descarta TODA la carga), así que
+  // conviene no dejar cargarlo.
+  function clampBulkReturnQty(line) {
+    if (!line) return;
+    var qty = line.querySelector('input[name="qty[]"]');
+    var ret = line.querySelector(".pending-return-qty");
+    if (!qty || !ret) return;
+    var d = parseInt(qty.value, 10);
+    if (isNaN(d) || d <= 0) { ret.removeAttribute("max"); return; }
+    ret.setAttribute("max", d);
+    ret.placeholder = "Cant. a devolver (máx. " + d + ")";
+    var v = parseInt(ret.value, 10);
+    if (!isNaN(v) && v > d) ret.value = d;
+  }
+
   function clampBulkAll() {
-    document.querySelectorAll(".bulk-line").forEach(clampBulkQty);
+    document.querySelectorAll(".bulk-line").forEach(function (line) {
+      clampBulkQty(line);
+      clampBulkReturnQty(line);
+    });
+  }
+
+  // Responsables del destino, para el selector de pendientes.
+  var bulkRespMap = {{ responsibles_map|tojson }};
+  function refreshBulkResponsibles() {
+    var toSel = document.getElementById("bulk_to_location_id");
+    var sel = document.getElementById("bulk_pending_responsible_id");
+    var box = document.getElementById("bulk_pending_resp_box");
+    var hint = document.getElementById("bulk_pending_resp_hint");
+    if (!sel || !box) return;
+    var anyPending = Array.prototype.some.call(
+      document.querySelectorAll(".pending-flag"),
+      function (f) { return f.value === "1"; }
+    );
+    box.style.display = anyPending ? "block" : "none";
+    var prev = sel.value;
+    var list = bulkRespMap[String(toSel ? toSel.value : "")] || [];
+    sel.innerHTML = "";
+    if (!list.length) {
+      var o = document.createElement("option");
+      o.value = ""; o.textContent = "La ubicación destino no tiene responsable";
+      sel.appendChild(o);
+      sel.disabled = true;
+      hint.textContent = "Asignale un responsable a la ubicación antes de generar pendientes.";
+      return;
+    }
+    sel.disabled = false;
+    if (list.length > 1) {
+      var ph = document.createElement("option");
+      ph.value = ""; ph.textContent = "Elegí el responsable...";
+      sel.appendChild(ph);
+    }
+    list.forEach(function (u) {
+      var op = document.createElement("option");
+      op.value = String(u.id); op.textContent = u.name;
+      sel.appendChild(op);
+    });
+    if (prev && sel.querySelector('option[value="' + prev + '"]')) sel.value = prev;
+    hint.textContent = list.length > 1
+      ? "El destino tiene más de un responsable: elegí a nombre de quién quedan."
+      : "";
   }
 
   // Lista completa de items (para reconstruir opciones por ubicacion)
@@ -226,7 +294,17 @@
     }
 
     var qtyEl = line.querySelector('input[name="qty[]"]');
-    if (qtyEl) { qtyEl.addEventListener("input", function () { clampBulkQty(line); }); }
+    if (qtyEl) {
+      qtyEl.addEventListener("input", function () {
+        clampBulkQty(line);
+        clampBulkReturnQty(line);
+      });
+    }
+    var retQtyEl = line.querySelector(".pending-return-qty");
+    if (retQtyEl) {
+      retQtyEl.addEventListener("input", function () { clampBulkReturnQty(line); });
+      retQtyEl.addEventListener("change", function () { clampBulkReturnQty(line); });
+    }
 
     function togglePendingComment() {
       if (pendingFlag.value === "1") {
@@ -240,6 +318,7 @@
         }
         var rqty = commentWrap.querySelector('input[name="pending_return_qty[]"]');
         if (rqty && !rqty.value && qtyEl) { rqty.value = qtyEl.value; }
+        clampBulkReturnQty(line);
       } else {
         commentWrap.style.display = "none";
         var input = commentWrap.querySelector('input[name="pending_comment[]"]');
@@ -250,13 +329,18 @@
         else if (returnItemSel) { returnItemSel.value = ""; }
       }
     }
-    pendingFlag.addEventListener("change", togglePendingComment);
+    pendingFlag.addEventListener("change", function () {
+      togglePendingComment();
+      refreshBulkResponsibles();
+    });
     togglePendingComment();
+    refreshBulkResponsibles();
 
     // Al borrar la fila, su ítem vuelve a estar disponible en las demás.
     removeBtn.addEventListener("click", function () {
       line.remove();
       applyStockFilterAllLines();
+      refreshBulkResponsibles();
     });
   }
 
@@ -276,7 +360,11 @@
     var bulkToSel = document.getElementById("bulk_to_location_id");
     bulkToSel.addEventListener("change", function () {
       applyDescartes(this.value === descartes_id);
+      refreshBulkResponsibles();
     });
+    refreshBulkResponsibles();
+    var bulkForm = document.getElementById("bulk-form");
+    if (bulkForm) bulkForm.addEventListener("submit", clampBulkAll);
     // "Hacia" no ofrece la ubicación elegida en "Desde" (y viceversa). El
     // backend ya lo rechaza; esto evita que el usuario llegue a mandarlo.
     initFromToExclusion({

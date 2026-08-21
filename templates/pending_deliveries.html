@@ -82,7 +82,7 @@
           <th>Entrega</th><th>Recibe</th>
           <th><a href="{{ url_for('pending_deliveries', sort_by='item', sort_dir='desc' if selected_sort_by == 'item' and selected_sort_dir == 'asc' else 'asc', **_args) }}">Entregado{% if selected_sort_by == 'item' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
           <th>Debe devolver</th><th class="num">Cant.</th>
-          <th>Comentario</th><th>Estado</th><th>Acción</th>
+          <th>Comentario</th><th>Estado</th><th>Devuelto por</th><th>Acción</th>
         </tr>
       </thead>
       <tbody>
@@ -91,8 +91,8 @@
         {% set ret_item = p.return_item if swap else p.item %}
         <tr>
           <td>{{ p.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
-          <td>{{ p.responsible_from.username }}</td>
-          <td>{{ p.responsible_to.username }}</td>
+          <td>{{ p.responsible_from.full_name or p.responsible_from.username }}</td>
+          <td>{{ p.responsible_to.full_name or p.responsible_to.username }}</td>
           {# Ítem ENTREGADO: código y nombre. #}
           <td>{{ p.item.code }} — {{ p.item.name }}</td>
           {# Ítem que DEBE VOLVER: si es distinto se muestra su código Y su
@@ -104,7 +104,7 @@
               <span class="muted">mismo ítem</span>
             {% endif %}
           </td>
-          <td class="num">{{ fmt_qty(p.return_qty or p.movement.qty, ret_item) }}</td>
+          <td class="num">{{ fmt_qty(pending_return_units(p), ret_item) }}</td>
           <td>{{ p.comment or "" }}</td>
           <td>
             {% if p.returned %}
@@ -113,13 +113,21 @@
               <span class="badge badge-warn">Pendiente</span>
             {% endif %}
           </td>
+          <td>
+            {% if p.returned %}
+              {{ (p.returned_by.full_name or p.returned_by.username) if p.returned_by else "—" }}
+              {% if p.returned_at %}<div class="muted" style="font-size:12px;">{{ p.returned_at.strftime("%Y-%m-%d %H:%M") }}</div>{% endif %}
+            {% else %}
+              <span class="muted">—</span>
+            {% endif %}
+          </td>
           <td class="actions-cell">
             {% if me.role == "TECNICO" %}
             {% if not p.returned %}<span class="muted">Solo lectura</span>{% endif %}
             {% elif not p.returned %}
             <form method="post" class="pending-action"
                   data-confirm-move="Confirmar devolución"
-                  data-confirm-context="{{ ret_item.code }} - {{ ret_item.name }} · {{ fmt_qty(p.return_qty or p.movement.qty, ret_item) }} · responsable: {{ p.responsible_to.full_name }}">
+                  data-confirm-context="{{ ret_item.code }} - {{ ret_item.name }} · {{ fmt_qty(pending_return_units(p), ret_item) }} · a nombre de: {{ p.responsible_to.full_name or p.responsible_to.username }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <input type="hidden" name="pending_id" value="{{ p.id }}">
               <div class="check-inline" style="gap:14px;">
@@ -135,6 +143,16 @@
                   <option value="Vencido">Vencido</option>
                   <option value="Obsoleto">Obsoleto</option>
                   <option value="Otro">Otro</option>
+                </select>
+              </div>
+              {# Quién trae la devolución. Por defecto el responsable del
+                 pendiente; puede ser otro responsable de la misma ubicación. #}
+              <div class="field" style="margin-top:6px;">
+                <label>¿Quién devuelve?</label>
+                <select name="returned_by_user_id">
+                  {% for u in returner_options.get(p.id, []) %}
+                    <option value="{{ u.id }}" {% if u.id == p.responsible_to_id %}selected{% endif %}>{{ u.full_name or u.username }}</option>
+                  {% endfor %}
                 </select>
               </div>
               <input type="text" name="return_observation" placeholder="Observación (opcional)" style="margin-top:6px;">
@@ -153,7 +171,7 @@
           </td>
         </tr>
         {% else %}
-        <tr><td colspan="9" class="muted">Sin pendientes con esos filtros.</td></tr>
+        <tr><td colspan="10" class="muted">Sin pendientes con esos filtros.</td></tr>
         {% endfor %}
       </tbody>
     </table>

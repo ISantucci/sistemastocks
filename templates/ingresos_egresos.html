@@ -33,6 +33,16 @@
           <option value="EGRESO">Egreso ({{ jaula.name if jaula else 'Jaula' }} &rarr; Proveedor)</option>
         </select>
       </div>
+      <div class="field" id="io-motivo-field" style="display:none;">
+        <label>Motivo</label>
+        <select name="motivo" id="io-motivo">
+          <option value="" selected disabled>Seleccionar...</option>
+          <option value="DEVOLUCION">Devolución</option>
+          <option value="REPARACION">Reparación</option>
+          <option value="OTRO">Otro</option>
+        </select>
+        <small class="muted" id="io-motivo-hint">&nbsp;</small>
+      </div>
       <div class="field">
         <label>Proveedor</label>
         <select name="supplier_id" required>
@@ -295,6 +305,27 @@
     if(msg){ ev.preventDefault(); alert(msg); }
   }
 
+  // El motivo es solo del egreso. En ingreso se oculta y se saca el required
+  // para no bloquear el submit con un campo invisible.
+  function refreshMotivoHint(){
+    var sel = document.getElementById('io-motivo');
+    var hint = document.getElementById('io-motivo-hint');
+    if(currentTipo() === 'EGRESO' && sel.value === 'REPARACION'){
+      hint.textContent = 'Queda esperando devolución en Reparaciones.';
+    } else {
+      hint.innerHTML = '&nbsp;';
+    }
+  }
+
+  function refreshMotivo(){
+    var esEgreso = (currentTipo() === 'EGRESO');
+    var sel = document.getElementById('io-motivo');
+    document.getElementById('io-motivo-field').style.display = esEgreso ? '' : 'none';
+    if(esEgreso){ sel.setAttribute('required', 'required'); }
+    else { sel.removeAttribute('required'); sel.value = ''; }
+    refreshMotivoHint();
+  }
+
   document.addEventListener('DOMContentLoaded', function(){
     document.getElementById('io-add-line').addEventListener('click', addLine);
     document.getElementById('sn-confirm').addEventListener('click', confirmSn);
@@ -304,7 +335,10 @@
     document.getElementById('io-tipo').addEventListener('change', function(){
       applyItemsToAllLines();
       document.querySelectorAll('.io-line').forEach(function(l){ refreshLine(l); });
+      refreshMotivo();
     });
+    document.getElementById('io-motivo').addEventListener('change', refreshMotivoHint);
+    refreshMotivo();
     addLine(); addLine(); addLine();
   });
 </script>
