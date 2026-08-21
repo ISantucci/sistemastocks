@@ -163,6 +163,7 @@ def test_ingresos_egresos_rechaza_item_repetido(A, esc):
         "item_id[]": [str(esc["cable"].id), str(esc["cable"].id)],
         "qty[]": ["3", "2"],
         "line_serials[]": ["", ""],
+        "line_total[]": ["1000,00", "1000,00"],
     }, follow_redirects=True)
     assert "en m\u00e1s de una fila" in r.get_data(as_text=True)
     assert A.Movement.query.count() == movs

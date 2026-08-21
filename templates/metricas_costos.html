@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block page_title %}Métricas{% endblock %}
+{% block extra_head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/metricas.css') }}">
+{%- set _chart = vendor_asset('chartjs') %}
+<script src="{{ _chart.url }}"{% if _chart.integrity %} integrity="{{ _chart.integrity }}"{% endif %}{% if not _chart.is_local %} crossorigin="anonymous" referrerpolicy="no-referrer"{% endif %}></script>
+{% endblock %}
+{% block title %}Métricas · Costos{% endblock %}
+{% block content %}
+{% include "_metricas_head.html" %}
+<div class="page-header">
+  <div>
+    <h2>Costos</h2>
+    <p>Cuánta plata hay en el depósito, cuánta se gastó y cuánta se consumió o se tiró. Los gráficos están en pesos.</p>
+  </div>
+</div>
+
+<div class="summary-grid">
+  {% for c in cards %}
+  {% if c.href %}
+  <a href="{{ c.href }}" class="summary-card {{ c.tone }} is-link">
+    <span class="label">{{ c.label }}</span><span class="value">{{ c.value }}</span><span class="hint">{{ c.hint }}</span>
+  </a>
+  {% else %}
+  <div class="summary-card {{ c.tone }}">
+    <span class="label">{{ c.label }}</span><span class="value">{{ c.value }}</span><span class="hint">{{ c.hint }}</span>
+  </div>
+  {% endif %}
+  {% endfor %}
+</div>
+
+{% if sin_costo_items %}
+<div class="card">
+  <span class="badge badge-warn">Leer con cuidado</span>
+  De los cuatro números de arriba, solo el <b>gasto del período</b> sale de precios
+  reales. El valor del stock, el consumo y los descartes se calculan con el precio
+  promedio actual de cada ítem, y <b>{{ sin_costo_items }} ítem(s)</b>
+  ({{ sin_costo_unidades }} unidades) todavía no tienen precio, así que cuentan como
+  cero. Mientras eso pase, estos totales son <b>más bajos que la realidad</b> y van a
+  subir a medida que se carguen ingresos — no porque se consuma o se tire más.
+</div>
+{% endif %}
+
+<div class="mx-grid">
+  <div class="mx-panel"><div class="mx-panel-title">Gasto por mes (compras reales)</div><div class="mx-chart"><canvas id="c_gasto"></canvas></div></div>
+  <div class="mx-panel"><div class="mx-panel-title">Valor del stock por camioneta</div><div class="mx-chart"><canvas id="c_camionetas"></canvas></div></div>
+</div>
+<div class="mx-grid">
+  <div class="mx-panel"><div class="mx-panel-title">Consumo por mes (utilizados, valorizado)</div><div class="mx-chart"><canvas id="c_consumo"></canvas></div></div>
+  <div class="mx-panel"><div class="mx-panel-title">Descartes por mes (valorizado)</div><div class="mx-chart"><canvas id="c_descartes"></canvas></div></div>
+</div>
+{% endblock %}
+{% block extra_scripts %}
+<script src="{{ url_for('static', filename='js/metricas.js') }}"></script>
+<script>
+MX.barV('c_gasto', {{ gasto_mes|map(attribute='label')|list|tojson }}, {{ gasto_mes|map(attribute='value')|list|tojson }}, {tone:'accent'});
+MX.barH('c_camionetas', {{ por_camioneta|map(attribute='label')|list|tojson }}, {{ por_camioneta|map(attribute='value')|list|tojson }}, {tone:'accent'});
+MX.barV('c_consumo', {{ consumo_mes|map(attribute='label')|list|tojson }}, {{ consumo_mes|map(attribute='value')|list|tojson }});
+MX.barV('c_descartes', {{ descartes_mes|map(attribute='label')|list|tojson }}, {{ descartes_mes|map(attribute='value')|list|tojson }}, {tone:'danger'});
+</script>
+{% endblock %}

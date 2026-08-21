@@ -10,6 +10,7 @@
   <a class="mx-tab {% if active_tab == 'inventario' %}active{% endif %}" href="{{ url_for('metricas_inventario') }}">Inventario</a>
   <a class="mx-tab {% if active_tab == 'movimientos' %}active{% endif %}" href="{{ url_for('metricas_movimientos') }}">Movimientos</a>
   <a class="mx-tab {% if active_tab == 'reparaciones' %}active{% endif %}" href="{{ url_for('metricas_reparaciones') }}">Reparaciones</a>
+  <a class="mx-tab {% if active_tab == 'costos' %}active{% endif %}" href="{{ url_for('metricas_costos') }}">Costos</a>
 </div>
 
 {% if show_filter is not defined or show_filter %}

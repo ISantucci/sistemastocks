@@ -39,6 +39,16 @@
     </div>
   </div>
 
+  {# En concepto de: para qué se emitió el remito. Los remitos anteriores a
+     este campo quedan sin la franja y muestran su texto original al pie, como
+     siempre: no se reescribe nada de lo ya emitido. #}
+  {% if remito.concept %}
+  <div class="rem-concept">
+    <span class="rem-k">EN CONCEPTO DE:</span>
+    <span class="rem-concept-v">{{ remito.concept }}</span>
+  </div>
+  {% endif %}
+
   <!-- Origen / Destino: solo responsable -->
   <div class="rem-parties">
     <div class="rem-party">

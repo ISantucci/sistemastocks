@@ -551,6 +551,10 @@ input, select, textarea{ box-sizing: border-box; }
 .rem-date-label{ font-weight:700; font-size:12px; }
 .rem-date-val{ margin-top:10px; font-size:14px; letter-spacing:.05em; }
 
+/* Franja "En concepto de": entre el encabezado y los datos de origen/destino. */
+.rem-concept{ border-bottom:2px solid #000; padding:10px 14px; display:flex; gap:8px; align-items:baseline; }
+.rem-concept-v{ flex:1; font-weight:600; }
+
 .rem-parties{ display:grid; grid-template-columns:1fr 1fr; border-bottom:2px solid #000; }
 .rem-party{ padding:12px 14px; }
 .rem-party-right{ border-left:2px solid #000; }

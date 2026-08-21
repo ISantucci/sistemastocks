@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 import os
 import secrets
@@ -507,6 +508,25 @@ ITEM_VIEW_ROLES = ("ADMIN", "SUPERVISOR", "LECTOR")
 # usuarios y la importación masiva.
 ITEM_EDIT_ROLES = ("ADMIN", "SUPERVISOR")
 
+# ---- COSTOS ----
+# Quien VE la seccion Costos y los precios en Items / Metricas. El LECTOR ve
+# todo pero no edita nada. El TECNICO no ve plata en NINGUNA pantalla: no entra
+# a Items, ni a Ingresos/Egresos, ni a Metricas, y las rutas /costos/* lo
+# rechazan en backend (no alcanza con no mostrarle el menu).
+COSTS_VIEW_ROLES = ("ADMIN", "SUPERVISOR", "LECTOR")
+# Quien carga un precio al registrar un ingreso y quien puede corregirlo.
+COSTS_EDIT_ROLES = ("ADMIN", "SUPERVISOR")
+# Quien toca los parametros de la seccion.
+COSTS_ADMIN_ROLES = ("ADMIN",)
+
+# Ventana para corregir el precio de un ingreso ya cargado, en minutos. Mismo
+# criterio (y mismo default) que la reversion de movimientos.
+COST_PRICE_EDIT_MINUTES = int(os.environ.get("COST_PRICE_EDIT_MINUTES", "60"))
+
+# Claves de configuracion de la seccion Costos (tabla app_settings).
+SETTING_COST_START_DATE = "costos.fecha_inicio"      # YYYY-MM-DD
+SETTING_COST_DEFAULT_PRESET = "costos.preset_default"  # mes / 30d / 90d / anio / todo
+
 
 def can_manage_target(target_user) -> bool:
     """¿El usuario actual puede editar/cambiar clave del usuario target?
@@ -881,6 +901,113 @@ UNIT_ENTREGADO = "ENTREGADO"    # salió del sistema (entregado / externo)
 UNIT_DESCARTADO = "DESCARTADO"  # fue a Descartes
 
 
+class ItemPurchasePrice(db.Model):
+    """Precio de UNA linea de un ingreso (compra) cargado desde Ingresos/Egresos.
+
+    Es la unica fuente de precios del sistema. Una fila por linea de ingreso.
+
+    Por que vive aparte y no como columna de `movements`: un Movement es
+    INMUTABLE (regla de negocio §4). El precio, en cambio, se puede corregir
+    dentro de una ventana corta. Separarlos permite corregir el numero sin
+    tocar el historial de stock, el movimiento ni el remito ya emitido.
+
+    NO se guardan aca cantidad, proveedor ni fecha del ingreso: salen del
+    Movement, que es inmutable, asi que duplicarlos solo agregaria formas de
+    que se desincronicen.
+
+    La plata se guarda en CENTAVOS (entero) para no arrastrar errores de
+    redondeo. Se formatea recien al mostrar (ver fmt_money).
+    """
+    __tablename__ = "item_purchase_prices"
+    id = db.Column(db.Integer, primary_key=True)
+
+    # UNIQUE: una linea de ingreso tiene un solo precio, nunca dos.
+    movement_id = db.Column(
+        db.Integer, db.ForeignKey("movements.id"), nullable=False, unique=True
+    )
+    # Denormalizado a proposito: el promedio por item y el filtro por item son
+    # las dos consultas mas frecuentes de la seccion.
+    item_id = db.Column(db.Integer, db.ForeignKey("items.id"), nullable=False, index=True)
+
+    # Lo que se CARGA es el total de la linea, tal como figura en el remito del
+    # proveedor. El unitario se deriva (total / cantidad) y es el que alimenta
+    # el promedio del item.
+    #
+    # Se guardan LOS DOS porque la division no siempre da exacta: $1.000 entre 3
+    # unidades da $333,3333. Si se guardara solo el unitario redondeado, el
+    # total reconstruido daria $999,99 y el "gasto del periodo" —el unico numero
+    # duro de las metricas— perderia centavos en cada compra. Con el total
+    # guardado, el gasto es exacto y el redondeo queda solo en el promedio,
+    # donde no cambia ninguna decision.
+    unit_price_cents = db.Column(db.Integer, nullable=False)
+    # Nullable: las filas cargadas antes de este cambio no lo tienen, y para
+    # ellas el total se reconstruye como unitario x cantidad, igual que antes.
+    total_price_cents = db.Column(db.Integer, nullable=True)
+
+    created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+
+    movement = db.relationship("Movement")
+    item = db.relationship("Item")
+    created_by = db.relationship("User")
+
+    @property
+    def qty(self) -> int:
+        """Cantidad de la linea. Vive en el Movement (inmutable)."""
+        return int(self.movement.qty) if self.movement else 0
+
+    @property
+    def total_cents(self) -> int:
+        """Total real de la linea. El guardado manda; si no hay, se reconstruye."""
+        if self.total_price_cents is not None:
+            return int(self.total_price_cents)
+        return int(self.unit_price_cents or 0) * self.qty
+
+
+class ItemPriceEdit(db.Model):
+    """Rastro de una correccion de precio. Nada se borra: se corrige y se anota.
+
+    Mismo criterio que la reversion de movimientos: el historial muestra el
+    error Y su correccion, no lo esconde.
+    """
+    __tablename__ = "item_price_edits"
+    id = db.Column(db.Integer, primary_key=True)
+
+    purchase_price_id = db.Column(
+        db.Integer, db.ForeignKey("item_purchase_prices.id"), nullable=False, index=True
+    )
+    old_unit_price_cents = db.Column(db.Integer, nullable=False)
+    new_unit_price_cents = db.Column(db.Integer, nullable=False)
+    # El total es lo que efectivamente se tipea al corregir; el unitario de
+    # arriba es su derivado. Nullable por las correcciones anteriores a este
+    # cambio, que se hicieron sobre el unitario.
+    old_total_cents = db.Column(db.Integer, nullable=True)
+    new_total_cents = db.Column(db.Integer, nullable=True)
+
+    edited_at = db.Column(db.DateTime, default=now_ar, nullable=False)
+    edited_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+
+    purchase_price = db.relationship(
+        "ItemPurchasePrice",
+        backref=db.backref("edits", order_by="ItemPriceEdit.edited_at"),
+    )
+    edited_by = db.relationship("User")
+
+
+class AppSetting(db.Model):
+    """Parametros de configuracion editables desde la UI (clave/valor).
+
+    Tabla generica a proposito: la seccion Costos arranca con dos parametros y
+    va a crecer. Agregar uno nuevo no requiere migracion.
+    """
+    __tablename__ = "app_settings"
+    id = db.Column(db.Integer, primary_key=True)
+    key = db.Column(db.String(64), unique=True, nullable=False)
+    value = db.Column(db.String(255), nullable=True)
+    updated_at = db.Column(db.DateTime, default=now_ar, onupdate=now_ar, nullable=False)
+    updated_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+
+
 class ItemUnit(db.Model):
     """Unidad física individual de un ítem serializado (un serial = una fila).
 
@@ -1033,6 +1160,20 @@ class Remito(db.Model):
     created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
 
     observation = db.Column(db.String(255), nullable=True)
+
+    # "En concepto de": para qué se emitió este remito (ingreso de mercadería,
+    # egreso por devolución, traslado interno...). Va en el impreso, arriba de
+    # los datos de origen y destino.
+    #
+    # Antes esto vivía CONCATENADO adentro de `observation`
+    # ("Ingreso · Juan Perez · Reparación · lo que escribió el usuario"), y por
+    # eso el pie del remito mezclaba las dos cosas. Ahora van separados: acá el
+    # concepto, en `observation` solo lo que escribe la persona.
+    #
+    # Nullable a propósito: los remitos ya emitidos NO se tocan. Quedan en NULL
+    # y siguen mostrándose exactamente como hasta hoy (sin la línea de concepto
+    # y con su observación completa al pie).
+    concept = db.Column(db.String(160), nullable=True)
 
     # Responsables elegidos al crear el remito (a cargo de cada ubicación).
     # Nullable: si el origen/destino es externo (proveedor) queda vacío para
@@ -2991,6 +3132,20 @@ def _build_items_query(f: dict):
         "description": Item.description,
         "is_active": Item.is_active,
     }
+
+    # Precio promedio: se ordena en SQL con un LEFT JOIN al agregado, igual que
+    # las demas columnas. No se cachea en `items` a proposito — un promedio
+    # guardado se puede desincronizar con cada ingreso y con cada correccion;
+    # uno calculado, no.
+    if f["sort_by"] == "avg_price":
+        sub = avg_price_cents_subquery()
+        q = q.outerjoin(sub, sub.c.item_id == Item.id)
+        # NULLS: los items sin precio quedan siempre al final, se ordene como se
+        # ordene. Un item sin precio no es "el mas barato".
+        sort_column = sub.c.avg_cents
+        direction = sort_column.desc() if f["sort_dir"] == "desc" else sort_column.asc()
+        return q.order_by(case((sub.c.avg_cents.is_(None), 1), else_=0), direction, Item.code)
+
     sort_column = sortable_columns.get(f["sort_by"], Item.code)
     return q.order_by(sort_column.desc() if f["sort_dir"] == "desc" else sort_column.asc())
 
@@ -3040,9 +3195,17 @@ def items():
         p = prefix_for_category(c)
         next_codes[c.id] = next_item_code(p) if p else ""
 
+    # COSTOS: promedio simple solo de los ítems visibles en esta página.
+    # El TÉCNICO no llega acá (ITEM_VIEW_ROLES no lo incluye), pero igual se
+    # condiciona por rol: la plata se decide en el backend, no en el template.
+    can_see_costs = current_user.role in COSTS_VIEW_ROLES
+    avg_prices = avg_price_map([it.id for it in items_list]) if can_see_costs else {}
+
     return render_template(
         "items.html",
         items=items_list,
+        avg_prices=avg_prices,
+        can_see_costs=can_see_costs,
         page_obj=items_page,
         categories=categories_list,
         all_items=all_items,
@@ -3090,11 +3253,17 @@ def items_export_xlsx():
     ws = wb.active
     ws.title = "Items"
 
+    # COSTOS: la columna de precio solo sale si el rol puede ver plata.
+    can_see_costs = current_user.role in COSTS_VIEW_ROLES
+    avg_prices = avg_price_map([it.id for it in rows]) if can_see_costs else {}
+
     headers = [
         "Código", "Nombre", "Categoría", "Rastreable", "Serializado",
         "Unidad", "Stock seguridad", "Descripción", "Activo",
         "Proveedores", "Link de referencia",
     ]
+    if can_see_costs:
+        headers.append("Precio promedio")
     ws.append(headers)
 
     head_font = Font(bold=True, color="FFFFFF")
@@ -3119,12 +3288,19 @@ def items_export_xlsx():
             item_supplier_names(it),
             it.reference_link or "",
         ])
+        if can_see_costs:
+            # Se exporta el número (en pesos), no el texto: así se puede sumar
+            # y ordenar en Excel. Vacío = sin precio conocido, que no es cero.
+            _avg = avg_prices.get(it.id)
+            ws.cell(row=ws.max_row, column=len(headers)).value = (
+                round(_avg / 100, 2) if _avg is not None else None
+            )
 
     # Fila de encabezados fija y con autofiltro.
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{ws.max_row}"
 
-    widths = [14, 40, 22, 12, 13, 10, 16, 45, 9, 40, 45]
+    widths = [14, 40, 22, 12, 13, 10, 16, 45, 9, 40, 45, 16]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
@@ -5135,6 +5311,9 @@ def remito_new():
             from_location_id=from_id,
             to_location_id=to_id,
             created_by_user_id=current_user.id,
+            # Origen y destino ya se ven en el propio remito (y los responsables
+            # se completan solos), así que el concepto no los repite.
+            concept="Traslado interno",
             observation=observation,
             responsible_from_id=resp_from,
             responsible_to_id=resp_to,
@@ -5194,6 +5373,184 @@ def fmt_qty(qty, item=None):
     if unit == "metros":
         return f"{qty} metros"
     return f"{qty}"
+
+
+# ------------------ COSTOS: helpers de plata y parametros ------------------
+# La plata SIEMPRE viaja en centavos (entero) por dentro. Estas dos funciones
+# son la unica frontera entre el entero y el texto que ve/escribe el usuario.
+
+def parse_money_to_cents(raw) -> int | None:
+    """Texto escrito por una persona -> centavos (entero). None si es invalido.
+
+    Acepta lo que la gente realmente tipea: "1234", "1234,56", "1234.56",
+    "1.234,56", "$ 1.234,56". Rechaza vacio, negativo, cero y basura.
+
+    Criterio para decidir si el separador es decimal o de miles: si hay coma,
+    la coma manda como decimal (formato argentino) y los puntos son miles. Si
+    solo hay puntos, se toma como decimal SOLO si deja exactamente 1 o 2
+    digitos despues del ultimo punto; si no, son separadores de miles.
+    """
+    if raw is None:
+        return None
+    txt = str(raw).strip().replace("$", "").replace(" ", "").replace(" ", "")
+    if not txt:
+        return None
+    if "," in txt:
+        txt = txt.replace(".", "").replace(",", ".")
+    elif "." in txt:
+        entero, _, dec = txt.rpartition(".")
+        if len(dec) in (1, 2) and entero.replace(".", "").isdigit():
+            txt = entero.replace(".", "") + "." + dec
+        else:
+            txt = txt.replace(".", "")
+    try:
+        val = Decimal(txt)
+    except (InvalidOperation, ValueError):
+        return None
+    if val <= 0:
+        return None
+    # Redondeo bancario NO: half-up, que es lo que espera cualquiera que mire
+    # una factura. Se cuantiza a centavos.
+    cents = int((val * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    if cents <= 0:
+        return None
+    return cents
+
+
+def fmt_money(cents, with_symbol: bool = True) -> str:
+    """Centavos -> texto en formato argentino ("$ 1.234,56").
+
+    None/"" devuelve el guion largo, NO "$ 0,00": un item sin precio conocido
+    no vale cero, vale desconocido. Es la diferencia que sostiene toda la
+    valorizacion (ver la seccion "sin costo conocido").
+    """
+    if cents is None or cents == "":
+        return "—"
+    try:
+        cents = int(round(float(cents)))
+    except (TypeError, ValueError):
+        return "—"
+    negativo = cents < 0
+    cents = abs(cents)
+    entero, dec = divmod(cents, 100)
+    txt = f"{entero:,}".replace(",", ".") + f",{dec:02d}"
+    if negativo:
+        txt = "-" + txt
+    return f"$ {txt}" if with_symbol else txt
+
+
+def unit_from_total(total_cents: int, qty: int) -> int | None:
+    """Precio unitario derivado del total de la linea. None si no da.
+
+    Redondeo half-up al centavo, que es lo que espera cualquiera que mire una
+    factura. Devuelve None si el unitario daria CERO (ej. $1 repartido entre
+    300 metros): un precio de cero rompe el promedio del item en silencio, asi
+    que se rechaza la carga en vez de guardar algo que miente.
+    """
+    if not total_cents or not qty or qty <= 0:
+        return None
+    unit = int((Decimal(total_cents) / Decimal(qty)).quantize(
+        Decimal("1"), rounding=ROUND_HALF_UP))
+    return unit if unit >= 1 else None
+
+
+def price_total_sql():
+    """Expresion SQL del total real de una linea de precio.
+
+    El total guardado manda; para las filas viejas (sin total) se reconstruye
+    como unitario x cantidad. Se usa en el total del filtro y en el gasto de
+    las metricas, para que los dos calculen lo mismo de la misma forma.
+    """
+    return func.coalesce(
+        ItemPurchasePrice.total_price_cents,
+        ItemPurchasePrice.unit_price_cents * Movement.qty,
+    )
+
+
+def get_setting(key: str, default: str = "") -> str:
+    row = AppSetting.query.filter_by(key=key).first()
+    if row is None or row.value is None:
+        return default
+    return row.value
+
+
+def set_setting(key: str, value: str, user_id=None) -> None:
+    row = AppSetting.query.filter_by(key=key).first()
+    if row is None:
+        row = AppSetting(key=key)
+        db.session.add(row)
+    row.value = value
+    row.updated_by_user_id = user_id
+
+
+def cost_price_edit_open(p: "ItemPurchasePrice") -> bool:
+    """True si el precio todavia esta dentro de la ventana de correccion.
+
+    Fuente de verdad UNICA: la usan el listado (para mostrar el boton) y el
+    POST (para autorizar de verdad). Ocultar el boton no es un permiso.
+    """
+    if p is None or not p.created_at:
+        return False
+    return p.created_at >= (now_ar() - timedelta(minutes=COST_PRICE_EDIT_MINUTES))
+
+
+def avg_price_cents_subquery():
+    """Subquery con el promedio SIMPLE de precio por item, en centavos.
+
+    Simple = cada ingreso pesa lo mismo, sin importar cuantas unidades trajo.
+    Es la decision D6 de la especificacion.
+
+    Se devuelve como subquery (no como valor calculado en Python) para que la
+    columna de /items se pueda ORDENAR en SQL, igual que las demas.
+    """
+    return (
+        db.session.query(
+            ItemPurchasePrice.item_id.label("item_id"),
+            func.avg(ItemPurchasePrice.unit_price_cents).label("avg_cents"),
+        )
+        .group_by(ItemPurchasePrice.item_id)
+        .subquery()
+    )
+
+
+def avg_price_map(item_ids=None) -> dict:
+    """{item_id: promedio simple en centavos} para los items pedidos."""
+    q = db.session.query(
+        ItemPurchasePrice.item_id, func.avg(ItemPurchasePrice.unit_price_cents)
+    )
+    if item_ids is not None:
+        ids = [int(i) for i in item_ids]
+        if not ids:
+            return {}
+        q = q.filter(ItemPurchasePrice.item_id.in_(ids))
+    return {iid: int(round(avg)) for iid, avg in q.group_by(ItemPurchasePrice.item_id).all()}
+
+
+def weighted_avg_price_map(item_ids=None) -> dict:
+    """{item_id: promedio PONDERADO por cantidad, en centavos}.
+
+    Ponderado = SUM(precio x cantidad) / SUM(cantidad). Refleja lo que
+    realmente costo la mercaderia. Convive con el simple (D7): cuando los dos
+    numeros se separan, esa separacion es informacion.
+    """
+    q = (
+        db.session.query(
+            ItemPurchasePrice.item_id,
+            func.sum(ItemPurchasePrice.unit_price_cents * Movement.qty),
+            func.sum(Movement.qty),
+        )
+        .join(Movement, Movement.id == ItemPurchasePrice.movement_id)
+    )
+    if item_ids is not None:
+        ids = [int(i) for i in item_ids]
+        if not ids:
+            return {}
+        q = q.filter(ItemPurchasePrice.item_id.in_(ids))
+    out = {}
+    for iid, total, qty in q.group_by(ItemPurchasePrice.item_id).all():
+        if qty:
+            out[iid] = int(round((total or 0) / qty))
+    return out
 
 
 def location_responsible_users(location_id):
@@ -5273,6 +5630,7 @@ def inject_stock_helpers():
         "fmt_qty": fmt_qty,
         "pending_return_units": pending_return_units,
         "scrap_source_label": scrap_source_label,
+        "fmt_money": fmt_money,
     }
 
 @app.context_processor
@@ -6293,17 +6651,18 @@ def _repair_transfer_with_remito(item_id, qty, from_id, to_id, supplier, observa
     if not to_ext:
         upsert_stock(item_id, to_id, qty)
 
-    # Observación del REMITO: limpia, estilo Ingresos/Egresos (sin la nota de
-    # reparación). El detalle de reparación va en la observación del MOVIMIENTO.
+    # El concepto dice para qué se emite; la observación del remito queda vacía
+    # (el detalle de la reparación va en la observación del MOVIMIENTO).
     tipo_label = "Egreso" if to_ext else "Ingreso"
     ry, rseq, rnumber = next_remito_number()
-    r_obs = f"{tipo_label} · {supplier.contact_name}"
+    r_concept = f"{tipo_label} por reparación — Proveedor: {supplier.contact_name}"
     rem = Remito(
         year=ry, seq=rseq, number=rnumber,
         status="CONFIRMADO", print_pending=True,
         from_location_id=from_id, to_location_id=to_id,
         created_by_user_id=user.id,
-        observation=r_obs[:255],
+        concept=r_concept[:160],
+        observation=None,
         responsible_from_id=None, responsible_to_id=None,
     )
     db.session.add(rem)
@@ -8338,6 +8697,11 @@ def in_out():
         item_ids = request.form.getlist("item_id[]")
         qtys = request.form.getlist("qty[]")
         serials_list = request.form.getlist("line_serials[]")
+        # COSTOS: total de la linea, tal como figura en el remito del proveedor.
+        # Obligatorio SOLO en el ingreso, que es la unica compra real del
+        # sistema. En el egreso el campo ni se manda (el form lo oculta) y si
+        # llegara, se ignora.
+        totals_raw = request.form.getlist("line_total[]")
 
         # Se valida TODO antes de tocar nada (operación todo-o-nada).
         planned = []  # {it, qty, new_serials, out_units}
@@ -8413,7 +8777,41 @@ def in_out():
                     flash(f"«{it.code} - {it.name}»: cantidad inválida.", "error")
                     return redirect(url_for("in_out"))
 
-            planned.append({"it": it, "qty": qty, "out_units": out_units})
+            # COSTOS: total de la linea (solo INGRESO). El unitario se deriva.
+            total_price_cents = None
+            unit_price_cents = None
+            if tipo == "INGRESO":
+                total_raw = (totals_raw[idx] or "").strip() if idx < len(totals_raw) else ""
+                if not total_raw:
+                    flash(
+                        f"«{it.code} - {it.name}»: falta el precio total de la línea. "
+                        "En un ingreso el precio es obligatorio.", "error",
+                    )
+                    return redirect(url_for("in_out"))
+                total_price_cents = parse_money_to_cents(total_raw)
+                if total_price_cents is None:
+                    flash(
+                        f"«{it.code} - {it.name}»: precio total inválido "
+                        "(tiene que ser un número mayor a cero).", "error",
+                    )
+                    return redirect(url_for("in_out"))
+                unit_price_cents = unit_from_total(total_price_cents, qty)
+                if unit_price_cents is None:
+                    # Pasa si el total es tan chico frente a la cantidad que el
+                    # unitario redondea a cero. Guardar cero arruinaria el
+                    # promedio sin que nadie se entere.
+                    flash(
+                        f"«{it.code} - {it.name}»: {fmt_money(total_price_cents)} "
+                        f"repartido en {fmt_qty(qty, it)} da menos de un centavo "
+                        "por unidad. Revisá la cantidad o el total.", "error",
+                    )
+                    return redirect(url_for("in_out"))
+
+            planned.append({
+                "it": it, "qty": qty, "out_units": out_units,
+                "unit_price_cents": unit_price_cents,
+                "total_price_cents": total_price_cents,
+            })
 
         if not planned:
             flash("Cargá al menos un ítem.", "error")
@@ -8423,17 +8821,20 @@ def in_out():
         try:
             # Un solo remito agrupa toda la operación.
             ry, rseq, rnumber = next_remito_number()
-            r_obs = f"{tipo_label} · {supplier.contact_name}"
-            if motivo_label:
-                r_obs = f"{r_obs} · {motivo_label}"
-            if observation:
-                r_obs = f"{r_obs} · {observation}"
+            # El concepto y la observación van SEPARADOS: el concepto es del
+            # sistema (para qué se emite el remito) y la observación es solo lo
+            # que escribió la persona.
+            if tipo == "INGRESO":
+                r_concept = f"Ingreso de mercadería — Proveedor: {supplier.contact_name}"
+            else:
+                r_concept = f"Egreso — {motivo_label} — Proveedor: {supplier.contact_name}"
             r = Remito(
                 year=ry, seq=rseq, number=rnumber,
                 status="CONFIRMADO", print_pending=True,
                 from_location_id=from_id, to_location_id=to_id,
                 created_by_user_id=current_user.id,
-                observation=r_obs[:255],
+                concept=r_concept[:160],
+                observation=(observation or None),
                 responsible_from_id=None, responsible_to_id=None,
             )
             db.session.add(r)
@@ -8477,6 +8878,18 @@ def in_out():
                     apply_serial_units_out(p["out_units"], to_id)
 
                 db.session.add(RemitoLine(remito_id=r.id, movement_id=m.id))
+
+                # COSTOS: el precio de la compra, dentro de la MISMA transaccion
+                # que el movimiento. Si algo falla mas abajo, no queda un precio
+                # sin su ingreso ni un ingreso sin su precio.
+                if p["unit_price_cents"] is not None:
+                    db.session.add(ItemPurchasePrice(
+                        movement_id=m.id,
+                        item_id=it.id,
+                        unit_price_cents=p["unit_price_cents"],
+                        total_price_cents=p["total_price_cents"],
+                        created_by_user_id=current_user.id,
+                    ))
 
                 if motivo == "REPARACION":
                     if it.serialized:
@@ -8524,6 +8937,18 @@ def in_out():
     # Remito por movimiento (para el link/estado de impresion).
     line_map = {ln.movement_id: ln.remito for ln in RemitoLine.query.all()}
 
+    # COSTOS: precio por movimiento, solo para los que se estan listando.
+    # Queda en None (se muestra "—") para los egresos y para los ingresos que
+    # NO son compras: el cierre de "reparada por proveedor" entra por
+    # _repair_transfer_with_remito(), no por aca, y por eso no tiene precio.
+    price_map = {}
+    if logs and current_user.role in COSTS_VIEW_ROLES:
+        _ids = [m.id for m in logs]
+        price_map = {
+            p.movement_id: p
+            for p in ItemPurchasePrice.query.filter(ItemPurchasePrice.movement_id.in_(_ids)).all()
+        }
+
     # Seriales disponibles en Jaula (para egreso de serializados).
     jaula_units = {}
     if jaula:
@@ -8547,6 +8972,8 @@ def in_out():
         jaula_stock=jaula_stock,
         logs=logs,
         line_map=line_map,
+        price_map=price_map,
+        can_see_costs=(current_user.role in COSTS_VIEW_ROLES),
         jaula_units=jaula_units,
         serialized_item_ids=serialized_item_ids,
         jaula=jaula,
@@ -8580,6 +9007,471 @@ def inject_print_badge():
     except Exception:
         count = 0
     return {"print_badge_count": count}
+
+
+# ===========================================================================
+# SECCION COSTOS
+# ===========================================================================
+# Valoriza el inventario a partir de los precios cargados en los INGRESOS de
+# /ingresos-egresos, que es la unica compra real del sistema.
+#
+# Tres pantallas: el registro de precios (donde se corrige), la valorizacion
+# (cuanto vale el stock hoy) y los parametros. Las metricas de plata viven
+# aparte, como una pestaña mas de /metricas.
+#
+# Nada de esto toca stock, movimientos ni remitos: la seccion LEE el historial
+# y le pone precio. La unica escritura es sobre las dos tablas propias.
+# ===========================================================================
+
+def _costos_filtros():
+    """Filtros del registro de precios, normalizados. Solo lectura."""
+    f_date_from = (request.args.get("from_date") or "").strip()
+    f_date_to = (request.args.get("to_date") or "").strip()
+    f_item = (request.args.get("item_id") or "").strip()
+    f_supplier = (request.args.get("supplier_id") or "").strip()
+
+    conds = []
+    if f_date_from:
+        _d = _parse_date_arg(f_date_from)
+        if _d:
+            conds.append(ItemPurchasePrice.created_at >= datetime(_d.year, _d.month, _d.day))
+        else:
+            f_date_from = ""
+    if f_date_to:
+        _d = _parse_date_arg(f_date_to)
+        if _d:
+            conds.append(
+                ItemPurchasePrice.created_at <= datetime(_d.year, _d.month, _d.day, 23, 59, 59)
+            )
+        else:
+            f_date_to = ""
+    if f_item.isdigit():
+        conds.append(ItemPurchasePrice.item_id == int(f_item))
+    else:
+        f_item = ""
+    if f_supplier.isdigit():
+        conds.append(Movement.supplier_id == int(f_supplier))
+    else:
+        f_supplier = ""
+
+    return conds, {
+        "from_date": f_date_from,
+        "to_date": f_date_to,
+        "item_filter": f_item,
+        "supplier_filter": f_supplier,
+    }
+
+
+@app.route("/costos/ingresos", methods=["GET"])
+@login_required
+@role_required(*COSTS_VIEW_ROLES)
+def costos_ingresos():
+    """Registro de precios de compra: una fila por linea de ingreso.
+
+    Es la pantalla donde se corrige un precio mal cargado (dentro de la
+    ventana). El total del filtro se calcula en SQL con las MISMAS condiciones
+    que el listado, para que no puedan divergir.
+    """
+    conds, f = _costos_filtros()
+
+    q = (
+        ItemPurchasePrice.query
+        .join(Movement, Movement.id == ItemPurchasePrice.movement_id)
+        .filter(*conds)
+    )
+
+    total_cents = (
+        db.session.query(func.coalesce(func.sum(price_total_sql()), 0))
+        .select_from(ItemPurchasePrice)
+        .join(Movement, Movement.id == ItemPurchasePrice.movement_id)
+        .filter(*conds)
+        .scalar()
+    ) or 0
+
+    page_obj = paginate(q.order_by(ItemPurchasePrice.created_at.desc()))
+
+    # Remito por movimiento, solo para las filas visibles.
+    _mov_ids = [p.movement_id for p in page_obj.items]
+    remito_map = {}
+    if _mov_ids:
+        remito_map = {
+            ln.movement_id: ln.remito
+            for ln in RemitoLine.query.filter(RemitoLine.movement_id.in_(_mov_ids)).all()
+        }
+
+    return render_template(
+        "costos_ingresos.html",
+        prices=page_obj.items,
+        page_obj=page_obj,
+        total_cents=total_cents,
+        remito_map=remito_map,
+        items=Item.query.order_by(Item.code).all(),
+        suppliers=Supplier.query.order_by(Supplier.contact_name).all(),
+        can_edit=(current_user.role in COSTS_EDIT_ROLES),
+        edit_minutes=COST_PRICE_EDIT_MINUTES,
+        cost_price_edit_open=cost_price_edit_open,
+        **f,
+    )
+
+
+@app.route("/costos/precios/<int:price_id>/editar", methods=["POST"])
+@login_required
+@role_required(*COSTS_EDIT_ROLES)
+def costos_precio_editar(price_id: int):
+    """Corrige el precio de un ingreso ya cargado. NO toca stock ni el movimiento.
+
+    Solo el numero cambia: el Movement sigue siendo inmutable y el remito ya
+    emitido sigue diciendo la verdad sobre lo que se movio. La correccion deja
+    su propia fila en item_price_edits (nada se borra).
+
+    La ventana se valida ACA, no solo escondiendo el boton: quien mande el POST
+    a mano fuera de tiempo tiene que ser rechazado igual.
+    """
+    p = ItemPurchasePrice.query.get_or_404(price_id)
+
+    if not cost_price_edit_open(p):
+        flash(
+            f"Ese precio ya no se puede corregir: pasaron más de "
+            f"{COST_PRICE_EDIT_MINUTES} minutos desde que se cargó.", "error",
+        )
+        return redirect(url_for("costos_ingresos"))
+
+    # Se corrige el TOTAL de la linea, que es lo que dice el remito. El unitario
+    # se vuelve a derivar, igual que en la carga.
+    nuevo_total = parse_money_to_cents(request.form.get("line_total", ""))
+    if nuevo_total is None:
+        flash("Precio inválido: tiene que ser un número mayor a cero.", "error")
+        return redirect(url_for("costos_ingresos"))
+
+    nuevo_unit = unit_from_total(nuevo_total, p.qty)
+    if nuevo_unit is None:
+        flash(
+            f"{fmt_money(nuevo_total)} repartido en {fmt_qty(p.qty, p.item)} "
+            "da menos de un centavo por unidad. Revisá el total.", "error",
+        )
+        return redirect(url_for("costos_ingresos"))
+
+    viejo_total = int(p.total_cents)
+    viejo_unit = int(p.unit_price_cents)
+    if nuevo_total == viejo_total and nuevo_unit == viejo_unit:
+        flash("El precio es el mismo: no se cambió nada.", "ok")
+        return redirect(url_for("costos_ingresos"))
+
+    try:
+        db.session.add(ItemPriceEdit(
+            purchase_price_id=p.id,
+            old_unit_price_cents=viejo_unit,
+            new_unit_price_cents=nuevo_unit,
+            old_total_cents=viejo_total,
+            new_total_cents=nuevo_total,
+            edited_by_user_id=current_user.id,
+        ))
+        p.unit_price_cents = nuevo_unit
+        p.total_price_cents = nuevo_total
+        db.session.commit()
+        flash(
+            f"Precio corregido: {fmt_money(viejo_total)} → {fmt_money(nuevo_total)} "
+            f"({fmt_money(nuevo_unit)} por unidad). "
+            "El promedio del ítem se recalcula solo.", "ok",
+        )
+    except Exception as e:
+        db.session.rollback()
+        flash(f"No se pudo corregir el precio: {e}", "error")
+
+    return redirect(url_for("costos_ingresos", **request.args.to_dict()))
+
+
+@app.route("/costos/item/<int:item_id>/historial", methods=["GET"])
+@login_required
+@role_required(*COSTS_VIEW_ROLES)
+def costos_item_historial(item_id: int):
+    """Historial de precios de UN item, en JSON. Alimenta el popup de /items.
+
+    Es GET de solo lectura y esta detras del mismo control de rol que el resto
+    de la seccion: el TECNICO no puede leerlo escribiendo la URL.
+    """
+    it = Item.query.get_or_404(item_id)
+    rows = (
+        ItemPurchasePrice.query
+        .join(Movement, Movement.id == ItemPurchasePrice.movement_id)
+        .filter(ItemPurchasePrice.item_id == it.id)
+        .order_by(ItemPurchasePrice.created_at.desc())
+        .all()
+    )
+    data = [{
+        "fecha": p.created_at.strftime("%d/%m/%Y %H:%M") if p.created_at else "—",
+        "proveedor": (p.movement.supplier.contact_name
+                      if p.movement and p.movement.supplier else "—"),
+        "cantidad": fmt_qty(p.qty, it),
+        "precio": fmt_money(p.unit_price_cents),
+        "total": fmt_money(p.total_cents),
+        "editado": bool(p.edits),
+    } for p in rows]
+
+    simple = avg_price_map([it.id]).get(it.id)
+    ponderado = weighted_avg_price_map([it.id]).get(it.id)
+    return jsonify({
+        "item": f"{it.code} — {it.name}",
+        "promedio_simple": fmt_money(simple),
+        "promedio_ponderado": fmt_money(ponderado),
+        "ingresos": data,
+    })
+
+
+def _valorizacion_snapshot():
+    """Foto del valor del stock. Devuelve totales y el detalle por item.
+
+    Regla clave (D9): un item SIN promedio no vale cero, vale desconocido. Por
+    eso se cuenta aparte en 'sin_costo' en vez de sumar 0 y ensuciar el total.
+    """
+    rows = (
+        db.session.query(Item, Stock.location_id, Stock.quantity)
+        .join(Stock, Stock.item_id == Item.id)
+        .filter(Stock.quantity > 0)
+        .all()
+    )
+    avg = avg_price_map([r[0].id for r in rows]) if rows else {}
+    pond = weighted_avg_price_map([r[0].id for r in rows]) if rows else {}
+
+    total_cents = 0
+    por_item = {}       # item_id -> {"item", "qty", "avg", "valor"}
+    por_ubicacion = {}  # location_id -> centavos
+    sin_costo_items = set()
+    sin_costo_unidades = 0
+
+    for it, loc_id, qty in rows:
+        precio = avg.get(it.id)
+        if precio is None:
+            sin_costo_items.add(it.id)
+            sin_costo_unidades += int(qty or 0)
+        else:
+            valor = precio * int(qty or 0)
+            total_cents += valor
+            por_ubicacion[loc_id] = por_ubicacion.get(loc_id, 0) + valor
+        d = por_item.setdefault(it.id, {
+            "item": it, "qty": 0, "avg": precio, "pond": pond.get(it.id), "valor": 0,
+        })
+        d["qty"] += int(qty or 0)
+        if precio is not None:
+            d["valor"] += precio * int(qty or 0)
+
+    return {
+        "total_cents": total_cents,
+        "por_item": por_item,
+        "por_ubicacion": por_ubicacion,
+        "sin_costo_items": len(sin_costo_items),
+        "sin_costo_unidades": sin_costo_unidades,
+        "items_valorizados": len([d for d in por_item.values() if d["avg"] is not None]),
+    }
+
+
+@app.route("/costos/valorizacion", methods=["GET"])
+@login_required
+@role_required(*COSTS_VIEW_ROLES)
+def costos_valorizacion():
+    """Cuanto vale el stock hoy. Solo lectura, foto del momento."""
+    snap = _valorizacion_snapshot()
+
+    locs = {l.id: l for l in Location.query.all()}
+    por_ubicacion = sorted(
+        [(locs.get(lid), cents) for lid, cents in snap["por_ubicacion"].items() if locs.get(lid)],
+        key=lambda t: t[1], reverse=True,
+    )
+
+    # Valor por categoria (sobre lo valorizado).
+    por_categoria = {}
+    for d in snap["por_item"].values():
+        if d["avg"] is None:
+            continue
+        cat = d["item"].category.name if d["item"].category else "—"
+        por_categoria[cat] = por_categoria.get(cat, 0) + d["valor"]
+    por_categoria = sorted(por_categoria.items(), key=lambda t: t[1], reverse=True)
+
+    detalle = sorted(
+        snap["por_item"].values(),
+        key=lambda d: (d["valor"], d["qty"]), reverse=True,
+    )
+
+    return render_template(
+        "costos_valorizacion.html",
+        snap=snap,
+        por_ubicacion=por_ubicacion,
+        por_categoria=por_categoria,
+        detalle=detalle,
+    )
+
+
+@app.route("/costos/parametros", methods=["GET", "POST"])
+@login_required
+@role_required(*COSTS_ADMIN_ROLES)
+def costos_parametros():
+    """Parametros de la seccion. Tabla clave/valor: agregar uno no migra nada."""
+    if request.method == "POST":
+        fecha = (request.form.get("fecha_inicio") or "").strip()
+        preset = (request.form.get("preset_default") or "").strip()
+
+        if fecha and not _parse_date_arg(fecha):
+            flash("La fecha de inicio no es válida (formato AAAA-MM-DD).", "error")
+            return redirect(url_for("costos_parametros"))
+        # _MX_PRESETS es [(clave, etiqueta)]: se valida contra las CLAVES.
+        if preset and preset not in [k for k, _ in _MX_PRESETS]:
+            flash("El período por defecto no es válido.", "error")
+            return redirect(url_for("costos_parametros"))
+
+        try:
+            set_setting(SETTING_COST_START_DATE, fecha, current_user.id)
+            set_setting(SETTING_COST_DEFAULT_PRESET, preset or "90d", current_user.id)
+            db.session.commit()
+            flash("Parámetros guardados.", "ok")
+        except Exception as e:
+            db.session.rollback()
+            flash(f"No se pudieron guardar los parámetros: {e}", "error")
+        return redirect(url_for("costos_parametros"))
+
+    return render_template(
+        "costos_parametros.html",
+        fecha_inicio=get_setting(SETTING_COST_START_DATE, ""),
+        preset_default=get_setting(SETTING_COST_DEFAULT_PRESET, "90d"),
+        presets=_MX_PRESETS,
+        edit_minutes=COST_PRICE_EDIT_MINUTES,
+    )
+
+
+# ---------- METRICAS: pestaña COSTOS ----------
+
+@app.route("/metricas/costos")
+@login_required
+@role_required(*COSTS_VIEW_ROLES)
+def metricas_costos():
+    """Las metricas de plata.
+
+    OJO con como se leen estos numeros: solo el GASTO sale de precios reales.
+    El valor de stock, el consumo y los descartes se valorizan con el promedio
+    ACTUAL del item, y las unidades sin precio conocido cuentan como cero. Los
+    primeros meses eso da numeros mas bajos que la realidad. La pantalla lo
+    avisa; sin ese aviso, el grafico se lee como una caida de consumo que no
+    existe.
+    """
+    p = _mx_period()
+    dfrom, dto = p["dt_from"], p["dt_to"]
+
+    snap = _valorizacion_snapshot()
+    avg_all = avg_price_map()
+
+    def _valorizar(pares):
+        """[(label, item_id, qty)] -> {label: centavos}, ignorando sin precio."""
+        out = {}
+        for label, item_id, qty in pares:
+            precio = avg_all.get(item_id)
+            if precio is None:
+                continue
+            out[label] = out.get(label, 0) + precio * int(qty or 0)
+        return out
+
+    # --- Gasto del periodo: el UNICO dato duro de esta pantalla ---
+    gasto_cents = (
+        db.session.query(func.coalesce(func.sum(price_total_sql()), 0))
+        .select_from(ItemPurchasePrice)
+        .join(Movement, Movement.id == ItemPurchasePrice.movement_id)
+        .filter(ItemPurchasePrice.created_at >= dfrom, ItemPurchasePrice.created_at <= dto)
+        .scalar()
+    ) or 0
+
+    # --- Consumo valorizado (movimientos hacia "Utilizado") ---
+    util_id = _mx_utilizado_id()
+    consumo_cents = 0
+    if util_id:
+        filas = (
+            db.session.query(Movement.item_id, func.sum(Movement.qty))
+            .filter(Movement.to_location_id == util_id,
+                    Movement.created_at >= dfrom, Movement.created_at <= dto)
+            .group_by(Movement.item_id).all()
+        )
+        consumo_cents = sum(_valorizar([("t", iid, q) for iid, q in filas]).values())
+
+    # --- Descartes valorizados (tabla Scrap, igual que /metricas/descartes) ---
+    filas = (
+        db.session.query(Scrap.item_id, func.sum(Scrap.quantity))
+        .filter(Scrap.created_at >= dfrom, Scrap.created_at <= dto)
+        .group_by(Scrap.item_id).all()
+    )
+    descartes_cents = sum(_valorizar([("t", iid, q) for iid, q in filas]).values())
+
+    cards = [
+        {"label": "Valor del stock", "value": fmt_money(snap["total_cents"]),
+         "hint": f"{snap['items_valorizados']} ítems valorizados", "tone": "accent",
+         "href": url_for("costos_valorizacion")},
+        {"label": "Gasto del período", "value": fmt_money(gasto_cents),
+         "hint": "compras reales (dato exacto)", "tone": "",
+         "href": url_for("costos_ingresos")},
+        {"label": "Consumo valorizado", "value": fmt_money(consumo_cents),
+         "hint": "utilizado en el período", "tone": ""},
+        {"label": "Descartes valorizados", "value": fmt_money(descartes_cents),
+         "hint": "tirado en el período", "tone": "danger"},
+        {"label": "Sin costo conocido", "value": snap["sin_costo_items"],
+         "hint": f"{snap['sin_costo_unidades']} unidades fuera del total", "tone": "warn",
+         "href": url_for("costos_valorizacion")},
+    ]
+
+    def _rows_money(pares, tone=""):
+        """Filas para los graficos, con la plata en PESOS.
+
+        Los graficos reciben pesos (no centavos): un eje en centavos mostraria
+        numeros de 9 digitos ilegibles. Las tarjetas de arriba sí usan
+        fmt_money, que es donde el numero se lee con precision.
+        """
+        return [{"label": lbl, "value": round((val or 0) / 100, 2), "tone": tone}
+                for lbl, val in pares]
+
+    # Valor de stock por camioneta (y demas ubicaciones operativas).
+    locs = {l.id: l for l in Location.query.all()}
+    camionetas = sorted(
+        [(locs[lid].name, cents) for lid, cents in snap["por_ubicacion"].items()
+         if lid in locs and locs[lid].is_truck],
+        key=lambda t: t[1], reverse=True,
+    )
+    por_camioneta = _rows_money(camionetas, tone="accent")
+
+    # Series mensuales.
+    gasto_mes, consumo_mes, descartes_mes = [], [], []
+    for lbl, ms, me in _mx_months(dfrom, dto):
+        g = (
+            db.session.query(func.coalesce(func.sum(price_total_sql()), 0))
+            .select_from(ItemPurchasePrice)
+            .join(Movement, Movement.id == ItemPurchasePrice.movement_id)
+            .filter(ItemPurchasePrice.created_at >= ms, ItemPurchasePrice.created_at < me)
+            .scalar()
+        ) or 0
+        gasto_mes.append((lbl, int(g)))
+
+        c = 0
+        if util_id:
+            filas = (
+                db.session.query(Movement.item_id, func.sum(Movement.qty))
+                .filter(Movement.to_location_id == util_id,
+                        Movement.created_at >= ms, Movement.created_at < me)
+                .group_by(Movement.item_id).all()
+            )
+            c = sum(_valorizar([("t", iid, q) for iid, q in filas]).values())
+        consumo_mes.append((lbl, int(c)))
+
+        filas = (
+            db.session.query(Scrap.item_id, func.sum(Scrap.quantity))
+            .filter(Scrap.created_at >= ms, Scrap.created_at < me)
+            .group_by(Scrap.item_id).all()
+        )
+        descartes_mes.append((lbl, int(sum(_valorizar([("t", iid, q) for iid, q in filas]).values()))))
+
+    return render_template(
+        "metricas_costos.html", active_tab="costos", cards=cards,
+        por_camioneta=por_camioneta,
+        gasto_mes=_rows_money(gasto_mes, tone="accent"),
+        consumo_mes=_rows_money(consumo_mes),
+        descartes_mes=_rows_money(descartes_mes, tone="danger"),
+        sin_costo_items=snap["sin_costo_items"],
+        sin_costo_unidades=snap["sin_costo_unidades"],
+        **p,
+    )
 
 
 # ---------------------------------------------------------------------------

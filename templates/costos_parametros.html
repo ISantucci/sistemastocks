@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Costos · Parámetros · TNGStocks{% endblock %}
+{% block page_title %}Costos — Parámetros{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <h2>Parámetros de Costos</h2>
+    <p>Configuración de la sección. Solo ADMIN.</p>
+  </div>
+</div>
+
+<div class="card">
+  <form method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="form-grid">
+      <div class="field">
+        <label>Fecha de inicio de valorización</label>
+        <input type="date" name="fecha_inicio" value="{{ fecha_inicio }}">
+        <small class="muted">
+          Desde cuándo el sistema tiene precios. Sirve para saber a partir de qué
+          mes los informes son comparables: lo anterior no está en cero porque no
+          se gastó, sino porque todavía no se cargaban precios.
+        </small>
+      </div>
+      <div class="field">
+        <label>Período por defecto de las métricas</label>
+        <select name="preset_default">
+          {% for key, lbl in presets %}
+          <option value="{{ key }}" {% if preset_default == key %}selected{% endif %}>{{ lbl }}</option>
+          {% endfor %}
+        </select>
+        <small class="muted">El rango que se muestra al entrar sin filtrar.</small>
+      </div>
+    </div>
+    <button type="submit" class="btn btn-primary">Guardar</button>
+  </form>
+</div>
+
+<div class="card">
+  <div class="card-header"><span class="card-title">Reglas fijas de la sección</span></div>
+  <table class="data-table">
+    <tbody>
+      <tr>
+        <td><strong>De dónde salen los precios</strong></td>
+        <td>Solo de los <b>ingresos</b> cargados en Ingresos/Egresos, que es la única compra real. El retorno de una reparación no lleva precio: no es una compra.</td>
+      </tr>
+      <tr>
+        <td><strong>Moneda e IVA</strong></td>
+        <td>Pesos, con IVA <b>ya incluido</b> en el precio que se carga. El sistema no calcula ni separa el IVA.</td>
+      </tr>
+      <tr>
+        <td><strong>Ventana de corrección</strong></td>
+        <td>{{ edit_minutes }} minutos desde que se cargó el precio. Pasado ese plazo no se corrige, ni desde la pantalla ni por POST directo.</td>
+      </tr>
+      <tr>
+        <td><strong>Promedio del ítem</strong></td>
+        <td><b>Simple</b>: cada compra pesa igual, sin importar la cantidad. El ponderado por cantidad se muestra al lado, en Valorización.</td>
+      </tr>
+      <tr>
+        <td><strong>Quién ve y quién edita</strong></td>
+        <td>Ven ADMIN, SUPERVISOR y LECTOR. Cargan y corrigen ADMIN y SUPERVISOR. El TÉCNICO no ve precios en ninguna pantalla.</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+{% endblock %}

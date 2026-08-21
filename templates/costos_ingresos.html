@@ -1,0 +1,199 @@
+{% extends "base.html" %}
+{% from "_pagination.html" import pagination %}
+{% block title %}Costos · Ingresos · TNGStocks{% endblock %}
+{% block page_title %}Costos — Registro de ingresos{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <h2>Registro de ingresos</h2>
+    <p>
+      Cada línea de compra cargada desde Ingresos/Egresos, con su precio. Es la
+      única fuente de precios del sistema: de acá salen el promedio de cada ítem
+      y la valorización del stock. Precios en pesos, con IVA incluido.
+    </p>
+  </div>
+  <a href="{{ url_for('costos_valorizacion') }}" class="btn btn-secondary">Ver valorización</a>
+</div>
+
+<details class="filters-collapse">
+<summary class="filters-toggle">
+  <span class="nav-icon">&#9776;</span> Filtros
+  <span class="filters-caret">&#9662;</span>
+</summary>
+<div class="card">
+  <form method="get" class="filters-grid">
+    <div class="field">
+      <label>Desde</label>
+      <input type="date" name="from_date" value="{{ from_date }}">
+    </div>
+    <div class="field">
+      <label>Hasta</label>
+      <input type="date" name="to_date" value="{{ to_date }}">
+    </div>
+    <div class="field">
+      <label>Ítem</label>
+      <select name="item_id" class="js-buscar">
+        <option value="">Todos</option>
+        {% for it in items %}
+          <option value="{{ it.id }}" {% if item_filter and (item_filter|string) == (it.id|string) %}selected{% endif %}>{{ it.code }} - {{ it.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label>Proveedor</label>
+      <select name="supplier_id">
+        <option value="">Todos</option>
+        {% for s in suppliers %}
+          <option value="{{ s.id }}" {% if supplier_filter and (supplier_filter|string) == (s.id|string) %}selected{% endif %}>{{ s.contact_name }}{% if s.business_name %} — {{ s.business_name }}{% endif %}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field-actions">
+      <button type="submit" class="btn btn-primary">Aplicar filtros</button>
+      <a href="{{ url_for('costos_ingresos') }}" class="btn btn-secondary">Limpiar</a>
+    </div>
+  </form>
+</div>
+</details>
+
+<div class="card">
+  <strong>Total con estos filtros:</strong> {{ fmt_money(total_cents) }}
+</div>
+
+<div class="table-card">
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Fecha</th>
+          <th>Proveedor</th>
+          <th>Ítem</th>
+          <th class="num">Cantidad</th>
+          <th class="num">Total</th>
+          <th class="num">Precio unit.</th>
+          <th>Remito</th>
+          <th>Cargó</th>
+          <th>Editado</th>
+          {% if can_edit %}<th>Acciones</th>{% endif %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in prices %}
+        {% set m = p.movement %}
+        {% set r = remito_map.get(p.movement_id) %}
+        <tr>
+          <td>{{ p.created_at.strftime("%Y-%m-%d %H:%M") if p.created_at else "—" }}</td>
+          <td>{{ m.supplier.contact_name if m and m.supplier else "—" }}</td>
+          <td>{{ p.item.code }} — {{ p.item.name }}</td>
+          <td class="num">{{ fmt_qty(p.qty, p.item) }}</td>
+          <td class="num">{{ fmt_money(p.total_cents) }}</td>
+          <td class="num">{{ fmt_money(p.unit_price_cents) }}</td>
+          <td>{% if r %}<a href="{{ url_for('remito_detail', remito_id=r.id) }}">{{ r.number }}</a>{% else %}—{% endif %}</td>
+          <td>{{ p.created_by.full_name or p.created_by.username if p.created_by else "—" }}</td>
+          <td>
+            {% if p.edits %}
+              <button type="button" class="btn btn-secondary btn-sm" onclick="openModal('modal-hist-{{ p.id }}')">
+                {{ p.edits|length }} corrección{{ 'es' if p.edits|length > 1 else '' }}
+              </button>
+            {% else %}—{% endif %}
+          </td>
+          {% if can_edit %}
+          <td class="actions-cell">
+            {% if cost_price_edit_open(p) %}
+              <button type="button" class="btn btn-secondary btn-sm" onclick="openModal('modal-precio-{{ p.id }}')">Editar precio</button>
+            {% else %}
+              <span class="muted" title="Pasaron más de {{ edit_minutes }} minutos desde la carga">—</span>
+            {% endif %}
+          </td>
+          {% endif %}
+        </tr>
+        {% else %}
+        <tr><td colspan="{{ 10 if can_edit else 9 }}" class="muted">Sin ingresos con precio para esos filtros.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {{ pagination(page_obj, "ingreso", "ingresos") }}
+</div>
+
+{# --- Modales de corrección de precio (solo los que están en ventana) --- #}
+{% if can_edit %}
+{% for p in prices %}
+{% if cost_price_edit_open(p) %}
+<div class="modal-overlay" id="modal-precio-{{ p.id }}">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">Corregir precio</span>
+      <button type="button" class="modal-close" onclick="closeModal('modal-precio-{{ p.id }}')">&times;</button>
+    </div>
+    <form method="post" action="{{ url_for('costos_precio_editar', price_id=p.id, **request.args) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <div class="modal-body">
+        <p>
+          <strong>{{ p.item.code }} — {{ p.item.name }}</strong><br>
+          <span class="muted">
+            {{ fmt_qty(p.qty, p.item) }} · {{ p.movement.supplier.contact_name if p.movement and p.movement.supplier else "—" }}
+            · {{ p.created_at.strftime("%d/%m/%Y %H:%M") if p.created_at else "" }}
+          </span>
+        </p>
+        <p>Total actual: <strong>{{ fmt_money(p.total_cents) }}</strong> · Precio unitario: <strong>{{ fmt_money(p.unit_price_cents) }}</strong></p>
+        <div class="field">
+          <label>Precio total nuevo</label>
+          <input type="text" name="line_total" inputmode="decimal" required
+                 value="{{ fmt_money(p.total_cents, false) }}" autocomplete="off">
+          <small class="muted">El total de la línea, como figura en el remito. El unitario lo recalcula el sistema.</small>
+        </div>
+        <p class="muted">
+          Esto <b>no</b> mueve stock ni cambia el movimiento ni el remito: corrige
+          solo el precio. Queda registrado quién lo cambió, cuándo y de cuánto a
+          cuánto, y el promedio del ítem se recalcula solo.
+        </p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-precio-{{ p.id }}')">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Confirmar corrección</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endif %}
+{% endfor %}
+{% endif %}
+
+{# --- Modales de historial de correcciones --- #}
+{% for p in prices %}
+{% if p.edits %}
+<div class="modal-overlay" id="modal-hist-{{ p.id }}">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">Correcciones de precio</span>
+      <button type="button" class="modal-close" onclick="closeModal('modal-hist-{{ p.id }}')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <p><strong>{{ p.item.code }} — {{ p.item.name }}</strong></p>
+      <table class="data-table">
+        <thead><tr><th>Cuándo</th><th>Quién</th><th class="num">De</th><th class="num">A</th><th class="num">Unitario</th></tr></thead>
+        <tbody>
+          {% for e in p.edits %}
+          <tr>
+            <td>{{ e.edited_at.strftime("%d/%m/%Y %H:%M") if e.edited_at else "—" }}</td>
+            <td>{{ e.edited_by.full_name or e.edited_by.username if e.edited_by else "—" }}</td>
+            {# Las correcciones anteriores a la carga por total no tienen los
+               totales guardados: para esas se muestra el unitario, que es lo
+               que efectivamente se corrigió entonces. #}
+            <td class="num">{{ fmt_money(e.old_total_cents if e.old_total_cents is not none else e.old_unit_price_cents) }}</td>
+            <td class="num">{{ fmt_money(e.new_total_cents if e.new_total_cents is not none else e.new_unit_price_cents) }}</td>
+            <td class="num">{{ fmt_money(e.old_unit_price_cents) }} → {{ fmt_money(e.new_unit_price_cents) }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn btn-secondary" onclick="closeModal('modal-hist-{{ p.id }}')">Cerrar</button>
+    </div>
+  </div>
+</div>
+{% endif %}
+{% endfor %}
+{% endblock %}
