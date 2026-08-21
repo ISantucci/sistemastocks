@@ -36,7 +36,11 @@
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="location_id" value="{{ location.id }}">
     <input type="hidden" name="action" value="preview">
-    <p class="muted">Escribí lo que contaste físicamente. Si dejás un campo vacío, ese ítem no se toca.</p>
+    <p class="muted">
+      Escribí lo que contaste físicamente. Si dejás un campo <b>vacío</b>, ese ítem no se toca.
+      Solo se aceptan números enteros de 0 en adelante: si escribís otra cosa (una letra, un
+      número negativo o con coma) el conteo no se aplica y te avisa cuál corregir.
+    </p>
     <div class="table-scroll" style="max-height:55vh;">
       <table class="data-table">
         <thead>
@@ -47,7 +51,8 @@
           <tr>
             <td>{{ item.code }} — {{ item.name }}</td>
             <td class="num">{{ fmt_qty(stock.quantity, item) }}</td>
-            <td class="num"><input type="number" name="contado_{{ item.id }}" min="0" placeholder="{{ stock.quantity }}" style="width:90px;"></td>
+            <td class="num"><input type="number" name="contado_{{ item.id }}" min="0" step="1" inputmode="numeric"
+                   placeholder="{{ stock.quantity }}" style="width:90px;"></td>
           </tr>
           {% else %}
           <tr><td colspan="3" class="muted">Esta ubicación no tiene stock cargado.</td></tr>

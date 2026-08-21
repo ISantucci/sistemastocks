@@ -12,6 +12,9 @@
      data-confirm-danger   -> marca la acción como irreversible (aviso + botón rojo)
      data-confirm-context  -> texto fijo de contexto (útil en forms por fila)
      data-confirm-row      -> en el contenedor de una fila repetible (name="campo[]")
+     data-confirm-row-title-> título de esa fila en el resumen. Sirve cuando lo que
+                              identifica a la fila no es un campo del formulario
+                              (ej. el repuesto en el cierre de una solicitud).
      data-confirm-skip     -> en un campo que no debe aparecer en el resumen
 
    El resumen se arma leyendo el propio formulario, así ningún campo queda
@@ -94,7 +97,12 @@
       var itemSel = rowEl.querySelector('select[name^="item_id"]');
       if (itemSel && !itemSel.value) return;
       var fields = collectFields(rowEl, {});
-      if (fields.length) rows.push(fields);
+      if (fields.length) {
+        rows.push({
+          title: (rowEl.getAttribute("data-confirm-row-title") || "").trim(),
+          fields: fields,
+        });
+      }
     });
     return rows;
   }
@@ -177,7 +185,17 @@
       var title = el("p", "muted", rows.length === 1 ? "1 ítem" : rows.length + " ítems");
       title.style.margin = "4px 0 0";
       body.appendChild(title);
-      rows.forEach(function (fields) { body.appendChild(buildTable(fields)); });
+      rows.forEach(function (row) {
+        /* El título identifica la fila cuando el dato no es un campo del form
+           (por ejemplo el repuesto en el cierre de una solicitud). */
+        if (row.title) {
+          var head = el("p", null, row.title);
+          head.style.margin = "8px 0 2px";
+          head.style.fontWeight = "600";
+          body.appendChild(head);
+        }
+        body.appendChild(buildTable(row.fields));
+      });
     }
 
     if (!general.length && !rows.length) {
