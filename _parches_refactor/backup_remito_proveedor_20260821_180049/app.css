@@ -603,20 +603,12 @@ input, select, textarea{ box-sizing: border-box; }
 @media print{
   .sidebar, .sidebar-overlay, .topbar, .no-print, .flash-stack{ display:none !important; }
   .app-shell, .app-main{ display:block !important; margin:0 !important; }
-  /* Sin este reset, el min-height:100vh del layout suma una hoja en blanco extra. */
-  html, body{ height:auto !important; min-height:0 !important; }
-  .app-shell, .app-main, .content, .embed-content{
-    height:auto !important; min-height:0 !important; overflow:visible !important;
-  }
   .content, .embed-content{ padding:0 !important; }
   a{ color:#000 !important; text-decoration:none !important; }
   .rem-sheet{ border:2px solid #000 !important; max-width:100%; margin:0; }
   /* margin:0 en @page evita que el navegador imprima URL / número de página */
   @page{ margin:0; }
   body{ padding:10mm; }
-  /* La hoja es el ultimo bloque: no debe dejar espacio que empuje otra pagina. */
-  .rem-sheet{ page-break-after:avoid; break-after:avoid; }
-  .rem-sheet > :last-child{ margin-bottom:0 !important; }
 }
 
 /* ---------- Paginación de listados (macro templates/_pagination.html) ----------

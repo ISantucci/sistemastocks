@@ -742,17 +742,6 @@ class Supplier(db.Model):
     created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
 
 
-def supplier_doc_name(s):
-    """Nombre del proveedor para documentos (remitos).
-
-    Se usa el nombre del comercio. Los fallbacks son solo para proveedores
-    viejos cargados antes de que el comercio fuera obligatorio.
-    """
-    if not s:
-        return ""
-    return ((s.business_name or "") or (s.legal_name or "") or (s.contact_name or "")).strip()
-
-
 class LocationResponsible(db.Model):
     __tablename__ = "location_responsibles"
     id = db.Column(db.Integer, primary_key=True)
@@ -6666,7 +6655,7 @@ def _repair_transfer_with_remito(item_id, qty, from_id, to_id, supplier, observa
     # (el detalle de la reparación va en la observación del MOVIMIENTO).
     tipo_label = "Egreso" if to_ext else "Ingreso"
     ry, rseq, rnumber = next_remito_number()
-    r_concept = f"{tipo_label} por reparación — Proveedor: {supplier_doc_name(supplier)}"
+    r_concept = f"{tipo_label} por reparación — Proveedor: {supplier.contact_name}"
     rem = Remito(
         year=ry, seq=rseq, number=rnumber,
         status="CONFIRMADO", print_pending=True,
@@ -8598,13 +8587,9 @@ def suppliers():
         if not contact_name:
             flash("El nombre del contacto es obligatorio.", "error")
             return redirect(url_for("suppliers"))
-        business_name = request.form.get("business_name", "").strip()
-        if not business_name:
-            flash("El nombre del comercio es obligatorio.", "error")
-            return redirect(url_for("suppliers"))
         s = Supplier(
             contact_name=contact_name,
-            business_name=business_name,
+            business_name=request.form.get("business_name", "").strip() or None,
             cuit=request.form.get("cuit", "").strip() or None,
             legal_name=request.form.get("legal_name", "").strip() or None,
             email=request.form.get("email", "").strip() or None,
@@ -8634,12 +8619,8 @@ def supplier_edit(supplier_id):
     if not contact_name:
         flash("El nombre del contacto es obligatorio.", "error")
         return redirect(url_for("suppliers"))
-    business_name = request.form.get("business_name", "").strip()
-    if not business_name:
-        flash("El nombre del comercio es obligatorio.", "error")
-        return redirect(url_for("suppliers"))
     s.contact_name = contact_name
-    s.business_name = business_name
+    s.business_name = request.form.get("business_name", "").strip() or None
     s.cuit = request.form.get("cuit", "").strip() or None
     s.legal_name = request.form.get("legal_name", "").strip() or None
     s.email = request.form.get("email", "").strip() or None
@@ -8844,9 +8825,9 @@ def in_out():
             # sistema (para qué se emite el remito) y la observación es solo lo
             # que escribió la persona.
             if tipo == "INGRESO":
-                r_concept = f"Ingreso de mercadería — Proveedor: {supplier_doc_name(supplier)}"
+                r_concept = f"Ingreso de mercadería — Proveedor: {supplier.contact_name}"
             else:
-                r_concept = f"Egreso — {motivo_label} — Proveedor: {supplier_doc_name(supplier)}"
+                r_concept = f"Egreso — {motivo_label} — Proveedor: {supplier.contact_name}"
             r = Remito(
                 year=ry, seq=rseq, number=rnumber,
                 status="CONFIRMADO", print_pending=True,
