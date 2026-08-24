@@ -33,35 +33,103 @@
 {% endif %}
 
 {% if can_edit_items and it.serialized %}
+<style>
+  .bulk-seg{display:inline-flex;background:var(--surface-2);border:1px solid var(--border);
+    border-radius:var(--radius,8px);padding:3px;gap:3px;margin-bottom:14px;}
+  .bulk-seg button{border:0;background:transparent;font:inherit;font-size:13px;font-weight:500;
+    color:var(--text-muted);padding:7px 14px;border-radius:6px;cursor:pointer;}
+  .bulk-seg button.on{background:var(--surface);color:var(--text);box-shadow:var(--shadow-sm);}
+  #bulk-reader{max-width:420px;margin-bottom:10px;}
+  .bulk-list{border:1px solid var(--border);border-radius:var(--radius,8px);overflow:hidden;margin-top:8px;}
+  .bulk-row{display:flex;align-items:center;gap:10px;padding:7px 12px;border-bottom:1px solid var(--border);
+    font-size:13px;flex-wrap:wrap;}
+  .bulk-row:last-child{border-bottom:0;}
+  .bulk-row.bad{background:var(--danger-soft);}
+  .bulk-row.dup{background:var(--warn-soft);}
+  .bulk-n{width:20px;text-align:right;color:var(--text-faint);font-size:11px;}
+  .bulk-sn{flex:1;font-weight:600;word-break:break-all;font-family:ui-monospace,Menlo,monospace;}
+  .bulk-why{flex-basis:100%;margin-left:30px;font-size:11px;color:var(--text-muted);}
+  .bulk-empty{padding:18px;text-align:center;color:var(--text-faint);font-size:13px;}
+  .bulk-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;
+    margin-top:14px;flex-wrap:wrap;}
+</style>
+
 <div class="card" style="margin-bottom:18px;">
-  <div class="card-header"><span class="card-title">Registrar serial de stock existente</span></div>
-  <form method="post" action="{{ url_for('item_unit_new', item_id=it.id) }}">
+  <div class="card-header">
+    <span class="card-title">Cargar seriales</span>
+    <span class="muted" id="bulk-count"></span>
+  </div>
+
+  <form method="post" action="{{ url_for('item_unit_bulk', item_id=it.id) }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     {% if embed %}<input type="hidden" name="embed" value="1">{% endif %}
+    {% if focus_loc %}<input type="hidden" name="loc" value="{{ focus_loc.id }}">{% endif %}
+
+    {#- Si la ficha se abrio desde Stock parado en una ubicacion (?loc=), esa
+        ubicacion ya viene elegida: el contexto lo dio el usuario y no hay que
+        volver a preguntarlo. Solo se preselecciona si ademas tiene cupo; si no
+        lo tiene, la opcion esta deshabilitada y queda el placeholder, para que
+        el navegador no elija otra ubicacion por su cuenta. #}
+    {%- set ns = namespace(pre=0) %}
+    {%- for r in loc_rooms %}
+      {%- if focus_loc and r.loc.id == focus_loc.id and r.room > 0 %}{% set ns.pre = r.loc.id %}{% endif %}
+    {%- endfor %}
+
     <div class="form-grid">
       <div class="field">
-        <label>Número de serie</label>
-        <input name="serial" maxlength="120" required placeholder="Ej: AH04790PAJ00037">
-      </div>
-      <div class="field">
-        <label>Ubicación (donde está físicamente)</label>
-        <select name="location_id" required>
-          <option value="" selected disabled>Elegí ubicación...</option>
+        <label>Ubicación (donde están físicamente)</label>
+        <select name="location_id" id="bulk-loc" required>
+          <option value="" {% if not ns.pre %}selected{% endif %} disabled>Elegí ubicación...</option>
           {% for r in loc_rooms %}
-            <option value="{{ r.loc.id }}" {% if r.room <= 0 %}disabled{% endif %}>
+            <option value="{{ r.loc.id }}" {% if ns.pre == r.loc.id %}selected{% endif %} {% if r.room <= 0 %}disabled{% endif %}>
               {{ r.loc.name }} — cupo {{ r.room }} (stock {{ r.qty }}, con serial {{ r.labeled }})
             </option>
           {% endfor %}
         </select>
-        <div class="muted" style="margin-top:4px;">Solo podés etiquetar hasta la cantidad que ya tenés en stock ahí.</div>
       </div>
       <div class="field">
-        <label>Notas (opcional)</label>
-        <input name="notes" maxlength="255" placeholder="Ej: caja roja / lote 2025-07">
+        <label>Notas para toda la tanda (opcional)</label>
+        <input name="notes" maxlength="255" placeholder="Ej: remito 0001-00012345 / lote 2025-06">
       </div>
     </div>
-    <div style="margin-top:12px;">
-      <button type="submit" class="btn btn-primary">Registrar serial</button>
+
+    <div class="bulk-seg" style="margin-top:12px;">
+      <button type="button" data-bulk-tab="cam" class="on">Escanear con cámara</button>
+      <button type="button" data-bulk-tab="txt">Escribir / pegar</button>
+    </div>
+
+    <div id="bulk-mode-cam">
+      <div id="bulk-reader" style="display:none;"></div>
+      <button type="button" class="btn btn-secondary btn-sm" id="bulk-cam-toggle">Encender cámara</button>
+      <div class="muted" id="bulk-cam-msg" style="display:none;margin-top:6px;"></div>
+      <div class="muted" style="margin-top:6px;">
+        Encuadrá <b>solo el código de abajo del S/N</b>. Cada lectura suena y se agrega a la lista;
+        si escaneás dos veces la misma etiqueta, se ignora.
+      </div>
+    </div>
+
+    <div id="bulk-mode-txt" style="display:none;">
+      <div class="field">
+        <label>Un serial por línea</label>
+        <textarea id="bulk-textarea" rows="5" placeholder="BE1052CPAJ064E1&#10;BE1052CPAJ064E2"></textarea>
+      </div>
+      <button type="button" class="btn btn-secondary btn-sm" id="bulk-add-text">Agregar a la lista</button>
+      <div class="muted" style="margin-top:6px;">
+        También sirve con una pistola lectora Bluetooth: escanea y tipea sola. Ctrl+Enter agrega.
+      </div>
+    </div>
+
+    <div class="bulk-list" id="bulk-list"></div>
+    <textarea name="serials" id="bulk-serials" style="display:none;"></textarea>
+
+    <div class="flash-error" id="bulk-warn" style="display:none;margin-top:12px;"></div>
+
+    <div class="bulk-foot">
+      <label class="muted" style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
+        <input type="checkbox" name="force_format" id="bulk-force" style="width:auto;">
+        Cargar igual (desactiva el filtro que descarta EAN y part number)
+      </label>
+      <button type="submit" class="btn btn-primary" id="bulk-save" disabled>Guardar 0 seriales</button>
     </div>
   </form>
 </div>
@@ -132,4 +200,20 @@
     if (el) el.style.display = (el.style.display === "none" || !el.style.display) ? "block" : "none";
   }
 </script>
+{% endblock %}
+
+{% block extra_scripts %}
+{%- if can_edit_items and it.serialized %}
+{#- El lector de codigos se carga SOLO en esta pantalla: es la unica que escanea,
+    y no tiene sentido pagar ~300 KB en todas las demas. #}
+{%- set _qr = vendor_asset('html5-qrcode') %}
+<script src="{{ _qr.url }}"{% if _qr.integrity %} integrity="{{ _qr.integrity }}"{% endif %}{% if not _qr.is_local %} crossorigin="anonymous" referrerpolicy="no-referrer"{% endif %}></script>
+<script src="{{ url_for('static', filename='js/serial_scan.js') }}"></script>
+<script>
+  initSerialScan({
+    rooms: { {% for r in loc_rooms %}"{{ r.loc.id }}": {{ r.room }}{% if not loop.last %}, {% endif %}{% endfor %} },
+    existing: {{ units | map(attribute='serial') | map('lower') | list | tojson }}
+  });
+</script>
+{%- endif %}
 {% endblock %}
