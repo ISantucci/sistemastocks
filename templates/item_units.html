@@ -101,6 +101,12 @@
     <div id="bulk-mode-cam">
       <div id="bulk-reader" style="display:none;"></div>
       <button type="button" class="btn btn-secondary btn-sm" id="bulk-cam-toggle">Encender cámara</button>
+      {%- if embed %}
+      {#- En el popup el visor queda chico, y en un telefono no hay lugar para
+          apuntar. target="_top" saca la ficha del iframe y la abre entera. #}
+      <a class="btn btn-secondary btn-sm" target="_top"
+         href="{{ url_for('item_units', item_id=it.id, loc=focus_loc.id if focus_loc else none) }}">Abrir en pantalla completa</a>
+      {%- endif %}
       <div class="muted" id="bulk-cam-msg" style="display:none;margin-top:6px;"></div>
       <div class="muted" style="margin-top:6px;">
         Encuadrá <b>solo el código de abajo del S/N</b>. Cada lectura suena y se agrega a la lista;
