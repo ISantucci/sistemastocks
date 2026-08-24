@@ -1,0 +1,107 @@
+# Parche 0012: una sola card de carga de seriales
+#
+# - Se elimina la card "Registrar serial de stock existente" (carga de a uno).
+#   La card de carga masiva ya cubre ese caso: se escribe uno solo y se guarda.
+# - "Cargar seriales (tanda)" pasa a llamarse "Cargar seriales".
+# - Como ahora es el UNICO camino de carga, el boton Guardar ya no queda
+#   apagado mientras hay texto tipeado sin volcar a la lista, y el envio
+#   vuelca ese texto solo (antes se podia perder).
+#
+# La ruta POST /items/<id>/units/new sigue existiendo en app.py: funciona y
+# esta testeada, pero ya no la referencia ningun template. Se deja como red de
+# seguridad; sacarla es una decision aparte.
+#
+# NO toca la base de datos.
+#
+--- a/templates/item_units.html
++++ b/templates/item_units.html
+@@ -56,7 +56,7 @@
+ 
+ <div class="card" style="margin-bottom:18px;">
+   <div class="card-header">
+-    <span class="card-title">Cargar seriales (tanda)</span>
++    <span class="card-title">Cargar seriales</span>
+     <span class="muted" id="bulk-count"></span>
+   </div>
+ 
+@@ -122,39 +122,6 @@
+     </div>
+   </form>
+ </div>
+-
+-<div class="card" style="margin-bottom:18px;">
+-  <div class="card-header"><span class="card-title">Registrar serial de stock existente</span></div>
+-  <form method="post" action="{{ url_for('item_unit_new', item_id=it.id) }}">
+-    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+-    {% if embed %}<input type="hidden" name="embed" value="1">{% endif %}
+-    <div class="form-grid">
+-      <div class="field">
+-        <label>Número de serie</label>
+-        <input name="serial" maxlength="120" required placeholder="Ej: AH04790PAJ00037">
+-      </div>
+-      <div class="field">
+-        <label>Ubicación (donde está físicamente)</label>
+-        <select name="location_id" required>
+-          <option value="" selected disabled>Elegí ubicación...</option>
+-          {% for r in loc_rooms %}
+-            <option value="{{ r.loc.id }}" {% if r.room <= 0 %}disabled{% endif %}>
+-              {{ r.loc.name }} — cupo {{ r.room }} (stock {{ r.qty }}, con serial {{ r.labeled }})
+-            </option>
+-          {% endfor %}
+-        </select>
+-        <div class="muted" style="margin-top:4px;">Solo podés etiquetar hasta la cantidad que ya tenés en stock ahí.</div>
+-      </div>
+-      <div class="field">
+-        <label>Notas (opcional)</label>
+-        <input name="notes" maxlength="255" placeholder="Ej: caja roja / lote 2025-07">
+-      </div>
+-    </div>
+-    <div style="margin-top:12px;">
+-      <button type="submit" class="btn btn-primary">Registrar serial</button>
+-    </div>
+-  </form>
+-</div>
+ {% endif %}
+ 
+ {% set shown = en_stock if not focus_loc else (en_stock | selectattr('location_id', 'equalto', focus_loc.id) | list) %}
+--- a/static/js/serial_scan.js
++++ b/static/js/serial_scan.js
+@@ -169,9 +169,16 @@
+         warnEl.style.display = "none";
+       }
+     }
++    // Texto tipeado que todavia no se volco a la lista. Como este formulario es
++    // el UNICO camino para cargar seriales, el boton no puede quedar apagado
++    // mientras hay algo escrito: se volcaria a la nada al enviar.
++    var pend = (taEl && taEl.value.trim()) ? true : false;
++
+     if (saveEl) {
+-      saveEl.disabled = (ok === 0 || mal > 0 || over);
+-      saveEl.textContent = "Guardar " + ok + (ok === 1 ? " serial" : " seriales");
++      saveEl.disabled = pend ? false : (ok === 0 || mal > 0 || over);
++      saveEl.textContent = pend
++        ? "Agregar y guardar"
++        : "Guardar " + ok + (ok === 1 ? " serial" : " seriales");
+     }
+   }
+ 
+@@ -244,6 +251,19 @@
+     taEl.addEventListener("keydown", function (e) {
+       if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); addFromText(); }
+     });
++    taEl.addEventListener("input", render);
++  }
++
++  // Red de seguridad: si alguien escribe y va derecho a Guardar sin apretar
++  // "Agregar a la lista", se vuelca solo. Si lo volcado resulta invalido, se
++  // frena el envio y el motivo queda visible en la lista.
++  if (hidden.form) {
++    hidden.form.addEventListener("submit", function (e) {
++      if (taEl && taEl.value.trim()) {
++        addFromText();
++        if (saveEl && saveEl.disabled) e.preventDefault();
++      }
++    });
+   }
+   if (locEl) locEl.addEventListener("change", render);
+   if (forceEl) {

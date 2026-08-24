@@ -1,0 +1,129 @@
+# Parche 0013: la ficha de seriales conserva el contexto de Stock
+#
+# Al abrir «Seriales» desde /stock, la ficha ya llegaba filtrada por ubicacion
+# (?loc=) pero el formulario de carga la volvia a pedir. Ahora:
+#
+# - la ubicacion viene preseleccionada (solo si tiene cupo; si no, queda el
+#   placeholder para que el navegador no elija otra por su cuenta)
+# - al guardar, el redirect conserva ?loc= y ?embed=, asi la tanda siguiente
+#   arranca en el mismo contexto
+#
+# _units_redirect es compartido con new/edit/delete: esos formularios no mandan
+# 'loc', asi que su comportamiento no cambia (hay test que lo fija).
+#
+# NO toca la base de datos.
+#
+--- a/app.py
++++ b/app.py
+@@ -3542,10 +3542,22 @@
+ 
+ 
+ def _units_redirect(item_id: int):
+-    """Redirige a la ficha de seriales, preservando el modo embed (popup)."""
++    """Redirige a la ficha de seriales, preservando el contexto de donde vino.
++
++    - embed=1: la ficha se abrio como popup (openDetail).
++    - loc=<id>: se abrio desde Stock parado en una ubicacion. Sin esto, al
++      guardar se perdia el filtro y la ubicacion preseleccionada, y habia que
++      volver a elegirla para la tanda siguiente.
++
++    Los formularios que no mandan esos campos se comportan igual que antes.
++    """
++    kwargs = {"item_id": item_id}
+     if request.values.get("embed") == "1":
+-        return redirect(url_for("item_units", item_id=item_id, embed="1"))
+-    return redirect(url_for("item_units", item_id=item_id))
++        kwargs["embed"] = "1"
++    loc_raw = (request.values.get("loc") or "").strip()
++    if loc_raw.isdigit():
++        kwargs["loc"] = loc_raw
++    return redirect(url_for("item_units", **kwargs))
+ 
+ 
+ def _units_context(it: "Item"):
+--- a/templates/item_units.html
++++ b/templates/item_units.html
+@@ -63,14 +63,25 @@
+   <form method="post" action="{{ url_for('item_unit_bulk', item_id=it.id) }}">
+     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+     {% if embed %}<input type="hidden" name="embed" value="1">{% endif %}
++    {% if focus_loc %}<input type="hidden" name="loc" value="{{ focus_loc.id }}">{% endif %}
++
++    {#- Si la ficha se abrio desde Stock parado en una ubicacion (?loc=), esa
++        ubicacion ya viene elegida: el contexto lo dio el usuario y no hay que
++        volver a preguntarlo. Solo se preselecciona si ademas tiene cupo; si no
++        lo tiene, la opcion esta deshabilitada y queda el placeholder, para que
++        el navegador no elija otra ubicacion por su cuenta. #}
++    {%- set ns = namespace(pre=0) %}
++    {%- for r in loc_rooms %}
++      {%- if focus_loc and r.loc.id == focus_loc.id and r.room > 0 %}{% set ns.pre = r.loc.id %}{% endif %}
++    {%- endfor %}
+ 
+     <div class="form-grid">
+       <div class="field">
+         <label>Ubicación (donde están físicamente)</label>
+         <select name="location_id" id="bulk-loc" required>
+-          <option value="" selected disabled>Elegí ubicación...</option>
++          <option value="" {% if not ns.pre %}selected{% endif %} disabled>Elegí ubicación...</option>
+           {% for r in loc_rooms %}
+-            <option value="{{ r.loc.id }}" {% if r.room <= 0 %}disabled{% endif %}>
++            <option value="{{ r.loc.id }}" {% if ns.pre == r.loc.id %}selected{% endif %} {% if r.room <= 0 %}disabled{% endif %}>
+               {{ r.loc.name }} — cupo {{ r.room }} (stock {{ r.qty }}, con serial {{ r.labeled }})
+             </option>
+           {% endfor %}
+--- a/tests/test_item_units_bulk.py
++++ b/tests/test_item_units_bulk.py
+@@ -276,3 +276,53 @@
+         assert serials(A, it.id) == []
+     finally:
+         A.app.config["WTF_CSRF_ENABLED"] = False
++
++
++# ------------------------------------------------------------ contexto desde Stock
++
++
++def test_abriendo_desde_stock_la_ubicacion_viene_elegida(setup):
++    """/stock manda ?loc=<id>: el form no tiene que volver a preguntarla."""
++    A, c, it, jaula, _ = setup
++    h = c.get(f"/items/{it.id}/units?loc={jaula.id}").get_data(as_text=True)
++    assert f'value="{jaula.id}" selected' in h
++    assert '<option value="" selected disabled>' not in h
++
++
++def test_sin_loc_no_preselecciona_nada(setup):
++    A, c, it, jaula, _ = setup
++    h = c.get(f"/items/{it.id}/units").get_data(as_text=True)
++    assert '<option value="" selected disabled>' in h
++
++
++def test_ubicacion_sin_cupo_no_se_preselecciona(setup):
++    """Si no hay lugar, queda el placeholder: el navegador no debe elegir otra."""
++    A, c, it, jaula, _ = setup
++    st = A.Stock.query.filter_by(item_id=it.id, location_id=jaula.id).first()
++    st.quantity = 0
++    A.db.session.commit()
++
++    h = c.get(f"/items/{it.id}/units?loc={jaula.id}").get_data(as_text=True)
++    assert f'value="{jaula.id}" selected' not in h
++    assert '<option value="" selected disabled>' in h
++
++
++def test_al_guardar_no_se_pierde_el_contexto(setup):
++    """Tras cargar una tanda desde Stock, la vuelta conserva ?loc= (y ?embed=)."""
++    A, c, it, jaula, _ = setup
++    r = c.post(f"/items/{it.id}/units/bulk",
++               data={"location_id": jaula.id, "serials": "BE1052CPAJ064E1",
++                     "loc": jaula.id, "embed": "1"},
++               follow_redirects=False)
++    assert r.status_code == 302
++    assert f"loc={jaula.id}" in r.headers["Location"]
++    assert "embed=1" in r.headers["Location"]
++
++
++def test_la_vuelta_sigue_igual_sin_contexto(setup):
++    """Sin loc ni embed, el redirect es el de siempre (no cambia nada)."""
++    A, c, it, jaula, _ = setup
++    r = c.post(f"/items/{it.id}/units/bulk",
++               data={"location_id": jaula.id, "serials": "BE1052CPAJ064E1"},
++               follow_redirects=False)
++    assert r.headers["Location"].endswith(f"/items/{it.id}/units")

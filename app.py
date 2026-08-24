@@ -239,9 +239,14 @@ def _security_headers(resp):
     resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
     resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
     # Desactiva APIs del navegador que el sistema no usa.
+    # camera=(self): la ficha de seriales puede leer codigos de barra con la
+    # camara del telefono. 'self' habilita SOLO a documentos de este mismo
+    # origen (ningun iframe de terceros), y el navegador igual le sigue pidiendo
+    # permiso explicito al usuario la primera vez. Es el minimo necesario: con
+    # camera=() el navegador ni siquiera muestra el pedido de permiso.
     resp.headers.setdefault(
         "Permissions-Policy",
-        "geolocation=(), microphone=(), camera=(), payment=(), usb=(), "
+        "geolocation=(), microphone=(), camera=(self), payment=(), usb=(), "
         "magnetometer=(), gyroscope=(), interest-cohort=()",
     )
     resp.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
@@ -3537,10 +3542,22 @@ UNIT_VIEW_ROLES = ("ADMIN", "SUPERVISOR", "LECTOR")
 
 
 def _units_redirect(item_id: int):
-    """Redirige a la ficha de seriales, preservando el modo embed (popup)."""
+    """Redirige a la ficha de seriales, preservando el contexto de donde vino.
+
+    - embed=1: la ficha se abrio como popup (openDetail).
+    - loc=<id>: se abrio desde Stock parado en una ubicacion. Sin esto, al
+      guardar se perdia el filtro y la ubicacion preseleccionada, y habia que
+      volver a elegirla para la tanda siguiente.
+
+    Los formularios que no mandan esos campos se comportan igual que antes.
+    """
+    kwargs = {"item_id": item_id}
     if request.values.get("embed") == "1":
-        return redirect(url_for("item_units", item_id=item_id, embed="1"))
-    return redirect(url_for("item_units", item_id=item_id))
+        kwargs["embed"] = "1"
+    loc_raw = (request.values.get("loc") or "").strip()
+    if loc_raw.isdigit():
+        kwargs["loc"] = loc_raw
+    return redirect(url_for("item_units", **kwargs))
 
 
 def _units_context(it: "Item"):
@@ -3657,6 +3674,170 @@ def item_unit_new(item_id: int):
     except Exception as e:
         db.session.rollback()
         flash(f"No se pudo registrar el serial: {e}", "error")
+    return _units_redirect(it.id)
+
+
+# ---- CARGA EN TANDA (escaneo o pegado) ----
+# Tope de seriales por tanda. Es una cota defensiva, no una regla de negocio:
+# evita que un lector trabado o un pegado accidental intente crear miles de
+# filas en una sola transaccion. El cupo por ubicacion sigue siendo el limite
+# real y siempre es mas chico que esto en la practica.
+UNIT_BULK_MAX = 200
+
+
+def parse_serial_batch(raw):
+    """Parte el texto de una tanda en seriales limpios, conservando el orden.
+
+    Acepta salto de linea, coma, punto y coma y tabulacion como separador: un
+    lector de codigos emite Enter, y un pegado desde Excel puede traer comas o
+    tabulaciones. Recorta a 120 caracteres, igual que la columna.
+    """
+    txt = raw or ""
+    for sep in (",", ";", "\t"):
+        txt = txt.replace(sep, "\n")
+    out = []
+    for line in txt.splitlines():
+        s = line.strip()[:120]
+        if s:
+            out.append(s)
+    return out
+
+
+def serial_looks_wrong(serial):
+    """Heuristica anti-codigo-equivocado. Devuelve el motivo, o None si pasa.
+
+    La etiqueta de un equipo trae VARIOS codigos de barra pegados: el EAN de la
+    caja (identico en todas las unidades del modelo), el part number (tambien
+    identico) y recien despues el numero de serie. Escanear el que no es carga
+    como "serial" un dato que se repite en cada unidad, y eso ensucia la
+    trazabilidad sin que salte ningun error.
+
+    NO es una validacion de formato universal (no existe): es un filtro para los
+    dos casos concretos que aparecen en la practica. Por eso el formulario
+    permite forzar la carga, para el dia que entre una marca con serial
+    numerico.
+    """
+    if serial.isdigit():
+        return "es todo numeros (suele ser el EAN de la caja, no el serial)"
+    if "." in serial:
+        return "tiene puntos (suele ser el part number, no el serial)"
+    if len(serial) < 6:
+        return "es demasiado corto para ser un numero de serie"
+    return None
+
+
+@app.route("/items/<int:item_id>/units/bulk", methods=["POST"])
+@login_required
+@role_required(*ITEM_EDIT_ROLES)
+def item_unit_bulk(item_id: int):
+    """Registra VARIOS seriales de stock EXISTENTE en una ubicacion, de una vez.
+
+    Es la version en tanda de item_unit_new y respeta exactamente sus mismas
+    reglas: no mueve stock, la ubicacion tiene que ser interna, el serial es
+    unico dentro del item (case-insensitive) y no se pueden etiquetar mas
+    unidades que la cantidad en stock de esa ubicacion.
+
+    Diferencia deliberada: es TODO O NADA. Si una sola linea falla no se guarda
+    ninguna. Cargar 19 de 20 y no saber cual falto es peor que no cargar nada,
+    porque obliga a comparar a mano contra las cajas, que para entonces ya se
+    tiraron.
+    """
+    it = Item.query.get_or_404(item_id)
+    if not it.serialized:
+        flash("Ese ítem no es serializado. Activá 'Serializado' en la ficha del ítem.", "error")
+        return _units_redirect(it.id)
+
+    location_id_raw = (request.form.get("location_id") or "").strip()
+    if not location_id_raw.isdigit():
+        flash("Elegí una ubicación para registrar los seriales.", "error")
+        return _units_redirect(it.id)
+    location_id = int(location_id_raw)
+
+    loc = Location.query.get(location_id)
+    if not loc or loc.is_external:
+        flash("Ubicación inválida para registrar un serial.", "error")
+        return _units_redirect(it.id)
+
+    serials = parse_serial_batch(request.form.get("serials"))
+    if not serials:
+        flash("No cargaste ningún serial en la tanda.", "error")
+        return _units_redirect(it.id)
+    if len(serials) > UNIT_BULK_MAX:
+        flash(
+            f"Son demasiados seriales para una sola tanda (máximo {UNIT_BULK_MAX}). "
+            "Cargalos en partes.",
+            "error",
+        )
+        return _units_redirect(it.id)
+
+    # 1) Repetidos DENTRO de la tanda (el mismo codigo escaneado dos veces).
+    vistos = set()
+    repetidos = []
+    for s in serials:
+        low = s.lower()
+        if low in vistos:
+            repetidos.append(s)
+        vistos.add(low)
+    if repetidos:
+        flash(
+            "Hay seriales repetidos dentro de la tanda: " + ", ".join(sorted(set(repetidos))),
+            "error",
+        )
+        return _units_redirect(it.id)
+
+    # 2) Filtro anti-codigo-equivocado. Se puede forzar a proposito.
+    if request.form.get("force_format") != "on":
+        sospechosos = []
+        for s in serials:
+            motivo = serial_looks_wrong(s)
+            if motivo:
+                sospechosos.append(f"«{s}» {motivo}")
+        if sospechosos:
+            flash(
+                "Esto no parece un número de serie: " + "; ".join(sospechosos) +
+                ". Corregilo, o marcá «cargar igual» si estás seguro.",
+                "error",
+            )
+            return _units_redirect(it.id)
+
+    # 3) Ya existentes en el item, en CUALQUIER estado: un serial no se reutiliza.
+    #    Una sola consulta, no una por serial.
+    existentes = {
+        row[0].lower()
+        for row in db.session.query(ItemUnit.serial).filter(ItemUnit.item_id == it.id).all()
+    }
+    ya_estan = [s for s in serials if s.lower() in existentes]
+    if ya_estan:
+        flash("Ya están cargados en este ítem: " + ", ".join(ya_estan), "error")
+        return _units_redirect(it.id)
+
+    # 4) Cupo: no se puede etiquetar mas de lo que hay fisicamente en stock ahi.
+    st = Stock.query.filter_by(item_id=it.id, location_id=location_id).first()
+    qty = (st.quantity if st else 0) or 0
+    labeled = count_units_in_stock(it.id, location_id)
+    if labeled + len(serials) > qty:
+        flash(
+            f"No hay cupo en «{loc.name}»: hay {qty} en stock, ya {labeled} con serial "
+            f"y estás cargando {len(serials)}. Ingresá stock desde Movimientos "
+            "antes de etiquetar más seriales.",
+            "error",
+        )
+        return _units_redirect(it.id)
+
+    notes = (request.form.get("notes", "") or "").strip()[:255] or None
+
+    # Todo o nada: un solo commit para la tanda entera.
+    try:
+        for s in serials:
+            db.session.add(ItemUnit(
+                item_id=it.id, serial=s, status=UNIT_EN_STOCK,
+                location_id=location_id, notes=notes,
+            ))
+        db.session.commit()
+        flash(f"{len(serials)} serial(es) registrado(s) en {loc.name}.", "ok")
+    except Exception as e:
+        db.session.rollback()
+        flash(f"No se pudo registrar la tanda (no se guardó ninguno): {e}", "error")
     return _units_redirect(it.id)
 
 
