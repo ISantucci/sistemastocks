@@ -239,14 +239,9 @@ def _security_headers(resp):
     resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
     resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
     # Desactiva APIs del navegador que el sistema no usa.
-    # camera=(self): la ficha de seriales puede leer codigos de barra con la
-    # camara del telefono. 'self' habilita SOLO a documentos de este mismo
-    # origen (ningun iframe de terceros), y el navegador igual le sigue pidiendo
-    # permiso explicito al usuario la primera vez. Es el minimo necesario: con
-    # camera=() el navegador ni siquiera muestra el pedido de permiso.
     resp.headers.setdefault(
         "Permissions-Policy",
-        "geolocation=(), microphone=(), camera=(self), payment=(), usb=(), "
+        "geolocation=(), microphone=(), camera=(), payment=(), usb=(), "
         "magnetometer=(), gyroscope=(), interest-cohort=()",
     )
     resp.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
@@ -745,17 +740,6 @@ class Supplier(db.Model):
 
     is_active = db.Column(db.Boolean, default=True, nullable=False)   # baja logica
     created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
-
-
-def supplier_doc_name(s):
-    """Nombre del proveedor para documentos (remitos).
-
-    Se usa el nombre del comercio. Los fallbacks son solo para proveedores
-    viejos cargados antes de que el comercio fuera obligatorio.
-    """
-    if not s:
-        return ""
-    return ((s.business_name or "") or (s.legal_name or "") or (s.contact_name or "")).strip()
 
 
 class LocationResponsible(db.Model):
@@ -3553,37 +3537,15 @@ UNIT_VIEW_ROLES = ("ADMIN", "SUPERVISOR", "LECTOR")
 
 
 def _units_redirect(item_id: int):
-    """Redirige a la ficha de seriales, preservando el contexto de donde vino.
-
-    - embed=1: la ficha se abrio como popup (openDetail).
-    - loc=<id>: se abrio desde Stock parado en una ubicacion. Sin esto, al
-      guardar se perdia el filtro y la ubicacion preseleccionada, y habia que
-      volver a elegirla para la tanda siguiente.
-
-    Los formularios que no mandan esos campos se comportan igual que antes.
-    """
-    kwargs = {"item_id": item_id}
+    """Redirige a la ficha de seriales, preservando el modo embed (popup)."""
     if request.values.get("embed") == "1":
-        kwargs["embed"] = "1"
-    loc_raw = (request.values.get("loc") or "").strip()
-    if loc_raw.isdigit():
-        kwargs["loc"] = loc_raw
-    return redirect(url_for("item_units", **kwargs))
+        return redirect(url_for("item_units", item_id=item_id, embed="1"))
+    return redirect(url_for("item_units", item_id=item_id))
 
 
-def _units_context(it: "Item", location_ids=None):
-    """Datos para la ficha de seriales: unidades por estado y cupo por ubicación.
-
-    location_ids acota la ficha a un conjunto de ubicaciones. Se usa para el
-    TECNICO: sin ese acote, la ficha le mostraba los seriales y las cantidades
-    de TODAS las ubicaciones, incluidas las camionetas de otros tecnicos.
-    Con None (ADMIN / SUPERVISOR / LECTOR) el resultado es identico al anterior.
-    """
-    _scope = None if location_ids is None else set(location_ids)
-    _uq = ItemUnit.query.filter_by(item_id=it.id)
-    if _scope is not None:
-        _uq = _uq.filter(ItemUnit.location_id.in_(_scope))
-    units = _uq.order_by(ItemUnit.status, ItemUnit.serial).all()
+def _units_context(it: "Item"):
+    """Datos para la ficha de seriales: unidades por estado y cupo por ubicación."""
+    units = ItemUnit.query.filter_by(item_id=it.id).order_by(ItemUnit.status, ItemUnit.serial).all()
     en_stock = [u for u in units if u.status == UNIT_EN_STOCK]
     fuera = [u for u in units if u.status != UNIT_EN_STOCK]
 
@@ -3596,8 +3558,6 @@ def _units_context(it: "Item", location_ids=None):
     loc_rooms = []
     for loc in Location.query.order_by(Location.name).all():
         if loc.is_external:
-            continue
-        if _scope is not None and loc.id not in _scope:
             continue
         st = Stock.query.filter_by(item_id=it.id, location_id=loc.id).first()
         qty = (st.quantity if st else 0) or 0
@@ -3617,11 +3577,7 @@ def _units_context(it: "Item", location_ids=None):
 @role_required("ADMIN", "SUPERVISOR", "LECTOR", "TECNICO")
 def item_units(item_id: int):
     it = Item.query.get_or_404(item_id)
-    # El TECNICO solo ve los seriales y las cantidades de SUS ubicaciones.
-    # Se acota en la consulta, no en el template: lo que no le corresponde no
-    # tiene que viajar en el HTML.
-    _scope_ids = tech_location_ids_for(current_user) if current_user.role == "TECNICO" else None
-    ctx = _units_context(it, location_ids=_scope_ids)
+    ctx = _units_context(it)
     embed = request.args.get("embed") == "1"
 
     # Filtro opcional por ubicación (ej. abrir desde Stock sobre una camioneta).
@@ -3704,170 +3660,6 @@ def item_unit_new(item_id: int):
     return _units_redirect(it.id)
 
 
-# ---- CARGA EN TANDA (escaneo o pegado) ----
-# Tope de seriales por tanda. Es una cota defensiva, no una regla de negocio:
-# evita que un lector trabado o un pegado accidental intente crear miles de
-# filas en una sola transaccion. El cupo por ubicacion sigue siendo el limite
-# real y siempre es mas chico que esto en la practica.
-UNIT_BULK_MAX = 200
-
-
-def parse_serial_batch(raw):
-    """Parte el texto de una tanda en seriales limpios, conservando el orden.
-
-    Acepta salto de linea, coma, punto y coma y tabulacion como separador: un
-    lector de codigos emite Enter, y un pegado desde Excel puede traer comas o
-    tabulaciones. Recorta a 120 caracteres, igual que la columna.
-    """
-    txt = raw or ""
-    for sep in (",", ";", "\t"):
-        txt = txt.replace(sep, "\n")
-    out = []
-    for line in txt.splitlines():
-        s = line.strip()[:120]
-        if s:
-            out.append(s)
-    return out
-
-
-def serial_looks_wrong(serial):
-    """Heuristica anti-codigo-equivocado. Devuelve el motivo, o None si pasa.
-
-    La etiqueta de un equipo trae VARIOS codigos de barra pegados: el EAN de la
-    caja (identico en todas las unidades del modelo), el part number (tambien
-    identico) y recien despues el numero de serie. Escanear el que no es carga
-    como "serial" un dato que se repite en cada unidad, y eso ensucia la
-    trazabilidad sin que salte ningun error.
-
-    NO es una validacion de formato universal (no existe): es un filtro para los
-    dos casos concretos que aparecen en la practica. Por eso el formulario
-    permite forzar la carga, para el dia que entre una marca con serial
-    numerico.
-    """
-    if serial.isdigit():
-        return "es todo numeros (suele ser el EAN de la caja, no el serial)"
-    if "." in serial:
-        return "tiene puntos (suele ser el part number, no el serial)"
-    if len(serial) < 6:
-        return "es demasiado corto para ser un numero de serie"
-    return None
-
-
-@app.route("/items/<int:item_id>/units/bulk", methods=["POST"])
-@login_required
-@role_required(*ITEM_EDIT_ROLES)
-def item_unit_bulk(item_id: int):
-    """Registra VARIOS seriales de stock EXISTENTE en una ubicacion, de una vez.
-
-    Es la version en tanda de item_unit_new y respeta exactamente sus mismas
-    reglas: no mueve stock, la ubicacion tiene que ser interna, el serial es
-    unico dentro del item (case-insensitive) y no se pueden etiquetar mas
-    unidades que la cantidad en stock de esa ubicacion.
-
-    Diferencia deliberada: es TODO O NADA. Si una sola linea falla no se guarda
-    ninguna. Cargar 19 de 20 y no saber cual falto es peor que no cargar nada,
-    porque obliga a comparar a mano contra las cajas, que para entonces ya se
-    tiraron.
-    """
-    it = Item.query.get_or_404(item_id)
-    if not it.serialized:
-        flash("Ese ítem no es serializado. Activá 'Serializado' en la ficha del ítem.", "error")
-        return _units_redirect(it.id)
-
-    location_id_raw = (request.form.get("location_id") or "").strip()
-    if not location_id_raw.isdigit():
-        flash("Elegí una ubicación para registrar los seriales.", "error")
-        return _units_redirect(it.id)
-    location_id = int(location_id_raw)
-
-    loc = Location.query.get(location_id)
-    if not loc or loc.is_external:
-        flash("Ubicación inválida para registrar un serial.", "error")
-        return _units_redirect(it.id)
-
-    serials = parse_serial_batch(request.form.get("serials"))
-    if not serials:
-        flash("No cargaste ningún serial en la tanda.", "error")
-        return _units_redirect(it.id)
-    if len(serials) > UNIT_BULK_MAX:
-        flash(
-            f"Son demasiados seriales para una sola tanda (máximo {UNIT_BULK_MAX}). "
-            "Cargalos en partes.",
-            "error",
-        )
-        return _units_redirect(it.id)
-
-    # 1) Repetidos DENTRO de la tanda (el mismo codigo escaneado dos veces).
-    vistos = set()
-    repetidos = []
-    for s in serials:
-        low = s.lower()
-        if low in vistos:
-            repetidos.append(s)
-        vistos.add(low)
-    if repetidos:
-        flash(
-            "Hay seriales repetidos dentro de la tanda: " + ", ".join(sorted(set(repetidos))),
-            "error",
-        )
-        return _units_redirect(it.id)
-
-    # 2) Filtro anti-codigo-equivocado. Se puede forzar a proposito.
-    if request.form.get("force_format") != "on":
-        sospechosos = []
-        for s in serials:
-            motivo = serial_looks_wrong(s)
-            if motivo:
-                sospechosos.append(f"«{s}» {motivo}")
-        if sospechosos:
-            flash(
-                "Esto no parece un número de serie: " + "; ".join(sospechosos) +
-                ". Corregilo, o marcá «cargar igual» si estás seguro.",
-                "error",
-            )
-            return _units_redirect(it.id)
-
-    # 3) Ya existentes en el item, en CUALQUIER estado: un serial no se reutiliza.
-    #    Una sola consulta, no una por serial.
-    existentes = {
-        row[0].lower()
-        for row in db.session.query(ItemUnit.serial).filter(ItemUnit.item_id == it.id).all()
-    }
-    ya_estan = [s for s in serials if s.lower() in existentes]
-    if ya_estan:
-        flash("Ya están cargados en este ítem: " + ", ".join(ya_estan), "error")
-        return _units_redirect(it.id)
-
-    # 4) Cupo: no se puede etiquetar mas de lo que hay fisicamente en stock ahi.
-    st = Stock.query.filter_by(item_id=it.id, location_id=location_id).first()
-    qty = (st.quantity if st else 0) or 0
-    labeled = count_units_in_stock(it.id, location_id)
-    if labeled + len(serials) > qty:
-        flash(
-            f"No hay cupo en «{loc.name}»: hay {qty} en stock, ya {labeled} con serial "
-            f"y estás cargando {len(serials)}. Ingresá stock desde Movimientos "
-            "antes de etiquetar más seriales.",
-            "error",
-        )
-        return _units_redirect(it.id)
-
-    notes = (request.form.get("notes", "") or "").strip()[:255] or None
-
-    # Todo o nada: un solo commit para la tanda entera.
-    try:
-        for s in serials:
-            db.session.add(ItemUnit(
-                item_id=it.id, serial=s, status=UNIT_EN_STOCK,
-                location_id=location_id, notes=notes,
-            ))
-        db.session.commit()
-        flash(f"{len(serials)} serial(es) registrado(s) en {loc.name}.", "ok")
-    except Exception as e:
-        db.session.rollback()
-        flash(f"No se pudo registrar la tanda (no se guardó ninguno): {e}", "error")
-    return _units_redirect(it.id)
-
-
 @app.route("/units/<int:unit_id>/edit", methods=["POST"])
 @login_required
 @role_required(*ITEM_EDIT_ROLES)
@@ -3940,25 +3732,6 @@ def item_unit_delete(unit_id: int):
 ITEM_PICKER_MAX_INLINE = int(os.environ.get("ITEM_PICKER_MAX_INLINE", "800"))
 ITEM_SEARCH_LIMIT = 50
 
-
-def build_stock_maps(location_ids=None):
-    """Mapas ubicacion -> items con stock y ubicacion -> {item: cantidad}.
-
-    Alimentan los selectores del front (que item ofrecer segun el origen y cual
-    es el tope de cantidad). Con location_ids se acotan a esas ubicaciones: es
-    lo que necesita el TECNICO, porque el mapa viaja embebido en el HTML y sin
-    acotar le entrega el contenido de las camionetas ajenas.
-    Con None el resultado es identico al de siempre.
-    """
-    stock_map = {}
-    stock_qty_map = {}
-    q = Stock.query.filter(Stock.quantity > 0)
-    if location_ids is not None:
-        q = q.filter(Stock.location_id.in_(list(location_ids)))
-    for s in q.all():
-        stock_map.setdefault(s.location_id, []).append(s.item_id)
-        stock_qty_map.setdefault(str(s.location_id), {})[str(s.item_id)] = s.quantity
-    return stock_map, stock_qty_map
 
 def tech_location_ids_for(user):
     """Ids de las ubicaciones de las que el usuario es responsable."""
@@ -4573,9 +4346,11 @@ def movements():
                 revertibles.add(_m.id)
 
     # Mapa ubicacion -> items con stock (>0), para filtrar el selector "Item" segun "Desde"
-    stock_map, stock_qty_map = build_stock_maps(
-        tech_location_ids if is_tecnico else None
-    )
+    stock_map = {}
+    stock_qty_map = {}  # {loc_id(str): {item_id(str): qty}} para el tope de cantidad
+    for s in Stock.query.filter(Stock.quantity > 0).all():
+        stock_map.setdefault(s.location_id, []).append(s.item_id)
+        stock_qty_map.setdefault(str(s.location_id), {})[str(s.item_id)] = s.quantity
 
     # Ubicaciones externas (Proveedor/Baja): no tienen stock propio, por eso el
     # selector "Item" debe ofrecer TODOS los items al elegirlas como origen.
@@ -4953,7 +4728,11 @@ def movements_bulk():
     _descartes_b = Location.query.filter_by(name="Descartes").first()
 
     # Mapa ubicacion -> items con stock (>0), para filtrar el selector "Item" segun "Desde"
-    stock_map, stock_qty_map = build_stock_maps()
+    stock_map = {}
+    stock_qty_map = {}  # {loc_id(str): {item_id(str): qty}} para el tope de cantidad
+    for s in Stock.query.filter(Stock.quantity > 0).all():
+        stock_map.setdefault(s.location_id, []).append(s.item_id)
+        stock_qty_map.setdefault(str(s.location_id), {})[str(s.item_id)] = s.quantity
 
     # Externas: ofrecer todos los items al elegirlas como origen (no tienen stock).
     external_location_ids = [l.id for l in locations_list if l.is_external]
@@ -5264,9 +5043,11 @@ def item_usage():
 
     users_list = User.query.order_by(User.username).all()
 
-    stock_map, stock_qty_map = build_stock_maps(
-        tech_location_ids if is_tecnico else None
-    )
+    stock_map = {}
+    stock_qty_map = {}  # {loc_id(str): {item_id(str): qty}} para el tope de cantidad
+    for s in Stock.query.filter(Stock.quantity > 0).all():
+        stock_map.setdefault(s.location_id, []).append(s.item_id)
+        stock_qty_map.setdefault(str(s.location_id), {})[str(s.item_id)] = s.quantity
 
     serialized_item_ids = [it.id for it in items if it.serialized]
 
@@ -6814,7 +6595,11 @@ def scrap_report():
     )
     items_all = Item.query.filter_by(is_active=True).order_by(Item.code).all()
     users_list = User.query.order_by(User.username).all()
-    stock_map, stock_qty_map = build_stock_maps()
+    stock_map = {}
+    stock_qty_map = {}  # {loc_id(str): {item_id(str): qty}} para el tope de cantidad
+    for s in Stock.query.filter(Stock.quantity > 0).all():
+        stock_map.setdefault(s.location_id, []).append(s.item_id)
+        stock_qty_map.setdefault(str(s.location_id), {})[str(s.item_id)] = s.quantity
 
     serialized_item_ids = [it.id for it in items_all if it.serialized]
 
@@ -6870,7 +6655,7 @@ def _repair_transfer_with_remito(item_id, qty, from_id, to_id, supplier, observa
     # (el detalle de la reparación va en la observación del MOVIMIENTO).
     tipo_label = "Egreso" if to_ext else "Ingreso"
     ry, rseq, rnumber = next_remito_number()
-    r_concept = f"{tipo_label} por reparación — Proveedor: {supplier_doc_name(supplier)}"
+    r_concept = f"{tipo_label} por reparación — Proveedor: {supplier.contact_name}"
     rem = Remito(
         year=ry, seq=rseq, number=rnumber,
         status="CONFIRMADO", print_pending=True,
@@ -8802,13 +8587,9 @@ def suppliers():
         if not contact_name:
             flash("El nombre del contacto es obligatorio.", "error")
             return redirect(url_for("suppliers"))
-        business_name = request.form.get("business_name", "").strip()
-        if not business_name:
-            flash("El nombre del comercio es obligatorio.", "error")
-            return redirect(url_for("suppliers"))
         s = Supplier(
             contact_name=contact_name,
-            business_name=business_name,
+            business_name=request.form.get("business_name", "").strip() or None,
             cuit=request.form.get("cuit", "").strip() or None,
             legal_name=request.form.get("legal_name", "").strip() or None,
             email=request.form.get("email", "").strip() or None,
@@ -8838,12 +8619,8 @@ def supplier_edit(supplier_id):
     if not contact_name:
         flash("El nombre del contacto es obligatorio.", "error")
         return redirect(url_for("suppliers"))
-    business_name = request.form.get("business_name", "").strip()
-    if not business_name:
-        flash("El nombre del comercio es obligatorio.", "error")
-        return redirect(url_for("suppliers"))
     s.contact_name = contact_name
-    s.business_name = business_name
+    s.business_name = request.form.get("business_name", "").strip() or None
     s.cuit = request.form.get("cuit", "").strip() or None
     s.legal_name = request.form.get("legal_name", "").strip() or None
     s.email = request.form.get("email", "").strip() or None
@@ -9048,9 +8825,9 @@ def in_out():
             # sistema (para qué se emite el remito) y la observación es solo lo
             # que escribió la persona.
             if tipo == "INGRESO":
-                r_concept = f"Ingreso de mercadería — Proveedor: {supplier_doc_name(supplier)}"
+                r_concept = f"Ingreso de mercadería — Proveedor: {supplier.contact_name}"
             else:
-                r_concept = f"Egreso — {motivo_label} — Proveedor: {supplier_doc_name(supplier)}"
+                r_concept = f"Egreso — {motivo_label} — Proveedor: {supplier.contact_name}"
             r = Remito(
                 year=ry, seq=rseq, number=rnumber,
                 status="CONFIRMADO", print_pending=True,

@@ -52,7 +52,7 @@
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <div class="modal-body">
         <div class="field"><label>Nombre (contacto)</label><input name="contact_name" required></div>
-        <div class="field"><label>Comercio / nombre de fantasía</label><input name="business_name" required></div>
+        <div class="field"><label>Comercio / nombre de fantasía</label><input name="business_name"></div>
         <div class="field"><label>Razón social</label><input name="legal_name"></div>
         <div class="field"><label>CUIT</label><input name="cuit"></div>
         <div class="field"><label>Mail</label><input name="email" type="email"></div>
@@ -74,7 +74,7 @@
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <div class="modal-body">
         <div class="field"><label>Nombre (contacto)</label><input name="contact_name" value="{{ s.contact_name }}" required></div>
-        <div class="field"><label>Comercio / nombre de fantasía</label><input name="business_name" value="{{ s.business_name or '' }}" required></div>
+        <div class="field"><label>Comercio / nombre de fantasía</label><input name="business_name" value="{{ s.business_name or '' }}"></div>
         <div class="field"><label>Razón social</label><input name="legal_name" value="{{ s.legal_name or '' }}"></div>
         <div class="field"><label>CUIT</label><input name="cuit" value="{{ s.cuit or '' }}"></div>
         <div class="field"><label>Mail</label><input name="email" type="email" value="{{ s.email or '' }}"></div>
