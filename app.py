@@ -3554,9 +3554,19 @@ def _units_redirect(item_id: int):
     return redirect(url_for("item_units", item_id=item_id))
 
 
-def _units_context(it: "Item"):
-    """Datos para la ficha de seriales: unidades por estado y cupo por ubicación."""
-    units = ItemUnit.query.filter_by(item_id=it.id).order_by(ItemUnit.status, ItemUnit.serial).all()
+def _units_context(it: "Item", location_ids=None):
+    """Datos para la ficha de seriales: unidades por estado y cupo por ubicación.
+
+    location_ids acota la ficha a un conjunto de ubicaciones. Se usa para el
+    TECNICO: sin ese acote, la ficha le mostraba los seriales y las cantidades
+    de TODAS las ubicaciones, incluidas las camionetas de otros tecnicos.
+    Con None (ADMIN / SUPERVISOR / LECTOR) el resultado es identico al anterior.
+    """
+    _scope = None if location_ids is None else set(location_ids)
+    _uq = ItemUnit.query.filter_by(item_id=it.id)
+    if _scope is not None:
+        _uq = _uq.filter(ItemUnit.location_id.in_(_scope))
+    units = _uq.order_by(ItemUnit.status, ItemUnit.serial).all()
     en_stock = [u for u in units if u.status == UNIT_EN_STOCK]
     fuera = [u for u in units if u.status != UNIT_EN_STOCK]
 
@@ -3569,6 +3579,8 @@ def _units_context(it: "Item"):
     loc_rooms = []
     for loc in Location.query.order_by(Location.name).all():
         if loc.is_external:
+            continue
+        if _scope is not None and loc.id not in _scope:
             continue
         st = Stock.query.filter_by(item_id=it.id, location_id=loc.id).first()
         qty = (st.quantity if st else 0) or 0
@@ -3588,7 +3600,11 @@ def _units_context(it: "Item"):
 @role_required("ADMIN", "SUPERVISOR", "LECTOR", "TECNICO")
 def item_units(item_id: int):
     it = Item.query.get_or_404(item_id)
-    ctx = _units_context(it)
+    # El TECNICO solo ve los seriales y las cantidades de SUS ubicaciones.
+    # Se acota en la consulta, no en el template: lo que no le corresponde no
+    # tiene que viajar en el HTML.
+    _scope_ids = tech_location_ids_for(current_user) if current_user.role == "TECNICO" else None
+    ctx = _units_context(it, location_ids=_scope_ids)
     embed = request.args.get("embed") == "1"
 
     # Filtro opcional por ubicación (ej. abrir desde Stock sobre una camioneta).
@@ -3743,6 +3759,25 @@ def item_unit_delete(unit_id: int):
 ITEM_PICKER_MAX_INLINE = int(os.environ.get("ITEM_PICKER_MAX_INLINE", "800"))
 ITEM_SEARCH_LIMIT = 50
 
+
+def build_stock_maps(location_ids=None):
+    """Mapas ubicacion -> items con stock y ubicacion -> {item: cantidad}.
+
+    Alimentan los selectores del front (que item ofrecer segun el origen y cual
+    es el tope de cantidad). Con location_ids se acotan a esas ubicaciones: es
+    lo que necesita el TECNICO, porque el mapa viaja embebido en el HTML y sin
+    acotar le entrega el contenido de las camionetas ajenas.
+    Con None el resultado es identico al de siempre.
+    """
+    stock_map = {}
+    stock_qty_map = {}
+    q = Stock.query.filter(Stock.quantity > 0)
+    if location_ids is not None:
+        q = q.filter(Stock.location_id.in_(list(location_ids)))
+    for s in q.all():
+        stock_map.setdefault(s.location_id, []).append(s.item_id)
+        stock_qty_map.setdefault(str(s.location_id), {})[str(s.item_id)] = s.quantity
+    return stock_map, stock_qty_map
 
 def tech_location_ids_for(user):
     """Ids de las ubicaciones de las que el usuario es responsable."""
@@ -4357,11 +4392,9 @@ def movements():
                 revertibles.add(_m.id)
 
     # Mapa ubicacion -> items con stock (>0), para filtrar el selector "Item" segun "Desde"
-    stock_map = {}
-    stock_qty_map = {}  # {loc_id(str): {item_id(str): qty}} para el tope de cantidad
-    for s in Stock.query.filter(Stock.quantity > 0).all():
-        stock_map.setdefault(s.location_id, []).append(s.item_id)
-        stock_qty_map.setdefault(str(s.location_id), {})[str(s.item_id)] = s.quantity
+    stock_map, stock_qty_map = build_stock_maps(
+        tech_location_ids if is_tecnico else None
+    )
 
     # Ubicaciones externas (Proveedor/Baja): no tienen stock propio, por eso el
     # selector "Item" debe ofrecer TODOS los items al elegirlas como origen.
@@ -4739,11 +4772,7 @@ def movements_bulk():
     _descartes_b = Location.query.filter_by(name="Descartes").first()
 
     # Mapa ubicacion -> items con stock (>0), para filtrar el selector "Item" segun "Desde"
-    stock_map = {}
-    stock_qty_map = {}  # {loc_id(str): {item_id(str): qty}} para el tope de cantidad
-    for s in Stock.query.filter(Stock.quantity > 0).all():
-        stock_map.setdefault(s.location_id, []).append(s.item_id)
-        stock_qty_map.setdefault(str(s.location_id), {})[str(s.item_id)] = s.quantity
+    stock_map, stock_qty_map = build_stock_maps()
 
     # Externas: ofrecer todos los items al elegirlas como origen (no tienen stock).
     external_location_ids = [l.id for l in locations_list if l.is_external]
@@ -5054,11 +5083,9 @@ def item_usage():
 
     users_list = User.query.order_by(User.username).all()
 
-    stock_map = {}
-    stock_qty_map = {}  # {loc_id(str): {item_id(str): qty}} para el tope de cantidad
-    for s in Stock.query.filter(Stock.quantity > 0).all():
-        stock_map.setdefault(s.location_id, []).append(s.item_id)
-        stock_qty_map.setdefault(str(s.location_id), {})[str(s.item_id)] = s.quantity
+    stock_map, stock_qty_map = build_stock_maps(
+        tech_location_ids if is_tecnico else None
+    )
 
     serialized_item_ids = [it.id for it in items if it.serialized]
 
@@ -6606,11 +6633,7 @@ def scrap_report():
     )
     items_all = Item.query.filter_by(is_active=True).order_by(Item.code).all()
     users_list = User.query.order_by(User.username).all()
-    stock_map = {}
-    stock_qty_map = {}  # {loc_id(str): {item_id(str): qty}} para el tope de cantidad
-    for s in Stock.query.filter(Stock.quantity > 0).all():
-        stock_map.setdefault(s.location_id, []).append(s.item_id)
-        stock_qty_map.setdefault(str(s.location_id), {})[str(s.item_id)] = s.quantity
+    stock_map, stock_qty_map = build_stock_maps()
 
     serialized_item_ids = [it.id for it in items_all if it.serialized]
 
