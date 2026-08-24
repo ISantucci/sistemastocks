@@ -1,0 +1,111 @@
+# Parche 0014: que el escaneo funcione de verdad, tambien desde el celular
+#
+# Diagnostico: los dos accesos a la ficha de seriales (stock.html:109 e
+# items.html:98) la abren con openDetail(), o sea dentro del iframe global de
+# base.html. Ese iframe no declaraba allow="camera", y un iframe anidado no
+# hereda el permiso de camara del documento principal aunque sea del mismo
+# origen. Resultado: "Encender camara" fallaba SIEMPRE desde la UI, porque no
+# habia ningun camino a la ficha que no pasara por el popup.
+#
+#  a) base.html      -> allow="camera" en el iframe del popup
+#  b) item_units.html-> en modo embed, boton "Abrir en pantalla completa"
+#                       (target="_top") para escanear comodo en el telefono
+#  c) serial_scan.js -> qrbox calculado sobre el tamano real del visor en vez
+#                       de 260x110 fijo, que en pantallas angostas hace que
+#                       html5-qrcode rechace el recuadro y no arranque
+#
+# NO toca la base de datos. NO toca stock, movimientos ni permisos de rol.
+#
+--- a/templates/base.html
++++ b/templates/base.html
+@@ -218,7 +218,14 @@
+ <div class="modal-overlay detail-overlay" id="detail-modal">
+   <div class="detail-box">
+     <button type="button" class="detail-close" onclick="dismissDetail()" aria-label="Cerrar">&times;</button>
+-    <iframe id="detail-frame" class="detail-frame" title="Detalle"></iframe>
++    {#- allow="camera": la ficha de seriales se abre dentro de este iframe y ahi
++        se escanean los codigos de barra. La Permissions-Policy del sitio habilita
++        la camara al documento principal, pero un iframe anidado necesita ademas
++        su propio 'allow', aunque sea del mismo origen. Sin esto el navegador le
++        niega la camara al popup y el escaneo no funciona desde Stock ni Items.
++        El iframe solo carga URLs propias (openDetail las arma en el servidor),
++        asi que no se le delega nada a terceros. #}
++    <iframe id="detail-frame" class="detail-frame" title="Detalle" allow="camera"></iframe>
+   </div>
+ </div>
+ {% elif current_user.is_authenticated and embed %}
+--- a/templates/item_units.html
++++ b/templates/item_units.html
+@@ -101,6 +101,12 @@
+     <div id="bulk-mode-cam">
+       <div id="bulk-reader" style="display:none;"></div>
+       <button type="button" class="btn btn-secondary btn-sm" id="bulk-cam-toggle">Encender cámara</button>
++      {%- if embed %}
++      {#- En el popup el visor queda chico, y en un telefono no hay lugar para
++          apuntar. target="_top" saca la ficha del iframe y la abre entera. #}
++      <a class="btn btn-secondary btn-sm" target="_top"
++         href="{{ url_for('item_units', item_id=it.id, loc=focus_loc.id if focus_loc else none) }}">Abrir en pantalla completa</a>
++      {%- endif %}
+       <div class="muted" id="bulk-cam-msg" style="display:none;margin-top:6px;"></div>
+       <div class="muted" style="margin-top:6px;">
+         Encuadrá <b>solo el código de abajo del S/N</b>. Cada lectura suena y se agrega a la lista;
+--- a/static/js/serial_scan.js
++++ b/static/js/serial_scan.js
+@@ -222,7 +222,18 @@
+     if (camBtn) camBtn.textContent = "Apagar cámara";
+     scanner.start(
+       { facingMode: "environment" },
+-      { fps: 10, qrbox: { width: 260, height: 110 } },
++      {
++        fps: 10,
++        // qrbox como funcion, no fijo: en un telefono angosto un recuadro mas
++        // ancho que el video hace que html5-qrcode lo rechace y no arranque.
++        // Se calcula sobre el tamano real del visor. Ancho y bajo, porque lo
++        // que se lee es un codigo de barras 1D, no un QR.
++        qrbox: function (vw, vh) {
++          var w = Math.floor(Math.min(vw * 0.9, 320));
++          var h = Math.floor(Math.min(vh * 0.6, Math.max(80, w * 0.45)));
++          return { width: w, height: h };
++        }
++      },
+       function (text) { if (add(text, true)) feedback(); },
+       function () { /* frame sin codigo: normal, no es error */ }
+     ).catch(function (err) {
+--- a/tests/test_item_units_bulk.py
++++ b/tests/test_item_units_bulk.py
+@@ -326,3 +326,35 @@
+                data={"location_id": jaula.id, "serials": "BE1052CPAJ064E1"},
+                follow_redirects=False)
+     assert r.headers["Location"].endswith(f"/items/{it.id}/units")
++
++
++# ------------------------------------------------------------ camara en el popup
++
++
++def test_el_iframe_del_popup_delega_la_camara(setup):
++    """Sin allow="camera" el navegador le niega la camara al contenido embebido,
++    y los dos accesos a la ficha (Stock e Items) son popups en iframe."""
++    A, c, it, _, _ = setup
++    h = c.get("/stock").get_data(as_text=True)
++    assert 'id="detail-frame"' in h
++    assert 'allow="camera"' in h
++
++
++def test_permissions_policy_habilita_camara_al_propio_origen(setup):
++    A, c, it, _, _ = setup
++    pp = c.get("/stock").headers.get("Permissions-Policy", "")
++    assert "camera=(self)" in pp
++    assert "microphone=()" in pp  # lo que no se usa sigue apagado
++
++
++def test_en_popup_ofrece_salir_a_pantalla_completa(setup):
++    A, c, it, jaula, _ = setup
++    h = c.get(f"/items/{it.id}/units?embed=1&loc={jaula.id}").get_data(as_text=True)
++    assert 'target="_top"' in h
++    assert "Abrir en pantalla completa" in h
++
++
++def test_sin_embed_no_aparece_ese_boton(setup):
++    A, c, it, _, _ = setup
++    h = c.get(f"/items/{it.id}/units").get_data(as_text=True)
++    assert "Abrir en pantalla completa" not in h

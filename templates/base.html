@@ -218,7 +218,14 @@
 <div class="modal-overlay detail-overlay" id="detail-modal">
   <div class="detail-box">
     <button type="button" class="detail-close" onclick="dismissDetail()" aria-label="Cerrar">&times;</button>
-    <iframe id="detail-frame" class="detail-frame" title="Detalle"></iframe>
+    {#- allow="camera": la ficha de seriales se abre dentro de este iframe y ahi
+        se escanean los codigos de barra. La Permissions-Policy del sitio habilita
+        la camara al documento principal, pero un iframe anidado necesita ademas
+        su propio 'allow', aunque sea del mismo origen. Sin esto el navegador le
+        niega la camara al popup y el escaneo no funciona desde Stock ni Items.
+        El iframe solo carga URLs propias (openDetail las arma en el servidor),
+        asi que no se le delega nada a terceros. #}
+    <iframe id="detail-frame" class="detail-frame" title="Detalle" allow="camera"></iframe>
   </div>
 </div>
 {% elif current_user.is_authenticated and embed %}

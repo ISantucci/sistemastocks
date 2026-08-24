@@ -326,3 +326,35 @@ def test_la_vuelta_sigue_igual_sin_contexto(setup):
                data={"location_id": jaula.id, "serials": "BE1052CPAJ064E1"},
                follow_redirects=False)
     assert r.headers["Location"].endswith(f"/items/{it.id}/units")
+
+
+# ------------------------------------------------------------ camara en el popup
+
+
+def test_el_iframe_del_popup_delega_la_camara(setup):
+    """Sin allow="camera" el navegador le niega la camara al contenido embebido,
+    y los dos accesos a la ficha (Stock e Items) son popups en iframe."""
+    A, c, it, _, _ = setup
+    h = c.get("/stock").get_data(as_text=True)
+    assert 'id="detail-frame"' in h
+    assert 'allow="camera"' in h
+
+
+def test_permissions_policy_habilita_camara_al_propio_origen(setup):
+    A, c, it, _, _ = setup
+    pp = c.get("/stock").headers.get("Permissions-Policy", "")
+    assert "camera=(self)" in pp
+    assert "microphone=()" in pp  # lo que no se usa sigue apagado
+
+
+def test_en_popup_ofrece_salir_a_pantalla_completa(setup):
+    A, c, it, jaula, _ = setup
+    h = c.get(f"/items/{it.id}/units?embed=1&loc={jaula.id}").get_data(as_text=True)
+    assert 'target="_top"' in h
+    assert "Abrir en pantalla completa" in h
+
+
+def test_sin_embed_no_aparece_ese_boton(setup):
+    A, c, it, _, _ = setup
+    h = c.get(f"/items/{it.id}/units").get_data(as_text=True)
+    assert "Abrir en pantalla completa" not in h

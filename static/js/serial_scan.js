@@ -222,7 +222,18 @@ function initSerialScan(opts) {
     if (camBtn) camBtn.textContent = "Apagar cámara";
     scanner.start(
       { facingMode: "environment" },
-      { fps: 10, qrbox: { width: 260, height: 110 } },
+      {
+        fps: 10,
+        // qrbox como funcion, no fijo: en un telefono angosto un recuadro mas
+        // ancho que el video hace que html5-qrcode lo rechace y no arranque.
+        // Se calcula sobre el tamano real del visor. Ancho y bajo, porque lo
+        // que se lee es un codigo de barras 1D, no un QR.
+        qrbox: function (vw, vh) {
+          var w = Math.floor(Math.min(vw * 0.9, 320));
+          var h = Math.floor(Math.min(vh * 0.6, Math.max(80, w * 0.45)));
+          return { width: w, height: h };
+        }
+      },
       function (text) { if (add(text, true)) feedback(); },
       function () { /* frame sin codigo: normal, no es error */ }
     ).catch(function (err) {
