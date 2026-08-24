@@ -1,0 +1,68 @@
+# Parche 0015: afinar el recuadro de escaneo
+#
+# Sintoma reportado (con foto): el recuadro era tan alto que le entraban los
+# DOS codigos de barra de la etiqueta Dahua a la vez -el P/N esta pegado justo
+# arriba del S/N- y el lector saltaba de uno al otro sin fijar ninguno.
+#
+#  a) qrbox pasa a ser una franja ANCHA y BAJA (alto ~15% del visor, tope 80px,
+#     minimo 48px). Un codigo 1D se lee con una linea: no necesita alto, y bajo
+#     entra un solo codigo por vez.
+#  b) videoConstraints con resolucion ideal 1920x1080. Es lo que mas mueve la
+#     aguja para Code128 en telefono: con el stream por defecto las barras
+#     finas de un serial largo caen por debajo del pixel y no decodifica nunca.
+#     'ideal' degrada solo si la camara no lo soporta.
+#  c) el texto de ayuda ahora dice como apuntar la franja.
+#
+# Solo front. NO toca app.py, ni la base, ni permisos.
+#
+--- a/templates/item_units.html
++++ b/templates/item_units.html
+@@ -109,8 +109,8 @@
+       {%- endif %}
+       <div class="muted" id="bulk-cam-msg" style="display:none;margin-top:6px;"></div>
+       <div class="muted" style="margin-top:6px;">
+-        Encuadrá <b>solo el código de abajo del S/N</b>. Cada lectura suena y se agrega a la lista;
+-        si escaneás dos veces la misma etiqueta, se ignora.
++        Apoyá la franja sobre <b>el código de abajo, el del S/N</b>, y acercate hasta que tape solo ese.
++        Cada lectura suena y se agrega a la lista; si escaneás dos veces la misma etiqueta, se ignora.
+       </div>
+     </div>
+ 
+--- a/static/js/serial_scan.js
++++ b/static/js/serial_scan.js
+@@ -224,14 +224,29 @@
+       { facingMode: "environment" },
+       {
+         fps: 10,
+-        // qrbox como funcion, no fijo: en un telefono angosto un recuadro mas
+-        // ancho que el video hace que html5-qrcode lo rechace y no arranque.
+-        // Se calcula sobre el tamano real del visor. Ancho y bajo, porque lo
+-        // que se lee es un codigo de barras 1D, no un QR.
++        // Franja ANCHA y BAJA, calculada sobre el visor real (fija en px falla
++        // en telefonos angostos: html5-qrcode rechaza un recuadro mas grande
++        // que el video y no arranca).
++        //
++        // Por que tan baja: un codigo de barras 1D se lee con una linea, no
++        // necesita alto. Y la etiqueta Dahua trae el P/N pegado justo ARRIBA
++        // del S/N, a milimetros. Con un recuadro alto entran los dos a la vez
++        // y el lector salta de uno al otro sin fijar ninguno. Bajo, solo entra
++        // el que estas apuntando.
+         qrbox: function (vw, vh) {
+-          var w = Math.floor(Math.min(vw * 0.9, 320));
+-          var h = Math.floor(Math.min(vh * 0.6, Math.max(80, w * 0.45)));
++          var w = Math.floor(Math.min(vw * 0.92, 480));
++          var h = Math.floor(Math.max(48, Math.min(vh * 0.15, 80)));
+           return { width: w, height: h };
++        },
++        // Resolucion alta: es lo que mas mueve la aguja para leer Code128 en
++        // un telefono. Con el stream por defecto las barras finas de un serial
++        // largo quedan a menos de un pixel y no decodifica nunca. 'ideal' es
++        // una preferencia, no una exigencia: si la camara no la soporta, baja
++        // sola en vez de fallar.
++        videoConstraints: {
++          facingMode: "environment",
++          width: { ideal: 1920 },
++          height: { ideal: 1080 }
+         }
+       },
+       function (text) { if (add(text, true)) feedback(); },
