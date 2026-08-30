@@ -30,6 +30,16 @@ from waitress import serve
 # Aca ademas corremos seed_defaults(), que en app.py solo corria bajo __main__.
 from app import app, db, ensure_sqlite_schema, seed_defaults
 
+# Integracion con TNGTickets (API de consumos de stock por camioneta).
+# Un Blueprint de Flask no hace nada hasta que se registra contra el `app`
+# real -- se hace aca porque este es el entrypoint real de produccion. No
+# se toca ningun endpoint, modelo ni tabla existente: son 2 modulos y 2
+# tablas 100% nuevos (ver integration_api.py / integration_models.py).
+from integration_api import bp as integration_api_bp
+from integration_models import ApiKey, IntegrationConsumo  # noqa: F401 (registra las tablas nuevas en el metadata)
+
+app.register_blueprint(integration_api_bp)
+
 
 def _prepare_db() -> None:
     with app.app_context():
