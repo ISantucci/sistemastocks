@@ -35,10 +35,6 @@
       </div>
     </div>
 
-    <p class="muted" style="margin:10px 0 4px;">
-      Los ítems serializados se cargan desde <b>Movimientos</b> (Hacia: Utilizado) para elegir los seriales.
-    </p>
-
     <div class="card-header" style="margin-top:8px;"><span class="card-title">Ítems</span></div>
     <div id="usage-lines"></div>
 
@@ -69,6 +65,29 @@
       <label>&nbsp;</label>
       <button type="button" class="remove-line-btn btn btn-danger btn-sm">X</button>
     </div>
+    {#- Seriales de ESTA fila. Los ids viajan en un array alineado con
+        item_id[] / qty[]: con varias filas los checkboxes no pueden llamarse
+        todos "unit_id". El campo de texto de al lado es el que hace que el
+        modal de confirmación diga QUÉ seriales salen. -#}
+    <div class="serial-pick-box field" style="flex-basis:100%; display:none;">
+      <label>¿Cuál/es salen? <span class="muted serial-pick-status" style="font-weight:400;"></span></label>
+      <div class="serial-pick-list"></div>
+    </div>
+    <div class="serial-auto-box field" style="flex-basis:100%; display:none;">
+      <label>Seriales</label>
+      <div class="muted serial-auto-text"></div>
+    </div>
+    {#- Resumen en texto de los seriales que salen. Parece una línea de texto,
+        pero es un <input> a propósito: es la única forma de que confirm_move.js
+        lo lleve al modal (saltea los ocultos, y de un checkbox sólo sabría
+        decir "Sí"). No se lee en el backend. -#}
+    <div class="serial-summary-box field" style="flex-basis:100%; display:none;">
+      <label>Seriales que salen</label>
+      <input type="text" class="serial-summary" name="serials_txt[]" readonly tabindex="-1"
+             style="border:0; background:transparent; padding:0; height:auto;
+                    font-size:13px; color:var(--text-secondary,#666);">
+    </div>
+    <input type="hidden" name="unit_ids[]" class="serial-ids">
   </div>
 </template>
 
@@ -186,11 +205,14 @@ document.addEventListener("DOMContentLoaded", function () {
   var serializedItems = ({{ serialized_item_ids|tojson }} || []).map(String);
   var fromSel = document.getElementById("from_location_id");
 
-  // Lista de ítems seleccionables (excluye serializados: van por Movimientos).
+  // Lista de ítems seleccionables. Los serializados TAMBIÉN entran: cada fila
+  // resuelve sus seriales con el mismo selector auto/elegir de Movimientos.
   var allUsageItems = [
-    {% for it in items %}{% if not it.serialized %}{ value: "{{ it.id }}", text: "{{ (it.code ~ ' - ' ~ it.name)|e }}" },
-    {% endif %}{% endfor %}
+    {% for it in items %}{ value: "{{ it.id }}", text: "{{ (it.code ~ ' - ' ~ it.name)|e }}" },
+    {% endfor %}
   ];
+  var unitsMap = {{ units_map|tojson }};
+  var serializedItemIds = {{ serialized_item_ids|tojson }};
 
   function allowedForCurrentFrom() {
     var locId = fromSel ? String(fromSel.value || "") : "";
@@ -238,6 +260,7 @@ document.addEventListener("DOMContentLoaded", function () {
       if (el.tomselect) el.tomselect.clear(true);
     });
     usageDedupe.refresh();
+    syncSerialsAllLines();
   }
 
   function initTomSelectFor(el) {
@@ -253,9 +276,52 @@ document.addEventListener("DOMContentLoaded", function () {
         clampUsageQty(el.closest(".usage-line"));
         // Liberar/tomar el item en las demas filas.
         applyStockFilterAllLines();
+        var linea = el.closest(".usage-line");
+        if (linea && linea._syncSerials) linea._syncSerials();
       }
     });
     applyStockFilterAllLines();
+  }
+
+  function wireSerials(line) {
+    var box = line.querySelector(".serial-pick-box");
+    var auto = line.querySelector(".serial-auto-box");
+    var resumen = line.querySelector(".serial-summary-box");
+    var summaryInput = line.querySelector(".serial-summary");
+    var refresh = initSerialPicker({
+      unitsMap: unitsMap,
+      serializedItems: serializedItemIds,
+      itemEl: line.querySelector(".usage-item"),
+      fromSel: fromSel,
+      qtyInput: line.querySelector('input[name="qty[]"]'),
+      pickBox: box,
+      pickList: line.querySelector(".serial-pick-list"),
+      pickStatus: line.querySelector(".serial-pick-status"),
+      autoHint: auto,
+      autoText: line.querySelector(".serial-auto-text"),
+      idsInput: line.querySelector(".serial-ids"),
+      summaryInput: summaryInput
+    });
+    // El bloque del resumen solo se muestra si hay algo que resumir.
+    function sync() {
+      refresh();
+      if (resumen) {
+        resumen.style.display = (summaryInput && summaryInput.value) ? "" : "none";
+      }
+    }
+    var qtyEl = line.querySelector('input[name="qty[]"]');
+    if (qtyEl) qtyEl.addEventListener("input", sync);
+    if (box) box.addEventListener("change", function () {
+      if (resumen) resumen.style.display = (summaryInput && summaryInput.value) ? "" : "none";
+    });
+    line._syncSerials = sync;
+    sync();
+  }
+
+  function syncSerialsAllLines() {
+    document.querySelectorAll(".usage-line").forEach(function (l) {
+      if (l._syncSerials) l._syncSerials();
+    });
   }
 
   function wireUsageLine(line) {
@@ -264,6 +330,7 @@ document.addEventListener("DOMContentLoaded", function () {
     initTomSelectFor(itemSelect);
     var qtyEl = line.querySelector('input[name="qty[]"]');
     if (qtyEl) { qtyEl.addEventListener("input", function () { clampUsageQty(line); }); }
+    wireSerials(line);
     // Al borrar la fila, su item vuelve a estar disponible en las demas.
     if (removeBtn) {
       removeBtn.addEventListener("click", function () {

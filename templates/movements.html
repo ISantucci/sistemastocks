@@ -75,6 +75,18 @@
         <div id="serial_pick_list" class="serial-pick-list"></div>
       </div>
 
+      {#- Resumen en texto de los seriales que salen. Parece una línea de texto,
+          pero es un <input> a propósito: es la única forma de que confirm_move.js
+          lo lleve al modal (saltea los ocultos, y de un checkbox sólo sabría
+          decir "Sí"). No se lee en el backend: las unidades las siguen mandando
+          los checkboxes con name="unit_id". -#}
+      <div class="field" id="serial_summary_box" style="display:none;">
+        <label>Seriales que salen</label>
+        <input type="text" id="serial_summary" name="serials_txt" readonly tabindex="-1"
+               style="border:0; background:transparent; padding:0; height:auto;
+                      font-size:13px; color:var(--text-secondary,#666);">
+      </div>
+
       <div class="field" id="scrap_reason_box" style="display:none;">
         <label>Motivo de descarte</label>
         <select name="scrap_reason">
@@ -399,8 +411,22 @@ document.addEventListener("DOMContentLoaded", function () {
     pickList: document.getElementById("serial_pick_list"),
     pickStatus: document.getElementById("serial_pick_status"),
     autoHint: document.getElementById("serial_auto_hint"),
-    autoText: document.getElementById("serial_auto_text")
+    autoText: document.getElementById("serial_auto_text"),
+    summaryInput: document.getElementById("serial_summary")
   });
+
+  // El resumen sólo se muestra cuando hay seriales que resumir.
+  (function () {
+    var caja = document.getElementById("serial_summary_box");
+    var campo = document.getElementById("serial_summary");
+    var form = campo ? campo.form : null;
+    if (!caja || !campo) return;
+    function sync() { caja.style.display = campo.value ? "" : "none"; }
+    var base = refreshSerialUI;
+    refreshSerialUI = function () { base(); sync(); };
+    if (form) form.addEventListener("change", sync);
+    refreshSerialUI();
+  })();
 
   if (itemEl && !itemEl.tomselect) {
     var allItems = [];

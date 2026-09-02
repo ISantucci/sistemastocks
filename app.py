@@ -1618,26 +1618,47 @@ def count_units_in_stock(item_id: int, location_id: int) -> int:
     return units_in_stock_query(item_id, location_id).count()
 
 
-def resolve_serial_units_out(item_id: int, from_id: int, qty: int, form, field: str = "unit_id"):
+def resolve_serial_units_out(item_id: int, from_id: int, qty: int, form=None,
+                             field: str = "unit_id", ids=None):
     """Regla auto/elegir para sacar unidades serializadas de una ubicación interna.
 
     Devuelve (units, error_msg):
-      - si hay más seriales que la cantidad (avail > qty): hay que elegir cuáles
-        (se leen del form). Si no eligió exactamente qty, error.
+      - si hay más seriales que la cantidad (avail > qty): hay que elegir cuáles.
+        Si no eligió exactamente qty, error.
       - si hay 1 o tantos como la cantidad (avail <= qty): se usan todos (auto).
       - si no hay seriales cargados (avail = 0): units=[] (se mueve por cantidad).
+
+    Los ids elegidos se leen del form (`field`) o se pasan ya parseados en `ids`.
+    Lo segundo lo usan las pantallas MULTI-FILA (Utilizados, Descartes), donde
+    cada fila manda los suyos en un array alineado a item_id[] / qty[] y no se
+    pueden leer todos juntos del form. La validación es la misma para las dos:
+    la unidad tiene que estar EN_STOCK, en ESA ubicación y ser de ESE ítem —
+    `from_units` ya sale filtrado así, y lo elegido se cruza contra esa lista.
     """
     from_units = (units_in_stock_query(item_id, from_id)
                   .order_by(ItemUnit.created_at, ItemUnit.id).all())
     avail = len(from_units)
     if avail > qty:
-        ids = {int(x) for x in form.getlist(field) if x.isdigit()}
-        chosen = [u for u in from_units if u.id in ids]
+        if ids is None:
+            ids = form.getlist(field) if form is not None else []
+        elegidos = {int(x) for x in ids if str(x).strip().isdigit()}
+        chosen = [u for u in from_units if u.id in elegidos]
         if len(chosen) != qty:
             return None, (f"Hay {avail} seriales en el origen y movés {qty}: "
                           f"elegí exactamente {qty}.")
         return chosen, None
     return from_units, None
+
+
+def parse_unit_ids(raw: str):
+    """Ids de unidad de una fila multi-fila ("12,15" -> [12, 15]), sin repetidos."""
+    vistos, salida = set(), []
+    for parte in (raw or "").split(","):
+        parte = parte.strip()
+        if parte.isdigit() and parte not in vistos:
+            vistos.add(parte)
+            salida.append(int(parte))
+    return salida
 
 
 def apply_serial_units_out(units, to_id: int):
@@ -5163,6 +5184,7 @@ def item_usage():
                 items=[], is_tecnico=True, locations=[], movements=[],
                 page_obj=PageResult([], 1, 100, 0),
                 stock_map={}, stock_qty_map={}, serialized_item_ids=[],
+                units_map={},
                 users=[], from_date="", to_date="",
                 item_filter="", user_filter="", limit="100",
                 selected_sort_by="date", selected_sort_dir="desc",
@@ -5195,6 +5217,9 @@ def item_usage():
 
         item_ids = request.form.getlist("item_id[]")
         qtys = request.form.getlist("qty[]")
+        # Seriales elegidos por fila, alineados con item_id[] / qty[]. Vacío en
+        # las filas no serializadas y también cuando los resuelve el backend.
+        unit_ids_raw = request.form.getlist("unit_ids[]")
 
         # Limpieza de filas vacías + validación todo-o-nada (nada se toca hasta el try).
         # Un ítem = una sola línea (ver nota en movements_bulk): el front lo saca
@@ -5225,13 +5250,21 @@ def item_usage():
                 flash(f"Línea {len(parsed_lines) + 1}: el item no existe o está dado de baja.", "error")
                 return redirect(url_for("item_usage"))
 
+            # SERIALIZADO: se resuelve QUÉ unidades salen con la misma regla que
+            # Movimientos (auto si hay tantas como la cantidad o menos, elegir si
+            # hay más). La validación es de backend: lo elegido tiene que estar
+            # EN_STOCK, en esta ubicación y ser de este ítem.
+            units = []
             if item.serialized:
-                flash(
-                    f"«{item.code} - {item.name}» es serializado. "
-                    "Cargalo desde Movimientos (Hacia: Utilizado) para elegir los seriales.",
-                    "error",
+                elegidos = parse_unit_ids(
+                    unit_ids_raw[idx] if idx < len(unit_ids_raw) else ""
                 )
-                return redirect(url_for("item_usage"))
+                units, err = resolve_serial_units_out(
+                    item.id, from_location_id, qty, ids=elegidos
+                )
+                if err:
+                    flash(f"Línea {len(parsed_lines) + 1}: {err}", "error")
+                    return redirect(url_for("item_usage"))
 
             if item.id in seen_items:
                 flash(
@@ -5242,7 +5275,7 @@ def item_usage():
                 return redirect(url_for("item_usage"))
             seen_items[item.id] = len(parsed_lines) + 1
 
-            parsed_lines.append({"item": item, "qty": qty})
+            parsed_lines.append({"item": item, "qty": qty, "units": units})
 
         if not parsed_lines:
             flash("Cargá al menos un ítem.", "error")
@@ -5253,8 +5286,15 @@ def item_usage():
             for line in parsed_lines:
                 item = line["item"]
                 qty = line["qty"]
+                units = line["units"]
 
                 upsert_stock(item.id, from_location_id, -qty)
+
+                # Los seriales van a la observación, igual que en Movimientos:
+                # es lo que después se lee en el historial.
+                obs_linea = observation or "Utilizado"
+                if units:
+                    obs_linea = serial_obs(obs_linea, [u.serial for u in units])
 
                 y, seq, number = next_movement_number()
                 m = Movement(
@@ -5263,13 +5303,16 @@ def item_usage():
                     from_location_id=from_location_id,
                     to_location_id=utilizados_loc.id,
                     user_id=current_user.id,
-                    observation=(observation or "Utilizado"),
+                    observation=obs_linea,
                     year=y,
                     seq=seq,
                     number=number,
                 )
                 db.session.add(m)
                 db.session.flush()
+                # Misma transacción que el stock y el movimiento.
+                if units:
+                    apply_serial_units_out(units, utilizados_loc.id)
                 created += 1
 
             db.session.commit()
@@ -5367,6 +5410,12 @@ def item_usage():
 
     serialized_item_ids = [it.id for it in items if it.serialized]
 
+    # Seriales disponibles por ítem y ubicación, para el selector de cada fila.
+    # El TECNICO solo ve (y solo puede consumir) los de sus ubicaciones.
+    units_map, _ = build_units_map(
+        location_ids=tech_location_ids if is_tecnico else None
+    )
+
     return render_template(
         "item_usage.html",
         items=items,
@@ -5377,6 +5426,7 @@ def item_usage():
         stock_map=stock_map,
         stock_qty_map=stock_qty_map,
         serialized_item_ids=serialized_item_ids,
+        units_map=units_map,
         users=users_list,
         from_date=f_date_from,
         to_date=f_date_to,
@@ -6757,6 +6807,8 @@ def scrap_report():
         item_ids = request.form.getlist("item_id[]")
         qtys = request.form.getlist("qty[]")
         reasons = request.form.getlist("scrap_reason[]")
+        # Seriales elegidos por fila, alineados con item_id[] / qty[].
+        unit_ids_raw = request.form.getlist("unit_ids[]")
 
         # Validación todo-o-nada (nada se toca hasta el try).
         # Un ítem = una sola línea (ver nota en movements_bulk). Consecuencia
@@ -6791,13 +6843,18 @@ def scrap_report():
             if not item or not item.is_active:
                 flash(f"Línea {n}: el item no existe o está dado de baja.", "error")
                 return redirect(url_for("scrap_report"))
+            # SERIALIZADO: misma regla auto/elegir que Movimientos y Utilizados.
+            units = []
             if item.serialized:
-                flash(
-                    f"«{item.code} - {item.name}» es serializado. "
-                    "Cargalo desde Movimientos (Hacia: Descartes) para elegir los seriales.",
-                    "error",
+                elegidos = parse_unit_ids(
+                    unit_ids_raw[idx] if idx < len(unit_ids_raw) else ""
                 )
-                return redirect(url_for("scrap_report"))
+                units, err = resolve_serial_units_out(
+                    item.id, from_location_id, qty, ids=elegidos
+                )
+                if err:
+                    flash(f"Línea {n}: {err}", "error")
+                    return redirect(url_for("scrap_report"))
 
             if item.id in seen_items:
                 flash(
@@ -6808,7 +6865,8 @@ def scrap_report():
                 return redirect(url_for("scrap_report"))
             seen_items[item.id] = n
 
-            parsed_lines.append({"item": item, "qty": qty, "reason": reason_raw})
+            parsed_lines.append({"item": item, "qty": qty, "reason": reason_raw,
+                                 "units": units})
 
         if not parsed_lines:
             flash("Cargá al menos un ítem.", "error")
@@ -6820,11 +6878,17 @@ def scrap_report():
                 item = line["item"]
                 qty = line["qty"]
                 reason = line["reason"]
+                units = line["units"]
 
                 if not location_is_external(from_location_id):
                     upsert_stock(item.id, from_location_id, -qty)
                 if not location_is_external(descartes_loc.id):
                     upsert_stock(item.id, descartes_loc.id, qty)
+
+                # Los seriales van a la observación, igual que en Movimientos.
+                obs_linea = observation or ("Descarte: " + reason)
+                if units:
+                    obs_linea = serial_obs(obs_linea, [u.serial for u in units])
 
                 y, seq, number = next_movement_number()
                 m = Movement(
@@ -6833,13 +6897,16 @@ def scrap_report():
                     from_location_id=from_location_id,
                     to_location_id=descartes_loc.id,
                     user_id=current_user.id,
-                    observation=(observation or ("Descarte: " + reason)),
+                    observation=obs_linea,
                     year=y,
                     seq=seq,
                     number=number,
                 )
                 db.session.add(m)
                 db.session.flush()
+                # Misma transacción que el stock, el movimiento y el Scrap.
+                if units:
+                    apply_serial_units_out(units, descartes_loc.id)
                 db.session.add(Scrap(
                     item_id=item.id,
                     location_id=from_location_id,
@@ -6915,6 +6982,10 @@ def scrap_report():
 
     serialized_item_ids = [it.id for it in items_all if it.serialized]
 
+    # Seriales disponibles por ítem y ubicación, para el selector de cada fila.
+    # Esta pantalla es solo ADMIN/SUPERVISOR: no hay alcance de TECNICO que acotar.
+    units_map, _ = build_units_map()
+
     return render_template(
         "scrap_report.html",
         scraps=scraps,
@@ -6925,6 +6996,7 @@ def scrap_report():
         stock_map=stock_map,
         stock_qty_map=stock_qty_map,
         serialized_item_ids=serialized_item_ids,
+        units_map=units_map,
         users=users_list,
         from_date=f_date_from,
         to_date=f_date_to,
