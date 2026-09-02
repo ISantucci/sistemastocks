@@ -258,10 +258,26 @@
     document.body.classList.remove('modal-open');
     if (f) f.src = 'about:blank';
   }
-  // Cierre manual (X, clic afuera, Escape): pasa por el historial para que
-  // el botón "atrás" quede consistente.
+  // Cierre manual (X, clic afuera, Escape).
+  //
+  // ANTES esto hacía `history.back()`, y ahí estaba el bug: el contenido del
+  // popup vive en un IFRAME, y cada navegación adentro del iframe (cargar un
+  // serial, editar, paginar) empuja su propia entrada en el historial de la
+  // pestaña. Entonces el back() no sacaba la entrada '#detalle': retrocedía UNA
+  // OPERACIÓN DENTRO del popup. El síntoma era que tocabas afuera y en vez de
+  // cerrarse, el popup "se deshacía" un paso — y hacía falta un clic por cada
+  // cosa que hubieras hecho adentro. Se veía sólo en la ficha de Seriales,
+  // que es la única donde se opera; remitos y solicitudes sólo se leen.
+  //
+  // Ahora se cierra primero —siempre, al primer clic— y el '#detalle' se limpia
+  // con replaceState, que NO navega. El botón "atrás" del navegador sigue
+  // cerrando el popup mientras está abierto: eso lo hace el popstate de abajo,
+  // que no se tocó.
   function dismissDetail() {
-    if (location.hash === '#detalle') history.back(); else closeDetail();
+    closeDetail();
+    if (location.hash === '#detalle') {
+      history.replaceState(null, '', location.pathname + location.search);
+    }
   }
   // Cerrar con el botón "atrás" del navegador.
   window.addEventListener('popstate', function () {
