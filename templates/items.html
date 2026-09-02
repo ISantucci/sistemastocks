@@ -9,7 +9,7 @@
     {# Export disponible para ADMIN, SUPERVISOR y LECTOR. Respeta los filtros
        y el orden actuales: se baja exactamente lo que se está viendo. #}
     <a class="btn btn-secondary"
-       href="{{ url_for('items_export_xlsx', category_id=selected_category_id, trackable=selected_trackable, q=selected_q, item_id=selected_item_id, sort_by=selected_sort_by, sort_dir=selected_sort_dir) }}">
+       href="{{ url_for('items_export_xlsx', category_id=selected_category_id, trackable=selected_trackable, q=selected_q, item_id=selected_item_id, sort_by=selected_sort_by, sort_dir=selected_sort_dir, show_inactive='1' if selected_show_inactive else '') }}">
       Exportar a Excel
     </a>
     {% if can_edit_items %}
@@ -39,13 +39,32 @@
     </div>
     <div class="field">
       <label>Buscar ítem</label>
-      <select name="item_id" class="js-buscar{% if all_items_remote %} js-buscar-remoto{% endif %}"
-              {% if all_items_remote %}data-src="{{ url_for('api_items_search') }}" data-value-field="id"{% endif %}>
+      {# Mismo control de siempre (misma estética), pero acepta texto libre:
+         escribiendo "NEO" el desplegable ofrece los ítems que coinciden y
+         además la opción «Buscar NEO», que filtra por texto y trae TODOS en
+         vez de obligar a elegir uno. Elegir un ítem puntual sigue andando: el
+         value es el CÓDIGO, igual que el buscador de /stock. #}
+      {% set codigos_visibles = all_items | map(attribute='code') | list %}
+      <select name="q" class="js-buscar js-buscar-libre{% if all_items_remote %} js-buscar-remoto{% endif %}"
+              {% if all_items_remote %}data-src="{{ url_for('api_items_search') }}" data-value-field="code"{% endif %}>
         <option value="">Todos</option>
+        {% if selected_q and selected_q not in codigos_visibles %}
+          {# Texto libre ya buscado: se re-emite como opción para que el control
+             lo siga mostrando después de recargar la página. #}
+          <option value="{{ selected_q }}" selected>{{ selected_q }}</option>
+        {% endif %}
         {% for it in all_items %}
-          <option value="{{ it.id }}" {% if selected_item_id and (selected_item_id|string) == (it.id|string) %}selected{% endif %}>{{ it.code }} - {{ it.name }}</option>
+          <option value="{{ it.code }}" {% if selected_q == it.code %}selected{% endif %}>{{ it.code }} - {{ it.name }}</option>
         {% endfor %}
       </select>
+    </div>
+    <div class="field">
+      <label>Estado</label>
+      {# Sin tildar, la pantalla muestra solo el catálogo vigente. #}
+      <label class="check-inline" style="margin-top:6px;">
+        <input type="checkbox" name="show_inactive" value="1" {% if selected_show_inactive %}checked{% endif %}>
+        Mostrar inactivos
+      </label>
     </div>
     <div class="field">
       <label>Filas por página</label>
@@ -58,6 +77,9 @@
         {% endif %}
       </select>
     </div>
+    {# item_id ya no tiene control propio (lo reemplazó el buscador por texto),
+       pero se conserva para no romper URLs guardadas que lo traigan. #}
+    {% if selected_item_id %}<input type="hidden" name="item_id" value="{{ selected_item_id }}">{% endif %}
     <input type="hidden" name="sort_by" value="{{ selected_sort_by or 'code' }}">
     <input type="hidden" name="sort_dir" value="{{ selected_sort_dir or 'asc' }}">
     <input type="hidden" name="page" value="1">
@@ -208,6 +230,11 @@
     <div class="modal-header"><span class="modal-title">Nuevo ítem</span><button type="button" class="modal-close" onclick="closeModal('modal-item-new')">&times;</button></div>
     <form method="post" action="{{ url_for('item_new') }}" id="form-item-new">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      {# La URL vigente viaja con el form para volver a ESTA misma vista después
+         de guardar. El backend solo le toma la query (ver url_de_vuelta en
+         app.py): el destino lo sigue decidiendo la ruta, no el navegador.
+         En el resto de las pantallas este campo lo agrega app.js solo. #}
+      <input type="hidden" name="_filtros" value="{{ request.full_path }}">
       <div class="modal-body">
         <div class="flash-error" id="item-new-error" style="display:none;margin-bottom:10px;"></div>
         <div class="field"><label>Categoría</label>
@@ -258,6 +285,7 @@
     <div class="modal-header"><span class="modal-title">Editar ítem</span><button type="button" class="modal-close" onclick="closeModal('modal-item-{{ it.id }}')">&times;</button></div>
     <form method="post" action="{{ url_for('item_edit', item_id=it.id) }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="_filtros" value="{{ request.full_path }}">
       <div class="modal-body">
         <div class="field"><label>Código</label><input value="{{ it.code }}" readonly disabled style="background:#eee;color:#666;"><div class="muted">El código es automático y no se edita.</div></div>
         <div class="field"><label>Nombre</label><input name="name" value="{{ it.name }}" required></div>
@@ -318,6 +346,7 @@
           onsubmit="return confirm('¿Eliminar definitivamente el ítem {{ it.code }} - {{ it.name }}? No se puede deshacer. Solo funciona si el ítem no tiene historial (movimientos/pendientes/stock).');"
           style="border-top:1px solid var(--border); padding:12px 16px;">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="_filtros" value="{{ request.full_path }}">
       <button type="submit" class="btn btn-danger btn-sm">Eliminar ítem</button>
       <span class="muted" style="margin-left:8px;">Borrado real. Si tiene historial, usá "Activo" para darlo de baja.</span>
     </form>

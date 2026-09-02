@@ -8,7 +8,7 @@ import secrets
 import sqlite3
 import math
 import json
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 # Hora local Argentina (UTC-3, sin horario de verano). Offset fijo para no
 # depender de la zona horaria del sistema/contenedor ni de librerias externas.
@@ -397,6 +397,80 @@ def url_with(**overrides):
 @app.context_processor
 def _pagination_globals():
     return {"PER_PAGE_CHOICES": PER_PAGE_CHOICES}
+
+
+# ---------- VOLVER A LA VISTA FILTRADA DESPUES DE UN POST ----------
+# Problema transversal: casi todas las pantallas de listado terminan sus POST
+# con `redirect(url_for("<listado>"))`, SIN query string. Resultado: cada vez
+# que se guardaba algo la pantalla volvia sin filtros, sin orden y en la pagina
+# 1, y habia que rearmar todo a mano.
+#
+# En vez de tocar los ~200 redirects uno por uno (cambio enorme y con riesgo de
+# romper flujos que mandan a otra pantalla a proposito), las pantallas CON
+# formulario de filtros mandan en un campo oculto `_filtros` la URL desde la
+# que se envio el POST, y este hook la repone. Solo actua si:
+#
+#   - el redirect es interno y NO trae query propia (si la ruta ya decidio a
+#     donde va con parametros — por ejemplo `movements_view_args()` — manda la
+#     ruta, no este hook), y
+#   - el destino es exactamente la misma pantalla de origen.
+#
+# Si el POST manda a otra pantalla (un remito recien creado, el detalle de una
+# solicitud), no se toca nada. Y si el navegador no ejecuta JS, tampoco: se
+# comporta como antes.
+#
+# No hay riesgo de redirect abierto: el path y el host del destino los sigue
+# poniendo la ruta con url_for; de `_filtros` solo se toma la query, que es la
+# misma que el usuario ya podia escribir en la barra de direcciones.
+_FILTROS_MAX = 2000
+
+
+def _origen_filtrado():
+    """URL de la pantalla que envio el formulario, si es utilizable."""
+    raw = (request.form.get("_filtros") or "").strip()
+    if not raw or len(raw) > _FILTROS_MAX or "\r" in raw or "\n" in raw:
+        return None
+    partes = urlsplit(raw)
+    if partes.scheme or partes.netloc or not partes.path.startswith("/"):
+        return None
+    if not partes.query:
+        return None  # pantalla sin filtros vigentes: no hay nada que reponer
+    return partes
+
+
+def url_de_vuelta(destino: str) -> str:
+    """`destino` con los filtros de la pantalla de origen, cuando corresponde.
+
+    El esquema y el host del destino se conservan tal cual vinieron: Werkzeug
+    emite el Location relativo, pero con `autocorrect_location_header` (o detras
+    de un proxy que lo reescriba) puede llegar absoluto, y en ese caso el
+    mecanismo tiene que seguir funcionando en vez de apagarse en silencio.
+    """
+    partes_destino = urlsplit(destino or "")
+    if partes_destino.query:
+        return destino  # la ruta ya decidio a donde va: manda la ruta
+    origen = _origen_filtrado()
+    if origen is None or origen.path != partes_destino.path:
+        return destino
+    return urlunsplit(
+        (partes_destino.scheme, partes_destino.netloc,
+         partes_destino.path, origen.query, "")
+    )
+
+
+@app.after_request
+def _volver_a_la_vista_filtrada(response):
+    if request.method != "POST":
+        return response
+    if response.status_code not in (301, 302, 303, 307, 308):
+        return response
+    location = response.headers.get("Location")
+    if not location:
+        return response
+    nuevo = url_de_vuelta(location)
+    if nuevo != location:
+        response.headers["Location"] = nuevo
+    return response
 
 
 # ------------------ RATE LIMITING (flask-limiter) ------------------
@@ -3107,6 +3181,11 @@ def _items_filters_from_request():
         "item_id": request.args.get("item_id", "").strip(),
         "sort_by": request.args.get("sort_by", "code").strip(),
         "sort_dir": request.args.get("sort_dir", "asc").strip().lower(),
+        # Baja logica: los items inactivos NO se listan salvo pedido explicito.
+        # El parametro ausente significa apagado, asi que la pantalla arranca
+        # siempre con el catalogo vigente (cambio de default pedido y aprobado).
+        "show_inactive": request.args.get("show_inactive", "").strip().lower()
+        in ("1", "on", "true"),
     }
 
 
@@ -3123,6 +3202,11 @@ def _build_items_query(f: dict):
 
     if f["trackable"] in ("0", "1"):
         q = q.filter(Item.trackable == (f["trackable"] == "1"))
+
+    # Se aplica ANTES que los filtros de item: sin el tilde, un inactivo no
+    # aparece ni siquiera eligiendolo a mano en el buscador.
+    if not f.get("show_inactive"):
+        q = q.filter(Item.is_active.is_(True))
 
     # Buscador tipo Movimientos: si se elige un item puntual, se filtra por ese.
     if f["item_id"].isdigit():
@@ -3177,6 +3261,7 @@ def items():
     item_filter = f["item_id"]
     sort_by = f["sort_by"]
     sort_dir = f["sort_dir"]
+    show_inactive = f["show_inactive"]
 
     # Paginado. Esta pantalla era la mas pesada de todas: ademas de la tabla,
     # renderiza UN MODAL DE EDICION POR FILA, asi que el HTML crecia el doble
@@ -3185,8 +3270,16 @@ def items():
     items_page = paginate(_build_items_query(f))
     items_list = items_page.items
     categories_list = Category.query.order_by(Category.name).all()
+    # El buscador de la pantalla vale por CODIGO, igual que el de /stock: asi el
+    # mismo control sirve para elegir un item puntual y para escribir texto
+    # libre (ver el filtro `q` de _build_items_query).
+    # Si los inactivos no se muestran, tampoco se ofrecen en el buscador.
+    # LIMITACION CONOCIDA: con catalogos por encima de ITEM_PICKER_MAX_INLINE el
+    # desplegable pasa a /api/items/search, que solo devuelve activos. Marcar
+    # "Mostrar inactivos" filtra bien la tabla, pero el buscador no los sugiere.
+    picker_base = Item.query if show_inactive else Item.query.filter(Item.is_active.is_(True))
     all_items, all_items_remote = item_picker_options(
-        item_filter, value_field="id", base_query=Item.query
+        q_text, value_field="code", base_query=picker_base
     )
 
     # Proveedores activos para los selectores de alta/edición. Se ordenan por
@@ -3237,6 +3330,7 @@ def items():
         selected_item_id=item_filter,
         selected_sort_by=sort_by,
         selected_sort_dir=sort_dir,
+        selected_show_inactive=show_inactive,
     )
 
 
@@ -3416,9 +3510,12 @@ def item_new():
                 apply_item_suppliers(new_item, request.form)
                 db.session.commit()
                 flash(f"Item creado con código {code}", "ok")
+                # El alta por AJAX no pasa por el hook (devuelve JSON, no un
+                # 302), asi que arma el destino filtrado a mano.
+                back = url_de_vuelta(url_for("items"))
                 if wants_json:
-                    return jsonify(ok=True, redirect=url_for("items"))
-                return redirect(url_for("items"))
+                    return jsonify(ok=True, redirect=back)
+                return redirect(back)
             except IntegrityError:
                 db.session.rollback()
                 continue

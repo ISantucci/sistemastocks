@@ -149,18 +149,72 @@ window.TS_REMOTE_OPTS = function (el) {
   });
 };
 
+/* Buscador con TEXTO LIBRE (select.js-buscar-libre).
+   Mantiene el selector de siempre —misma estética— pero deja de obligar a
+   elegir una opción: escribiendo "NEO" el desplegable ofrece los ítems que
+   coinciden y, además, una entrada «Buscar NEO» que manda esa palabra como
+   filtro de texto y trae todos los que coincidan.
+   `createOnBlur` es lo que evita el caso molesto: escribir la palabra y tocar
+   "Filtrar" sin haber apretado Enter. */
+window.TS_FREE_OPTS = {
+  create: function (input) { return { value: input, text: input }; },
+  createOnBlur: true,
+  persist: false,
+  /* Con la lista desplegada, TomSelect resalta por defecto el PRIMER ítem, no
+     la opción de búsqueda: escribir "NEO" y apretar Enter terminaba eligiendo
+     NEO-001, que es justo lo que molestaba. Con addPrecedence el Enter manda
+     la palabra como filtro de texto; para elegir un ítem puntual se lo clickea
+     (o se baja con las flechas). */
+  addPrecedence: true,
+  render: {
+    option_create: function (data, escape) {
+      return '<div class="create">Buscar <strong>' + escape(data.input) + '</strong>' +
+             '<div class="muted" style="font-size:12px;">todos los que coincidan</div></div>';
+    }
+  }
+};
+
 document.addEventListener('DOMContentLoaded', function () {
   document.querySelectorAll('select.js-buscar').forEach(function (el) {
     if (el.tomselect) return;
+    var opts;
     if (el.classList.contains('js-buscar-remoto') && el.getAttribute('data-src')) {
-      new TomSelect(el, window.TS_REMOTE_OPTS(el));
+      opts = window.TS_REMOTE_OPTS(el);
     } else {
-      new TomSelect(el, window.TS_SINGLE_OPTS);
+      opts = Object.assign({}, window.TS_SINGLE_OPTS);
     }
+    if (el.classList.contains('js-buscar-libre')) {
+      opts = Object.assign({}, opts, window.TS_FREE_OPTS);
+    }
+    new TomSelect(el, opts);
   });
   document.querySelectorAll('select.js-multi-prov').forEach(function (el) {
     if (el.tomselect) return;
     new TomSelect(el, window.TS_MULTI_OPTS);
+  });
+});
+
+/* ---------- Volver a la vista filtrada después de guardar ----------
+   Casi todas las pantallas de listado terminan sus POST con un redirect al
+   listado "pelado": sin filtros, sin orden y en la página 1. Acá se le agrega
+   a cada formulario POST de una pantalla CON filtros la URL vigente, y el
+   backend la repone al redirigir (ver `_volver_a_la_vista_filtrada` en app.py).
+
+   Se activa solo si la pantalla tiene formulario de filtros y la URL ya trae
+   alguno: sin filtros vigentes no hay nada que conservar. Degrada abierto —
+   si el JS no carga, todo se comporta exactamente como antes. */
+document.addEventListener('DOMContentLoaded', function () {
+  if (!window.location.search) return;
+  if (!document.querySelector('form.filters-grid, form.filters-row')) return;
+  var actual = window.location.pathname + window.location.search;
+  document.querySelectorAll('form').forEach(function (f) {
+    if ((f.getAttribute('method') || 'get').toLowerCase() !== 'post') return;
+    if (f.querySelector('input[name="_filtros"]')) return;  // ya lo pone el template
+    var i = document.createElement('input');
+    i.type = 'hidden';
+    i.name = '_filtros';
+    i.value = actual;
+    f.appendChild(i);
   });
 });
 
