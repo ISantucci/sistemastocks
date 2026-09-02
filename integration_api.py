@@ -98,19 +98,22 @@ def require_api_key(*scopes: str):
 
 # ------------------ helpers de dominio ------------------
 
-def _find_truck_location(name: str):
-    """Location por nombre exacto normalizado (case-insensitive, trim) Y
-    is_truck=True. Se compara en Python (no en SQL) para no depender del
-    collation de SQLite y para que "trim + case-insensitive" sea exactamente
-    lo mismo sin importar el motor de base que termine usando la app.
+def _find_truck_location_by_id(location_id):
+    """Location por id Y is_truck=True.
+
+    Reemplaza al matching por nombre (_find_truck_location, ahora eliminado):
+    TNGTickets ya no manda el nombre de la camioneta, manda el id de
+    Location de sistemastocks resuelto de antemano contra la tabla de
+    mapeo `mapeo_stock.MapeoFlota` (TNGTickets, no toca nada de este repo).
     """
-    normalized = (name or "").strip().casefold()
-    if not normalized:
+    try:
+        location_id_int = int(location_id)
+    except (TypeError, ValueError):
         return None
-    for loc in Location.query.filter_by(is_truck=True).all():
-        if (loc.name or "").strip().casefold() == normalized:
-            return loc
-    return None
+    loc = Location.query.get(location_id_int)
+    if not loc or not loc.is_truck:
+        return None
+    return loc
 
 
 def _find_consumable_item(code: str):
@@ -183,15 +186,15 @@ def list_locations():
     return _ok(data)
 
 
-@bp.route("/locations/by-name/<name>/items", methods=["GET"])
+@bp.route("/locations/<location_id>/items", methods=["GET"])
 @require_api_key()
-def location_items(name):
-    loc = _find_truck_location(name)
+def location_items(location_id):
+    loc = _find_truck_location_by_id(location_id)
     if not loc:
         return _err(
             404,
             "location_not_found",
-            f"No existe una camioneta con nombre '{name}' en el sistema de stock",
+            f"No existe una camioneta con id '{location_id}' en el sistema de stock",
         )
 
     rows = (
@@ -221,7 +224,7 @@ def create_consumo():
     if body is None:
         return _err(400, "body_invalido", "Body invalido o no es JSON")
 
-    location_name = (body.get("location_name") or "").strip()
+    location_id = body.get("location_id")
     item_code = (body.get("item_code") or "").strip()
     cantidad_raw = body.get("cantidad")
     ticket_id = body.get("ticket_id")
@@ -238,12 +241,12 @@ def create_consumo():
     # --- Orden de validacion fijo (contrato del Paso 2): corta en la primera
     # que falle. ---
 
-    loc = _find_truck_location(location_name)
+    loc = _find_truck_location_by_id(location_id)
     if not loc:
         return _err(
             404,
             "location_not_found",
-            f"No existe una camioneta con nombre '{location_name}' en el sistema de stock",
+            f"No existe una camioneta con id '{location_id}' en el sistema de stock",
         )
 
     item = _find_consumable_item(item_code)
