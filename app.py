@@ -5094,7 +5094,12 @@ def movements_bulk():
             return_qty_raw = (pending_return_qtys[idx] or "").strip() if idx < len(pending_return_qtys) else ""
             scrap_reason_raw = (scrap_reasons[idx] or "").strip() if idx < len(scrap_reasons) else ""
 
-            if not item_raw and not qty_raw:
+            # Fila SIN ítem = fila que no existe. Antes se salteaba solo si
+            # ítem Y cantidad estaban vacíos, y como la cantidad viene con un 1
+            # por defecto en el HTML, una fila en blanco nunca cumplía las dos
+            # condiciones: caía en "ítem inválido" y tiraba abajo toda la carga.
+            # Dejar filas de más sin usar es lo normal, no un error.
+            if not item_raw:
                 continue
 
             lines.append({
@@ -5441,8 +5446,13 @@ def item_usage():
             item_raw = (item_ids[idx] or "").strip()
             qty_raw = (qtys[idx] or "").strip() if idx < len(qtys) else ""
 
-            if not item_raw and not qty_raw:
-                continue  # fila vacía
+            # Fila SIN ítem = fila que no existe. Antes se salteaba solo si
+            # ítem Y cantidad estaban vacíos, y como la cantidad viene con un 1
+            # por defecto en el HTML, una fila en blanco nunca cumplía las dos
+            # condiciones: caía en "ítem inválido" y tiraba abajo toda la carga.
+            # Dejar filas de más sin usar es lo normal, no un error.
+            if not item_raw:
+                continue
 
             if not item_raw.isdigit():
                 flash(f"Línea {len(parsed_lines) + 1}: item inválido.", "error")
@@ -7088,8 +7098,13 @@ def scrap_report():
             qty_raw = (qtys[idx] or "").strip() if idx < len(qtys) else ""
             reason_raw = (reasons[idx] or "").strip() if idx < len(reasons) else ""
 
-            if not item_raw and not qty_raw:
-                continue  # fila vacía
+            # Fila SIN ítem = fila que no existe. Antes se salteaba solo si
+            # ítem Y cantidad estaban vacíos, y como la cantidad viene con un 1
+            # por defecto en el HTML, una fila en blanco nunca cumplía las dos
+            # condiciones: caía en "ítem inválido" y tiraba abajo toda la carga.
+            # Dejar filas de más sin usar es lo normal, no un error.
+            if not item_raw:
+                continue
 
             n = len(parsed_lines) + 1
             if not item_raw.isdigit():
@@ -8148,7 +8163,12 @@ def repair_request_new():
     for idx in range(len(item_ids)):
         item_raw = (item_ids[idx] or "").strip()
         qty_raw = (qtys[idx] or "").strip() if idx < len(qtys) else ""
-        if not item_raw and not qty_raw:
+        # Fila SIN ítem = fila que no existe. Antes se salteaba solo si
+        # ítem Y cantidad estaban vacíos, y como la cantidad viene con un 1
+        # por defecto en el HTML, una fila en blanco nunca cumplía las dos
+        # condiciones: caía en "ítem inválido" y tiraba abajo toda la carga.
+        # Dejar filas de más sin usar es lo normal, no un error.
+        if not item_raw:
             continue
         n = len(parsed) + 1
         if not item_raw.isdigit():

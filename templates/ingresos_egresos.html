@@ -303,9 +303,9 @@
     var itemId = line.querySelector('.io-item').value;
     var body = document.getElementById('sn-body');
     body.innerHTML = '';
-    if(!itemId){ alert('Elegí primero el ítem.'); return; }
+    if(!itemId){ avisar('Elegí primero el ítem.'); return; }
     var declared = parseInt(line.querySelector('.io-qty').value, 10) || 0;
-    if(declared < 1){ alert('Poné primero la cantidad a egresar.'); return; }
+    if(declared < 1){ avisar('Poné primero la cantidad a egresar.'); return; }
 
     var counter = document.createElement('p');
     counter.className = 'muted'; counter.id = 'sn-counter';
@@ -339,7 +339,7 @@
     var vals = [];
     body.querySelectorAll('.sn-check:checked').forEach(function(cb){ vals.push(cb.value); });
     if(declared < 1 || vals.length !== declared){
-      alert('Elegí exactamente ' + declared + ' serial(es), acorde a la cantidad declarada.');
+      avisar('Elegí exactamente ' + declared + ' serial(es), acorde a la cantidad declarada.');
       return;
     }
     snCurrentLine.querySelector('.io-serials').value = vals.join('\n');
@@ -388,6 +388,14 @@
 
   // Al enviar: si hay una fila de egreso serializado sin seriales (o que no
   // coinciden con la cantidad), se frena y se avisa.
+  // Todos los avisos de esta pantalla salen por el mismo popup rojo que el
+  // resto del sistema (static/js/form_errors.js). Si por algo no cargó, se cae
+  // al alert del navegador: un aviso feo es mejor que ningún aviso.
+  function avisar(msg){
+    if (typeof window.showFormError === 'function') window.showFormError(msg);
+    else alert(msg);
+  }
+
   function validateBeforeSubmit(ev){
     var tipo = currentTipo();
     var msg = null;
@@ -407,7 +415,7 @@
         else if(n !== q){ msg = 'Los seriales elegidos no coinciden con la cantidad. Revisá «Elegir S/N».'; }
       }
     });
-    if(msg){ ev.preventDefault(); alert(msg); }
+    if(msg){ ev.preventDefault(); avisar(msg); }
   }
 
   // El motivo es solo del egreso. En ingreso se oculta y se saca el required
@@ -445,7 +453,10 @@
     });
     document.getElementById('io-motivo').addEventListener('change', refreshMotivoHint);
     refreshMotivo();
-    addLine(); addLine(); addLine();
+    // Una sola fila al entrar, igual que Utilizados, Descartes y Carga
+    // multiple. Arrancar con tres dejaba dos filas vacias que el usuario
+    // no habia pedido, y eran las que hacian fallar el envio en silencio.
+    addLine();
   });
 </script>
 {% endif %}
