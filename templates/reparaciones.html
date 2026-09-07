@@ -63,6 +63,28 @@
                   {% endfor %}
                 </select>
               </div>
+              {# Serial que sale de la mesa. Vale para las tres acciones
+                 (reparado, descartado, enviar a proveedor): las tres sacan la
+                 unidad de 'En reparación'. `repairs` no guarda cuál unidad es,
+                 así que se elige acá entre las que están físicamente en la mesa. #}
+              {% if r.item.serialized %}
+              {% set _uns = repair_units.get(r.id, []) %}
+              <div class="field" style="margin-top:6px;">
+                <label>¿Qué serial?</label>
+                {% if _uns|length == 0 %}
+                  <span class="muted" style="font-weight:400;">No hay seriales de este ítem en la mesa: se mueve por cantidad.</span>
+                {% elif _uns|length <= r.quantity %}
+                  <span class="muted" style="font-weight:400;">Se usa automáticamente: {{ _uns|map(attribute='serial')|join(', ') }}</span>
+                {% else %}
+                  <div class="check-inline" style="gap:12px; flex-wrap:wrap;">
+                    {% for u in _uns %}
+                      <label class="check-inline"><input type="checkbox" name="unit_id" value="{{ u.id }}" data-confirm-skip> {{ u.serial }}</label>
+                    {% endfor %}
+                  </div>
+                  <span class="muted" style="font-weight:400;">Elegí exactamente {{ r.quantity }}.</span>
+                {% endif %}
+              </div>
+              {% endif %}
               <input type="text" name="observation" placeholder="Observación (opcional)" style="margin-top:6px;">
               <div style="margin-top:6px;"><button class="btn btn-primary btn-sm">Confirmar</button></div>
               <script>
@@ -123,6 +145,17 @@
                 <option value="{{ s.id }}">{{ s.contact_name }}{% if s.business_name %} · {{ s.business_name }}{% endif %}</option>
                 {% endfor %}
               </select>
+              {# La unidad salió del sistema al mandarla al proveedor: al volver
+                 se carga su serial y se reactiva la MISMA unidad, no una nueva. #}
+              {% if r.item.serialized %}
+              <div class="field" style="margin-top:6px;">
+                <label>N° de serie que vuelve</label>
+                {% for _i in range(r.quantity) %}
+                  <input type="text" name="unit_serial" placeholder="N° de serie" style="margin-top:4px;">
+                {% endfor %}
+                <span class="muted" style="font-weight:400;">El mismo que se envió: se reactiva esa unidad.</span>
+              </div>
+              {% endif %}
               <input type="text" name="observation" placeholder="Observación (opcional)" style="margin-top:6px;">
               <div style="margin-top:6px;"><button class="btn btn-primary btn-sm">Marcar reparada (ingreso + remito)</button></div>
             </form>
