@@ -78,6 +78,16 @@ db = SQLAlchemy(app)
 # {{ csrf_token() }}. No se desactiva CSRF para "resolver" errores.
 csrf = CSRFProtect(app)
 
+# Vigencia del token CSRF. El default de Flask-WTF es 3600s (1 hora) y el reloj
+# arranca cuando se RENDERIZA la pantalla, no cuando se envia. En /conteo el
+# formulario queda abierto horas mientras se cuenta: con el default, al guardar
+# el token ya habia vencido y se perdia todo el trabajo de la sesion.
+# El token sigue firmado y atado a la sesion (que es lo que realmente frena el
+# CSRF); lo unico que cambia es su ventana de validez. Configurable por entorno.
+app.config["WTF_CSRF_TIME_LIMIT"] = int(
+    os.environ.get("WTF_CSRF_TIME_LIMIT", "28800")  # 8 horas = jornada completa
+)
+
 
 @app.errorhandler(CSRFError)
 def handle_csrf_error(e):
@@ -488,6 +498,20 @@ def _rate_key():
     except Exception:
         pass
     return get_remote_address()
+
+
+def _login_rate_key():
+    """Clave del limite de intentos de login: IP + usuario, no solo IP.
+
+    Con la IP sola, varios tecnicos entrando desde la misma red (el wifi del
+    taller a la manana) se consumen los intentos entre ellos y el sexto queda
+    afuera sin haberse equivocado nunca. Con el usuario en la clave, el limite
+    protege CADA CUENTA, que es lo que interesa contra fuerza bruta, sin que un
+    usuario pueda bloquear a otro. El techo general por IP (120/min) sigue
+    aplicando y acota el barrido de muchos usuarios desde un mismo origen.
+    """
+    usuario = (request.form.get("username") or "").strip().lower()[:64]
+    return f"login:{get_remote_address()}:{usuario}"
 
 
 limiter = Limiter(
@@ -1547,16 +1571,59 @@ def seed_defaults():
             db.session.add(Location(name=name, description=desc, is_external=is_ext, is_truck=is_truck))
     db.session.commit()
 
-    # Eliminar ubicacion "En falla" si existe y no tiene referencias
+    # Eliminar la ubicacion "En falla" SOLO si de verdad no la referencia nadie.
+    #
+    # Antes esto confiaba en que la base rechazara el DELETE por integridad
+    # referencial. Pero SQLite NO valida las foreign keys salvo que se le pida
+    # explicitamente (PRAGMA foreign_keys=ON, que este sistema no activa: ver el
+    # listener de PRAGMAs), asi que el DELETE SIEMPRE tenia exito: el except
+    # nunca se ejecutaba. Si la ubicacion tenia movimientos, esas filas quedaban
+    # apuntando a una ubicacion inexistente y la pantalla de Movimientos
+    # explotaba al querer mostrar su nombre. Y esto corre en CADA arranque.
+    #
+    # Ahora se cuentan las referencias en Python antes de borrar. Si hay una
+    # sola, no se toca nada: la trazabilidad vale mas que la prolijidad.
     en_falla = Location.query.filter_by(name="En falla").first()
     if en_falla:
-        try:
-            db.session.delete(en_falla)
-            db.session.commit()
-            print("[INFO] Ubicacion 'En falla' eliminada.")
-        except Exception:
-            db.session.rollback()
-            print("[WARN] No se pudo eliminar 'En falla': tiene referencias activas.")
+        refs = _location_reference_count(en_falla.id)
+        if refs:
+            print(
+                f"[WARN] Ubicacion 'En falla' tiene {refs} referencia(s) en el "
+                "historial: NO se elimina."
+            )
+        else:
+            try:
+                db.session.delete(en_falla)
+                db.session.commit()
+                print("[INFO] Ubicacion 'En falla' eliminada (sin referencias).")
+            except Exception as exc:
+                db.session.rollback()
+                print(f"[WARN] No se pudo eliminar 'En falla': {exc}")
+
+
+def _location_reference_count(location_id: int) -> int:
+    """Cuantas filas de todo el sistema apuntan a esta ubicacion.
+
+    Se recorre el metadata en vez de listar las columnas a mano: hoy son diez
+    columnas repartidas en nueve tablas, y una tabla nueva agregaria una
+    undecima que una lista escrita a mano no veria. Sirve como chequeo previo a
+    cualquier borrado de ubicacion, porque SQLite no valida las foreign keys
+    salvo que se active el PRAGMA (este sistema no lo activa).
+    """
+    total = 0
+    for tabla in db.metadata.sorted_tables:
+        if tabla.name == "locations":
+            continue
+        for col in tabla.columns:
+            for fk in col.foreign_keys:
+                if fk.column.table.name == "locations" and fk.column.name == "id":
+                    total += (
+                        db.session.query(func.count())
+                        .select_from(tabla)
+                        .filter(col == location_id)
+                        .scalar()
+                    ) or 0
+    return total
 
 
 def upsert_stock(item_id: int, location_id: int, delta: int) -> None:
@@ -1648,6 +1715,61 @@ def resolve_serial_units_out(item_id: int, from_id: int, qty: int, form=None,
                           f"elegí exactamente {qty}.")
         return chosen, None
     return from_units, None
+
+
+def resolve_serial_units_in(item_id: int, serials, qty: int):
+    """Unidades serializadas que ENTRAN al sistema desde un origen EXTERNO.
+
+    El espejo de `resolve_serial_units_out`: alla se elige cual de las unidades
+    que estan en stock sale; aca se carga el serial de la que entra, porque el
+    sistema todavia no la conoce (o la conocia y habia salido).
+
+    Devuelve (units, error_msg). Reglas:
+      - hay que cargar exactamente `qty` seriales, sin repetir;
+      - serial NUEVO            -> se crea la unidad;
+      - serial que YA existe y habia salido (ENTREGADO / DESCARTADO)
+                                -> se REACTIVA: es la misma unidad fisica que
+                                   vuelve, no un serial duplicado;
+      - serial que ya existe y esta EN_STOCK -> error: no puede entrar dos veces.
+
+    Valida TODO antes de tocar nada (dos pasadas): si un serial esta mal, no
+    queda media carga hecha en la sesion.
+
+    El estado y la ubicacion finales NO se fijan aca: los aplica despues
+    `apply_serial_units_out(units, to_id)`, para que una unidad que entra y va
+    derecho a Descartes termine DESCARTADO igual que en cualquier otra pantalla.
+    """
+    limpios = [str(x).strip() for x in (serials or []) if str(x).strip()]
+    if len(limpios) != qty:
+        return None, (f"Item serializado: carga exactamente {qty} numero(s) de "
+                      f"serie (cargaste {len(limpios)}).")
+    bajos = [x.lower() for x in limpios]
+    if len(set(bajos)) != len(bajos):
+        return None, "Hay numeros de serie repetidos en la carga."
+
+    existentes = {u.serial.lower(): u
+                  for u in ItemUnit.query.filter_by(item_id=item_id).all()}
+
+    # Pasada 1: validar. Pasada 2: recien ahi crear/reactivar.
+    for x in limpios:
+        u = existentes.get(x.lower())
+        if u is not None and u.status == UNIT_EN_STOCK:
+            _loc = u.location.name if u.location else "otra ubicacion"
+            return None, (f"El serial {u.serial} ya esta en stock en {_loc}: no "
+                          f"puede entrar de nuevo. Si es el mismo, sacalo de ahi "
+                          f"primero desde Movimientos.")
+
+    units = []
+    for x in limpios:
+        u = existentes.get(x.lower())
+        if u is None:
+            u = ItemUnit(item_id=item_id, serial=x,
+                         status=UNIT_EN_STOCK, location_id=None)
+            db.session.add(u)
+        else:
+            u.status = UNIT_EN_STOCK  # reactivacion
+        units.append(u)
+    return units, None
 
 
 def parse_unit_ids(raw: str):
@@ -1814,9 +1936,13 @@ def _movements_filters_from_request() -> dict:
     date_to = (request.args.get("date_to") or request.args.get("to_date") or "").strip()
 
     limit_raw = (request.args.get("limit") or "").strip()
-    limit = 200
+    limit = PER_PAGE_DEFAULT
     if limit_raw.isdigit():
-        limit = max(1, min(int(limit_raw), 50000))
+        # Tope = PER_PAGE_MAX, el mismo que respeta el resto del sistema
+        # (per_page_from_request). Antes eran 50.000 filas: una sola URL a mano
+        # armaba una pagina gigante y, con un solo proceso waitress, dejaba a
+        # todos esperando. El export CSV tiene su propio tope y su propio rol.
+        limit = max(1, min(int(limit_raw), PER_PAGE_MAX))
 
     return {
         "item_filter": item_filter,
@@ -2259,6 +2385,77 @@ def _log_destructive(op: str, username: str, result: str, detail: str = "") -> N
     except Exception as exc:  # log best-effort, nunca debe romper el handler
         print(f"[WARN] No se pudo escribir destructive_ops.log: {exc}")
 
+# ------------------ BACKUP DIARIO AUTOMATICO ------------------
+# Hasta ahora el unico backup era el boton manual del panel de admin: si nadie
+# se acordaba, no habia copia. Con el sistema en uso diario por los tecnicos eso
+# no se sostiene.
+#
+# Sin hilos ni scheduler: en la primera request de cada dia se hace una copia
+# (una comparacion de fecha en memoria el resto del dia). Un fallo del backup
+# NUNCA rompe la request: se registra y se sigue.
+#
+# NO reemplaza a una tarea programada del sistema operativo, que corre aunque la
+# app este caida y puede copiar a otro disco. Es el piso, no el techo.
+BACKUP_DAILY_ENABLED = (
+    os.environ.get("BACKUP_DAILY_ENABLED", "true").strip().lower() == "true"
+)
+# Cuantos backups DIARIOS se conservan. La purga toca UNICAMENTE los que genera
+# este mecanismo (prefijo "diario"): los manuales y los previos a una operacion
+# destructiva no se borran nunca automaticamente.
+BACKUP_KEEP = max(1, int(os.environ.get("BACKUP_KEEP", "30")))
+
+# Marca en disco de la fecha del ultimo backup diario. En disco y no solo en
+# memoria para que un reinicio de la app no genere una copia de mas.
+_BACKUP_MARK = BACKUP_DIR / ".ultimo_backup_diario"
+_backup_diario_hoy = {"fecha": None}
+
+
+def _prune_daily_backups(keep: int) -> int:
+    """Deja los `keep` backups diarios mas nuevos. Devuelve cuantos borro.
+
+    El nombre lleva timestamp UTC (stocks_diario_AAAA-MM-DD_HHMMSS.db), asi que
+    ordenar por nombre es ordenar por fecha.
+    """
+    archivos = sorted(BACKUP_DIR.glob("stocks_diario_*.db"), reverse=True)
+    borrados = 0
+    for viejo in archivos[keep:]:
+        try:
+            viejo.unlink()
+            borrados += 1
+        except Exception as exc:
+            print(f"[WARN] no se pudo borrar el backup viejo {viejo.name}: {exc}")
+    return borrados
+
+
+def _daily_backup_if_due() -> None:
+    """Backup del dia si todavia no se hizo. Best-effort, nunca propaga."""
+    hoy = now_ar().date().isoformat()
+    if _backup_diario_hoy["fecha"] == hoy:
+        return
+    # Se marca ANTES de intentar: si el backup falla, no se reintenta en cada
+    # request del dia (seria un fallo repetido y ruidoso, no una solucion).
+    _backup_diario_hoy["fecha"] = hoy
+    try:
+        if _BACKUP_MARK.exists() and _BACKUP_MARK.read_text(encoding="utf-8").strip() == hoy:
+            return
+        path = _backup_db("diario")
+        borrados = _prune_daily_backups(BACKUP_KEEP)
+        _BACKUP_MARK.write_text(hoy, encoding="utf-8")
+        _log_destructive(
+            "backup_diario", "sistema", "OK",
+            f"backup={path.name} purgados={borrados} conservar={BACKUP_KEEP}",
+        )
+    except Exception as exc:
+        _log_destructive("backup_diario", "sistema", "ERROR", str(exc))
+
+
+@app.before_request
+def _daily_backup_guard():
+    if not BACKUP_DAILY_ENABLED or request.endpoint == "static":
+        return
+    _daily_backup_if_due()
+
+
 def stock_level_class(item, quantity: int) -> str:
     """Devuelve clase visual segun stock_min.
     Solo aplica a items NO rastreables con stock_min > 0.
@@ -2420,7 +2617,7 @@ def home():
 # ---- AUTH ----
 
 @app.route("/login", methods=["GET", "POST"])
-@limiter.limit("5 per minute", methods=["POST"], error_message="Demasiados intentos de acceso. Espera un minuto e intenta de nuevo.")
+@limiter.limit("5 per minute", key_func=_login_rate_key, methods=["POST"], error_message="Demasiados intentos de acceso. Espera un minuto e intenta de nuevo.")
 def login():
     if request.method == "POST":
         username = request.form.get("username", "").strip()
@@ -2467,8 +2664,14 @@ def perfil():
             flash("La contraseña actual es incorrecta.", "error")
             return redirect(url_for("perfil"))
 
-        if not new_password or len(new_password) < 4:
-            flash("La nueva contraseña es inválida (mínimo 4 caracteres).", "error")
+        # El alta de usuarios exige MIN_PASSWORD_LEN y esta pantalla aceptaba 4:
+        # el mínimo real del sistema terminaba siendo el más bajo de los dos,
+        # porque todos pasan por acá a cambiar su clave. Un solo criterio.
+        if not new_password or len(new_password) < MIN_PASSWORD_LEN:
+            flash(
+                f"La nueva contraseña es inválida (mínimo {MIN_PASSWORD_LEN} caracteres).",
+                "error",
+            )
             return redirect(url_for("perfil"))
 
         if new_password != confirm_password:
@@ -4607,12 +4810,10 @@ def movements():
             # Movimiento manual hacia "En reparación": además de mover el stock,
             # se genera el registro Repair (EN_REPARACION) para que el ítem aparezca
             # en la mesa de /reparaciones, aunque no venga de un pendiente.
-            # Serializados quedan afuera: la reparación por serial aún no está modelada.
-            if (
-                to_location
-                and to_location.name == LOCATION_EN_REPARACION
-                and not it.serialized
-            ):
+            # Los serializados estaban excluidos porque la mesa no sabía resolverlos;
+            # ahora sí, y dejarlos afuera significaría que la misma situación física
+            # aparece en la mesa o no según por qué pantalla se cargó.
+            if to_location and to_location.name == LOCATION_EN_REPARACION:
                 db.session.add(Repair(
                     item_id=item_id,
                     quantity=qty,
@@ -4665,11 +4866,21 @@ def movements():
     _order = [c.desc() if sort_dir == "desc" else c.asc() for c in _sort_cols]
 
     logs_q = _build_movements_query(filters, include_supplier=True).order_by(*_order)
-    if is_tecnico and tech_location_ids:
+    if is_tecnico:
+        # FALLA CERRADA. Antes la condición era `is_tecnico and tech_location_ids`:
+        # con el set vacío no se aplicaba filtro y el técnico veía el historial
+        # COMPLETO de la empresa. Y "técnico sin ubicación asignada" no es un caso
+        # exótico: es el de un usuario recién creado, o el de uno al que le sacaron
+        # la camioneta. Mismo criterio que /stock y que el export: sin ubicaciones,
+        # no ve nada.
+        _scope_ids = tech_location_ids or {-1}
         logs_q = logs_q.filter(db.or_(
-            Movement.from_location_id.in_(tech_location_ids),
-            Movement.to_location_id.in_(tech_location_ids),
+            Movement.from_location_id.in_(_scope_ids),
+            Movement.to_location_id.in_(_scope_ids),
         ))
+        if not tech_location_ids:
+            # Que no parezca un error del sistema: mismo aviso que /item-usage.
+            flash("No tenés ubicación asignada.", "error")
     # "limit" = filas por pagina (mismo parametro y mismo default de siempre).
     logs_page = paginate(logs_q, per_page=limit)
     logs = logs_page.items
@@ -6220,7 +6431,13 @@ def pending_deliveries():
             return redirect(url_for("pending_deliveries"))
 
         return_action = request.form.get("return_action", "return")
-        scrap_reason = request.form.get("scrap_reason", "Otro").strip() or "Otro"
+        # Motivo OBLIGATORIO cuando se descarta, igual que en /scrap y en un
+        # movimiento a Descartes. Antes caía a "Otro" en silencio: una baja
+        # definitiva quedaba registrada sin decir por qué.
+        scrap_reason = request.form.get("scrap_reason", "").strip()
+        if return_action == "scrap" and not scrap_reason:
+            flash("Motivo de descarte obligatorio.", "error")
+            return redirect(url_for("pending_deliveries"))
 
         # Quién trae la devolución. Por defecto, la persona a la que se le
         # entregó; se puede elegir otro responsable de la misma ubicación (dos
@@ -6249,15 +6466,28 @@ def pending_deliveries():
             # Swap: vuelve un item DISTINTO al entregado.
             is_swap = bool(p.return_item_id) and p.return_item_id != original_movement.item_id
 
-            if is_swap:
-                # Ingreso del item recuperado: origen externo 'Recuperado' (no descuenta).
+            # ¿DE DÓNDE VUELVE? Antes se deducía del swap y no alcanzaba: el caso
+            # típico es entregar un repuesto bueno, que el técnico lo instale
+            # (consumiéndolo de su camioneta) y que traiga el viejo SACADO DEL
+            # EQUIPO. Ese que vuelve nunca estuvo en el stock de la camioneta, y
+            # descontarlo de ahí hacía fallar el cierre por "stock insuficiente".
+            #   stock -> sale de la ubicación donde quedó la mercadería (descuenta)
+            #   campo -> entra por 'Recuperado' (externa): NO descuenta
+            # El default reproduce exactamente el comportamiento anterior: el swap
+            # siempre entraba por Recuperado, el mismo ítem siempre salía de la
+            # camioneta. Lo nuevo se activa eligiéndolo, no por sorpresa.
+            origen_default = "campo" if is_swap else "stock"
+            return_origin = (request.form.get("return_origin") or "").strip()
+            if return_origin not in ("stock", "campo"):
+                return_origin = origen_default
+
+            if return_origin == "campo":
                 recuperado = Location.query.filter_by(name=LOCATION_RECUPERADO).first()
                 if not recuperado:
                     flash("Ubicación 'Recuperado' no existe.", "error")
                     return redirect(url_for("pending_deliveries"))
                 from_id = recuperado.id
             else:
-                # Mismo item: sale de donde se lo habia enviado (ubicacion del tecnico).
                 from_id = original_movement.to_location_id
 
             if return_action == "scrap":
@@ -6283,17 +6513,26 @@ def pending_deliveries():
                 else:
                     to_id = original_movement.from_location_id
 
-            # Guarda serializados: la devolución/reparación por serial todavía no está
-            # modelada. Se bloquea para no desincronizar las unidades; el serial se
-            # maneja manualmente desde Movimientos.
+            # SERIALIZADOS. Antes esta pantalla los rechazaba de plano, y como es
+            # el único lugar que cierra un pendiente, un pendiente de ítem
+            # serializado no se podía cerrar NUNCA: quedaba abierto para siempre.
+            # Ahora se resuelve acá, con la misma regla que el resto del sistema:
+            # origen interno -> se ELIGE cuál sale; origen externo -> se CARGA el
+            # serial que entra.
             _ret_item = Item.query.get(returns_item_id)
+            serial_units = []
             if _ret_item and _ret_item.serialized:
-                flash(
-                    "El ítem es serializado: gestioná la devolución/reparación del "
-                    "serial desde Movimientos (esta pantalla aún no maneja seriales).",
-                    "error",
-                )
-                return redirect(url_for("pending_deliveries"))
+                if location_is_external(from_id):
+                    serial_units, _serr = resolve_serial_units_in(
+                        returns_item_id, request.form.getlist("unit_serial"), qty
+                    )
+                else:
+                    serial_units, _serr = resolve_serial_units_out(
+                        returns_item_id, from_id, qty, request.form
+                    )
+                if _serr:
+                    flash(_serr, "error")
+                    return redirect(url_for("pending_deliveries"))
 
             if not location_is_external(from_id):
                 upsert_stock(returns_item_id, from_id, -qty)
@@ -6308,6 +6547,13 @@ def pending_deliveries():
                 obs = return_observation or f"Devolucion de pendiente #{p.id}"
             if is_swap:
                 obs = f"[Devolución distinta] {obs}"
+            if return_origin == "campo" and not is_swap:
+                # Que el historial diga que no salió del stock del técnico: sin
+                # esto, un cierre que no descuenta parece un cierre normal.
+                obs = f"[Recuperado en campo] {obs}"
+            # El serial va a la observación del movimiento, igual que en el resto
+            # del sistema (no hay historial por serial: ver 03_Estado_Actual).
+            obs = serial_obs(obs, apply_serial_units_out(serial_units, to_id)) if serial_units else obs
 
             y, seq, number = next_movement_number()
             m = Movement(
@@ -6473,10 +6719,31 @@ def pending_deliveries():
             _opts.insert(0, _p.responsible_to)
         returner_options[_p.id] = _opts
 
+    # Seriales disponibles para cerrar cada pendiente, acotados a la ubicación
+    # donde quedó la mercadería y al ítem que tiene que volver. Se arma acá y no
+    # en el template para que la pantalla no pueda ofrecer un serial que el
+    # backend después rechazaría. Solo pendientes abiertos: los cerrados no
+    # muestran formulario.
+    pending_units = {}
+    for _p in pendings:
+        if _p.returned or not _p.movement:
+            continue
+        _ret_id = _p.return_item_id or _p.movement.item_id
+        _ret_it = Item.query.get(_ret_id)
+        if not _ret_it or not _ret_it.serialized:
+            continue
+        pending_units[_p.id] = [
+            {"id": _u.id, "serial": _u.serial}
+            for _u in units_in_stock_query(_ret_id, _p.movement.to_location_id)
+            .order_by(ItemUnit.created_at, ItemUnit.id)
+            .all()
+        ]
+
     return render_template(
         "pending_deliveries.html",
         pendings=pendings,
         returner_options=returner_options,
+        pending_units=pending_units,
         page_obj=pendings_page,
         items=items_list,
         users=users_list,
@@ -7103,15 +7370,24 @@ def reparaciones():
         item_id = r.item_id
         qty = r.quantity
 
-        # Guarda serializados: la reparación por serial aún no está modelada.
+        # SERIALIZADOS. Antes esta pantalla también los rechazaba, así que una
+        # unidad serializada que entraba a la mesa se quedaba ahí: no había forma
+        # de resolverla. `repair_units_out` resuelve cuál sale de la mesa (misma
+        # regla auto/elegir del resto del sistema) y `resolve_serial_units_in`
+        # carga la que vuelve del proveedor.
+        #
+        # `repairs` no guarda a qué unidad corresponde cada reparación (no hay
+        # columna item_unit_id y NO se agregó una: sería un cambio de base). Por
+        # eso el serial se elige al RESOLVER, entre las unidades de ese ítem que
+        # están físicamente en la mesa. Con una sola unidad, sale sola.
         _rep_item = Item.query.get(item_id)
-        if _rep_item and _rep_item.serialized:
-            flash(
-                "El ítem es serializado: resolvé la reparación del serial desde "
-                "Movimientos (esta pantalla aún no maneja seriales).",
-                "error",
-            )
-            return redirect(url_for("reparaciones"))
+        _es_serializado = bool(_rep_item and _rep_item.serialized)
+
+        def repair_units_out():
+            """(units, error) de las unidades que salen de la mesa de reparación."""
+            if not _es_serializado:
+                return [], None
+            return resolve_serial_units_out(item_id, repair_loc.id, qty, request.form)
 
         # --- Enviar a reparación de proveedor: egreso En reparación -> Proveedor + remito ---
         if action == "enviar_proveedor":
@@ -7130,14 +7406,23 @@ def reparaciones():
             if not proveedor_loc:
                 flash("Ubicación 'Proveedor' no existe.", "error")
                 return redirect(url_for("reparaciones"))
+            _units, _serr = repair_units_out()
+            if _serr:
+                flash(_serr, "error")
+                return redirect(url_for("reparaciones"))
             try:
                 # La nota de reparación va en el MOVIMIENTO (se ve en Movimientos),
                 # pero NO en el remito: remito_detail la oculta por prefijo.
                 note = f"{REPAIR_PROV_OUT_NOTE} (rep #{r.id})"
                 mov_obs = f"{note} · {observation}" if observation else note
+                # El serial va en la observación ANTES de crear el movimiento: es
+                # lo único que después dice qué unidad se mandó a reparar afuera.
+                mov_obs = serial_obs(mov_obs, [u.serial for u in _units])
                 m, rem = _repair_transfer_with_remito(
                     item_id, qty, repair_loc.id, proveedor_loc.id, supplier, mov_obs, current_user
                 )
+                # Sale del sistema hacia una externa: las unidades quedan ENTREGADO.
+                apply_serial_units_out(_units, proveedor_loc.id)
                 r.status = "EN_PROVEEDOR"
                 db.session.commit()
                 flash(
@@ -7170,13 +7455,26 @@ def reparaciones():
             if not jaula or not proveedor_loc:
                 flash("Faltan ubicaciones 'Jaula TNG' y/o 'Proveedor'.", "error")
                 return redirect(url_for("reparaciones"))
+            # Vuelve del proveedor: la unidad había salido (ENTREGADO), así que
+            # se carga el serial y `resolve_serial_units_in` REACTIVA esa misma
+            # unidad en vez de tratarla como un serial duplicado.
+            _units, _serr = ([], None)
+            if _es_serializado:
+                _units, _serr = resolve_serial_units_in(
+                    item_id, request.form.getlist("unit_serial"), qty
+                )
+            if _serr:
+                flash(_serr, "error")
+                return redirect(url_for("reparaciones"))
             try:
                 # La nota de reparación va en el MOVIMIENTO, no en el remito.
                 note = f"{REPAIR_PROV_IN_NOTE} (rep #{r.id}) -> {LOCATION_JAULA_TNG}"
                 mov_obs = f"{note} · {observation}" if observation else note
+                mov_obs = serial_obs(mov_obs, [u.serial for u in _units])
                 m, rem = _repair_transfer_with_remito(
                     item_id, qty, proveedor_loc.id, jaula.id, supplier, mov_obs, current_user
                 )
+                apply_serial_units_out(_units, jaula.id)
                 r.status = "REPARADO"
                 r.resolved_at = now_ar()
                 r.resolved_by_user_id = current_user.id
@@ -7219,6 +7517,11 @@ def reparaciones():
             flash("Acción inválida.", "error")
             return redirect(url_for("reparaciones"))
 
+        _units, _serr = repair_units_out()
+        if _serr:
+            flash(_serr, "error")
+            return redirect(url_for("reparaciones"))
+
         try:
             if not location_is_external(from_id):
                 upsert_stock(item_id, from_id, -qty)
@@ -7229,6 +7532,9 @@ def reparaciones():
                 obs = observation or f"Reparado (rep #{r.id}) -> {LOCATION_JAULA_TNG}"
             else:
                 obs = observation or f"Descarte post-reparación ({reason}) (rep #{r.id})"
+            # Reparado -> la unidad se reubica en Jaula y sigue EN_STOCK.
+            # Descartado -> queda DESCARTADO, igual que en cualquier descarte.
+            obs = serial_obs(obs, apply_serial_units_out(_units, to_id)) if _units else obs
 
             y, seq, number = next_movement_number()
             m = Movement(
@@ -7352,9 +7658,25 @@ def reparaciones():
 
     items_all = Item.query.filter_by(is_active=True).order_by(Item.code).all()
 
+    # Seriales que están físicamente en la mesa, por reparación. Como `repairs`
+    # no guarda la unidad, el selector ofrece las de ESE ítem que están en la
+    # ubicación 'En reparación': es exactamente lo que el backend va a aceptar.
+    repair_units = {}
+    if repair_loc:
+        for _r in pendientes:
+            if not _r.item or not _r.item.serialized:
+                continue
+            repair_units[_r.id] = [
+                {"id": _u.id, "serial": _u.serial}
+                for _u in units_in_stock_query(_r.item_id, repair_loc.id)
+                .order_by(ItemUnit.created_at, ItemUnit.id)
+                .all()
+            ]
+
     return render_template(
         "reparaciones.html",
         pendientes=pendientes,
+        repair_units=repair_units,
         page_obj=historial_page,
         en_proveedor=en_proveedor,
         suppliers=suppliers_list,

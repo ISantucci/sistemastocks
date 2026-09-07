@@ -145,6 +145,43 @@
                   <option value="Otro">Otro</option>
                 </select>
               </div>
+              {# ¿De dónde vuelve? Lo que se instala en un equipo sale del stock
+                 del técnico, pero lo que se saca DEL EQUIPO nunca estuvo ahí.
+                 Sin esta distinción el cierre fallaba por "stock insuficiente".
+                 El default es el comportamiento de siempre. #}
+              <div class="field" style="margin-top:6px;">
+                <label>¿De dónde vuelve?</label>
+                <div class="check-inline" style="gap:14px; flex-wrap:wrap;">
+                  <label class="check-inline"><input type="radio" name="return_origin" value="stock" {% if not swap %}checked{% endif %}> Del stock del técnico</label>
+                  <label class="check-inline"><input type="radio" name="return_origin" value="campo" {% if swap %}checked{% endif %}> Recuperado del equipo</label>
+                </div>
+              </div>
+              {% if ret_item.serialized %}
+              {% set _uns = pending_units.get(p.id, []) %}
+              {% set _n = pending_return_units(p) %}
+              <div class="field" id="ser_stock_{{ p.id }}" style="margin-top:6px;{% if swap %} display:none;{% endif %}">
+                <label>¿Qué serial vuelve?</label>
+                {% if _uns|length == 0 %}
+                  <span class="muted" style="font-weight:400;">No hay seriales cargados en esa ubicación: se mueve por cantidad.</span>
+                {% elif _uns|length <= _n %}
+                  <span class="muted" style="font-weight:400;">Se usa automáticamente: {{ _uns|map(attribute='serial')|join(', ') }}</span>
+                {% else %}
+                  <div class="check-inline" style="gap:12px; flex-wrap:wrap;">
+                    {% for u in _uns %}
+                      <label class="check-inline"><input type="checkbox" name="unit_id" value="{{ u.id }}" data-confirm-skip> {{ u.serial }}</label>
+                    {% endfor %}
+                  </div>
+                  <span class="muted" style="font-weight:400;">Elegí exactamente {{ _n }}.</span>
+                {% endif %}
+              </div>
+              <div class="field" id="ser_campo_{{ p.id }}" style="margin-top:6px;{% if not swap %} display:none;{% endif %}">
+                <label>N° de serie que entra</label>
+                {% for _i in range(_n) %}
+                  <input type="text" name="unit_serial" placeholder="N° de serie" style="margin-top:4px;">
+                {% endfor %}
+                <span class="muted" style="font-weight:400;">Si ese serial ya estuvo en el sistema y había salido, se reactiva la misma unidad.</span>
+              </div>
+              {% endif %}
               {# Quién trae la devolución. Por defecto el responsable del
                  pendiente; puede ser otro responsable de la misma ubicación. #}
               <div class="field" style="margin-top:6px;">
@@ -161,8 +198,21 @@
               (function(){
                 var radio = document.getElementById("scrap_radio_{{ p.id }}");
                 var opts  = document.getElementById("scrap_opts_{{ p.id }}");
-                radio.closest("form").querySelectorAll("input[name=return_action]").forEach(function(r){
+                var form  = radio.closest("form");
+                form.querySelectorAll("input[name=return_action]").forEach(function(r){
                   r.addEventListener("change", function(){ opts.style.display = radio.checked ? "block" : "none"; });
+                });
+                // Origen de la devolución: se muestra el selector de serial que
+                // corresponde. Elegir de la camioneta y cargar un serial nuevo
+                // son cosas distintas; que se vean las dos a la vez confunde.
+                var st = document.getElementById("ser_stock_{{ p.id }}");
+                var cp = document.getElementById("ser_campo_{{ p.id }}");
+                form.querySelectorAll("input[name=return_origin]").forEach(function(r){
+                  r.addEventListener("change", function(){
+                    var v = form.querySelector("input[name=return_origin]:checked").value;
+                    if (st) st.style.display = (v === "stock") ? "" : "none";
+                    if (cp) cp.style.display = (v === "campo") ? "" : "none";
+                  });
                 });
               })();
               </script>
