@@ -82,7 +82,7 @@
           <option value="" {% if not ns.pre %}selected{% endif %} disabled>Elegí ubicación...</option>
           {% for r in loc_rooms %}
             <option value="{{ r.loc.id }}" {% if ns.pre == r.loc.id %}selected{% endif %} {% if r.room <= 0 %}disabled{% endif %}>
-              {{ r.loc.name }} — cupo {{ r.room }} (stock {{ r.qty }}, con serial {{ r.labeled }})
+              {{ r.loc.name }} — cupo {{ fmt_qty(r.room, it) }} (stock {{ fmt_qty(r.qty, it) }}, con serial {{ r.labeled }})
             </option>
           {% endfor %}
         </select>

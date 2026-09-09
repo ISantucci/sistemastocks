@@ -9,12 +9,15 @@ document.addEventListener('DOMContentLoaded', function () {
   var userDropdown = document.getElementById('userMenuDropdown');
 
   if (collapseBtn && shell) {
-    if (localStorage.getItem('tngstocks.sidebarCollapsed') === '1') {
-      shell.classList.add('sidebar-collapsed');
-    }
+    // El estado guardado YA lo aplico el script inline de base.html, antes del
+    // primer pintado. Aca solo queda el click: leerlo de nuevo no aportaria
+    // nada y llegaria tarde (esto corre en DOMContentLoaded), que es
+    // justamente lo que hacia saltar el menu en cada pantalla.
     collapseBtn.addEventListener('click', function () {
       shell.classList.toggle('sidebar-collapsed');
-      localStorage.setItem('tngstocks.sidebarCollapsed', shell.classList.contains('sidebar-collapsed') ? '1' : '0');
+      try {
+        localStorage.setItem('tngstocks.sidebarCollapsed', shell.classList.contains('sidebar-collapsed') ? '1' : '0');
+      } catch (e) { /* sin localStorage el colapso funciona igual, pero no se recuerda */ }
     });
   }
 

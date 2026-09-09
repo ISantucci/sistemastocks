@@ -553,10 +553,18 @@ def test_el_tecnico_no_ve_sistema_ni_diferencia_en_el_detalle(A, esc):
 
 
 def test_el_mensaje_de_campo_vacio_habla_de_conteo(A, esc):
+    """El texto lo pone setCustomValidity desde el JS de la pantalla.
+
+    Ese código se mudó del template a static/js/stock_count_new.js, así que se
+    verifican las dos mitades: que la pantalla cargue ese archivo, y que el
+    archivo tenga el mensaje.
+    """
     html = _como(A, "tec").get(
         f"/conteo-camioneta/nuevo?location_id={esc['truck'].id}"
     ).get_data(as_text=True)
-    assert "Completá el conteo" in html
+    assert "js/stock_count_new.js" in html
+    with open("static/js/stock_count_new.js", encoding="utf-8") as fh:
+        assert "Completá el conteo" in fh.read()
 
 
 def test_pantallas_con_serializados_renderizan(A, esc):

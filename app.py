@@ -6,6 +6,7 @@ from pathlib import Path
 import os
 import secrets
 import sqlite3
+import hashlib
 import math
 import json
 from urllib.parse import urlencode, urlsplit, urlunsplit
@@ -122,6 +123,44 @@ app.config.update(
     ),
 )
 
+
+def _avisar_cookie_insegura() -> str | None:
+    """Avisa si el sistema esta detras de HTTPS pero la cookie no es Secure.
+
+    Por que hace falta un aviso y no cambiar el default: poner Secure=true por
+    las buenas dejaria a TODOS sin poder loguearse en cualquier entorno que
+    todavia entre por HTTP -- el navegador simplemente no manda la cookie y el
+    login "no anda" sin ningun error visible. Es de los errores mas dificiles
+    de diagnosticar, asi que la variable sigue siendo opt-in.
+
+    Pero el caso peligroso es el otro: el sistema YA esta publicado en HTTPS
+    (dominio propio, expuesto a Internet) y la variable quedo sin definir. Ahi
+    la cookie de sesion de todos los usuarios viaja sin el flag Secure, o sea
+    que el navegador la mandaria tambien por HTTP plano. Eso no se ve en
+    ninguna pantalla: hay que ir a buscarlo. De ahi el aviso al arrancar.
+
+    Se deduce que hay HTTPS delante por la propia configuracion: si se declaro
+    APP_URL_SCHEME=https o se activo HSTS, es porque hay TLS.
+    """
+    if app.config.get("SESSION_COOKIE_SECURE"):
+        return None
+    hay_https = (
+        os.environ.get("APP_URL_SCHEME", "").strip().lower() == "https"
+        or os.environ.get("HSTS_ENABLED", "false").strip().lower() == "true"
+    )
+    if not hay_https:
+        return None
+    return (
+        "[WARN] SEGURIDAD: el sistema esta configurado para HTTPS pero "
+        "SESSION_COOKIE_SECURE no esta en 'true'. La cookie de sesion viaja sin "
+        "el flag Secure. Corregir en el .env: SESSION_COOKIE_SECURE=true"
+    )
+
+
+_aviso_cookie = _avisar_cookie_insegura()
+if _aviso_cookie:
+    print(_aviso_cookie)
+
 # Tamano maximo de request. Corta subidas gigantes (import de items) antes de
 # leerlas a memoria. 16 MB alcanza de sobra para los CSV/XLSX del sistema.
 app.config["MAX_CONTENT_LENGTH"] = int(
@@ -208,11 +247,10 @@ CDN_ORIGINS = (
 # nada. Los templates usan <script>/<style> inline, asi que una CSP en enforce
 # sin 'unsafe-inline' los romperia. Para pasar a enforce (una vez validado en
 # staging) poner CSP_ENFORCE=true.
-# La tipografia Inter se carga desde Google Fonts (base.html). No se puede
-# aplicar SRI porque el CSS que devuelve Google varia segun el navegador, asi
-# que se declara explicitamente como origen permitido. Si en algun momento se
-# descarga la fuente al servidor, borrar esta constante y la CSP se cierra sola.
-FONT_ORIGINS = "https://fonts.googleapis.com https://fonts.gstatic.com"
+# La tipografia Inter YA NO se carga desde Google Fonts: esta vendorizada en
+# static/vendor/inter/ y se sirve desde el mismo origen (ver base.html). Por eso
+# aca no queda ningun origen externo para fuentes y la CSP quedo cerrada: con
+# todos los assets locales, 'self' alcanza para todo.
 
 
 def _csp_directive(name, *sources):
@@ -222,9 +260,9 @@ def _csp_directive(name, *sources):
 CSP_POLICY = "; ".join([
     _csp_directive("default-src", "'self'"),
     _csp_directive("script-src", "'self'", "'unsafe-inline'", CDN_ORIGINS),
-    _csp_directive("style-src", "'self'", "'unsafe-inline'", CDN_ORIGINS, FONT_ORIGINS),
+    _csp_directive("style-src", "'self'", "'unsafe-inline'", CDN_ORIGINS),
     _csp_directive("img-src", "'self'", "data:"),
-    _csp_directive("font-src", "'self'", "data:", CDN_ORIGINS, FONT_ORIGINS),
+    _csp_directive("font-src", "'self'", "data:", CDN_ORIGINS),
     _csp_directive("connect-src", "'self'"),
     _csp_directive("frame-src", "'self'"),
     _csp_directive("frame-ancestors", "'self'"),
@@ -276,6 +314,177 @@ def _security_headers(resp):
     # No publicar el stack (waitress / mod_wsgi / version de Python).
     resp.headers["Server"] = "TNGStocks"
     resp.headers.pop("X-Powered-By", None)
+    return resp
+
+
+# ------------------ CACHE DE ASSETS ESTATICOS ------------------
+# El problema que resuelve
+# ------------------------
+# Los <link>/<script> apuntaban a /static/css/app.css, sin ninguna marca de
+# version. Flask, sin SEND_FILE_MAX_AGE_DEFAULT, responde "Cache-Control:
+# no-cache": el navegador se guarda el archivo pero PREGUNTA por cada uno en
+# cada pantalla. Son 7 requests condicionales por navegacion que casi siempre
+# terminan en 304. Guarda, pero no ahorra: se siente como que no cachea nada.
+#
+# Por que no alcanza con subir el max-age
+# ---------------------------------------
+# Porque es peor. Con la URL siempre igual, despues de un deploy el navegador
+# se queda con el CSS viejo y el HTML nuevo durante todo el max-age, y la
+# pantalla se ve rota sin que nadie pueda hacer nada desde el servidor. Ese es
+# exactamente el riesgo de "minificar y romper por cache". Las dos cosas van
+# juntas y en este orden:
+#
+#   1) la URL lleva ?v=<hash del contenido>  -> si cambia el archivo, cambia la URL
+#   2) recien entonces el cache puede ser largo
+#
+# Como se aplica sin tocar los templates
+# --------------------------------------
+# Con @app.url_defaults: Flask llama a este hook en CADA url_for(), asi que el
+# ?v= se agrega solo en los ~30 templates y tambien en vendor_asset(). No hay
+# forma de olvidarse uno.
+#
+# Compatibilidad: una URL vieja sin ?v= (un favorito, un link pegado en un mail)
+# sigue funcionando y se sirve con el mismo no-cache de siempre. El cache largo
+# se activa SOLO cuando viene la version en la query, que es cuando es seguro.
+
+_ASSET_VERSION_CACHE: dict[str, tuple[int, str]] = {}
+STATIC_MAX_AGE = 31536000  # 1 anio. Seguro unicamente porque la URL lleva hash.
+
+
+def _asset_version(filename: str) -> str | None:
+    """Hash corto del contenido de un archivo de /static. None si no existe.
+
+    Se cachea por (ruta -> mtime, hash): el hash se calcula una sola vez por
+    archivo y por reinicio. Si el archivo cambia en disco (deploy en caliente,
+    o editar el CSS en desarrollo) cambia el mtime y se recalcula solo, sin
+    reiniciar la app.
+    """
+    path = BASE_DIR / "static" / filename
+    try:
+        mtime = path.stat().st_mtime_ns
+    except OSError:
+        # Archivo inexistente: no inventamos version. url_for devuelve la URL
+        # pelada, que es exactamente el comportamiento anterior.
+        return None
+
+    cached = _ASSET_VERSION_CACHE.get(filename)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+
+    try:
+        digest = hashlib.sha1(path.read_bytes()).hexdigest()[:10]
+    except OSError:
+        return None
+
+    _ASSET_VERSION_CACHE[filename] = (mtime, digest)
+    return digest
+
+
+@app.url_defaults
+def _versionar_assets(endpoint, values):
+    """Agrega ?v=<hash> a todo url_for('static', filename=...)."""
+    if endpoint != "static" or "v" in values:
+        return
+    filename = values.get("filename")
+    if not filename:
+        return
+    version = _asset_version(filename)
+    if version:
+        values["v"] = version
+
+
+@app.after_request
+def _cache_de_estaticos(resp):
+    """Cache largo SOLO para los estaticos pedidos con su version en la URL.
+
+    'immutable' le dice al navegador que no revalide ni siquiera con F5: si el
+    contenido cambia, cambia el hash y por lo tanto la URL. Un /static pedido
+    sin ?v= no entra aca y conserva el no-cache de siempre.
+
+    Falta una pieza mas para que esto sirva de algo: sacar el "Vary: Cookie".
+    No se puede hacer aca, y por eso esta en _SinVaryCookieEnStatic, mas abajo.
+    """
+    if request.endpoint == "static" and request.args.get("v") and resp.status_code == 200:
+        resp.headers["Cache-Control"] = f"public, max-age={STATIC_MAX_AGE}, immutable"
+    return resp
+
+
+class _SinVaryCookieEnStatic:
+    """Quita "Vary: Cookie" de los archivos de /static pedidos con version.
+
+    Por que hace falta
+    ------------------
+    Sin esto, el cache largo de arriba no sirve para nada: se probo con un
+    navegador real y los 17 archivos del front se volvian a pedir en CADA
+    pantalla, con la cabecera immutable puesta y todo. La culpa es del
+    "Vary: Cookie": el navegador lo lee como "esta respuesta depende de la
+    cookie", y como la cookie de sesion esta siempre presente, prefiere volver
+    a preguntar antes que arriesgarse a servir la de otro usuario.
+
+    Un archivo de /static es el MISMO para todos: no varia por cookie. Decir
+    que si es mentirle al navegador, y la mentira cuesta 17 requests por
+    pantalla.
+
+    Por que es un middleware WSGI y no otro @app.after_request
+    ---------------------------------------------------------
+    Porque Flask agrega esa cabecera DESPUES de correr todos los after_request:
+    la pone save_session() al cerrar la respuesta, cuando ve que algo toco la
+    sesion durante el request (en /static la toca Flask-Login, que revisa la
+    cookie de "recordarme" en su propio after_request). Cualquier intento de
+    sacarla desde un after_request se lo come Flask un instante despues. Un
+    middleware WSGI envuelve todo eso y es el ultimo que ve las cabeceras.
+
+    Alcance deliberadamente chico: SOLO /static y SOLO si la URL trae ?v=. No
+    toca ninguna respuesta con datos, ni el login, ni la sesion. Y saca
+    unicamente "Cookie": si hay otro Vary (el "Accept-Encoding" que agrega
+    Apache al comprimir), se respeta.
+    """
+
+    def __init__(self, wsgi_app):
+        self.wsgi_app = wsgi_app
+
+    def __call__(self, environ, start_response):
+        es_static_versionado = (
+            environ.get("PATH_INFO", "").startswith("/static/")
+            and "v=" in environ.get("QUERY_STRING", "")
+        )
+        if not es_static_versionado:
+            return self.wsgi_app(environ, start_response)
+
+        def start_response_sin_vary(status, headers, exc_info=None):
+            limpias = []
+            for nombre, valor in headers:
+                if nombre.lower() == "vary":
+                    resto = [v.strip() for v in valor.split(",")
+                             if v.strip().lower() != "cookie"]
+                    if not resto:
+                        continue  # era solo Cookie: la cabecera se va entera
+                    valor = ", ".join(resto)
+                limpias.append((nombre, valor))
+            return start_response(status, limpias, exc_info)
+
+        return self.wsgi_app(environ, start_response_sin_vary)
+
+
+app.wsgi_app = _SinVaryCookieEnStatic(app.wsgi_app)
+
+
+@app.after_request
+def _no_cachear_html(resp):
+    """Las pantallas NO se guardan en el navegador.
+
+    Todo el HTML de este sistema muestra datos de stock de alguien logueado.
+    Sin esta cabecera el navegador aplica su heuristica y puede volver a pintar
+    una pantalla vieja con el boton "atras" -- incluso despues de cerrar sesion,
+    que es el caso que importa. Los stocks ademas cambian todo el tiempo: una
+    pantalla cacheada es una pantalla que miente.
+
+    Solo aplica a text/html. Los CSV, XLSX y PDF que genera el sistema no se
+    tocan (se descargan una vez y no se revalidan), y los estaticos ya salieron
+    por el hook de arriba.
+    """
+    if resp.mimetype == "text/html":
+        resp.headers["Cache-Control"] = "no-store, max-age=0"
     return resp
 
 
@@ -4535,6 +4744,9 @@ def api_items_search():
             "code": it.code,
             "name": it.name,
             "label": f"{it.code} - {it.name}",
+            # La unidad viaja para que el front pueda aclarar "(en metros)"
+            # tambien en modo remoto, donde el <option> lo crea el navegador.
+            "unit": it.unit or "unidad",
         }
         for it in rows
     ])
@@ -4685,6 +4897,9 @@ def stock_export_csv():
     output = io.StringIO()
     writer = csv.writer(output)
 
+    # "unidad" va AL FINAL a proposito: agregar una columna en el medio le
+    # correria las posiciones a cualquier planilla o script que ya consuma este
+    # CSV. Al final, lo viejo sigue leyendose igual y lo nuevo esta disponible.
     writer.writerow([
         "ubicacion",
         "codigo_item",
@@ -4692,7 +4907,8 @@ def stock_export_csv():
         "categoria",
         "rastreable",
         "descripcion",
-        "cantidad"
+        "cantidad",
+        "unidad",
     ])
 
     for r in rows:
@@ -4703,7 +4919,8 @@ def stock_export_csv():
             r.item.category.name,
             "Si" if r.item.trackable else "No",
             r.item.description or "",
-            r.quantity
+            r.quantity,
+            item_unit_name(r.item),
         ])
 
     csv_data = output.getvalue()
@@ -5510,6 +5727,8 @@ def movements_export_csv():
     output = io.StringIO()
     writer = csv.writer(output)
 
+    # Ver el comentario del CSV de stock: la columna nueva va al final para no
+    # correr las que ya existian.
     writer.writerow([
         "fecha",
         "hora",
@@ -5520,6 +5739,7 @@ def movements_export_csv():
         "hacia",
         "responsable",
         "observacion",
+        "unidad",
     ])
 
     for m in rows:
@@ -5533,6 +5753,7 @@ def movements_export_csv():
             m.to_location.name if m.to_location else "",
             m.user.full_name or m.user.username,
             m.observation or "",
+            item_unit_name(m.item),
         ])
 
     csv_bytes = output.getvalue().encode("utf-8-sig")
@@ -6129,6 +6350,34 @@ def fmt_qty(qty, item=None):
     return f"{qty}"
 
 
+def item_unit_name(item=None) -> str:
+    """Nombre de la unidad de un ítem, para exports y textos: 'metros'/'unidad'."""
+    return "metros" if getattr(item, "unit", None) == "metros" else "unidad"
+
+
+def items_en_metros():
+    """Ids de los ítems que se miden en metros.
+
+    Lo consume el front (window.TNG_ITEMS_METROS en base.html) para poder
+    aclarar "(en metros)" al lado del campo de cantidad EN EL MOMENTO en que se
+    elige el ítem. Hasta ahora la unidad solo aparecía al leer el stock ya
+    cargado: quien cargaba escribía "300" en un campo que decía "Cantidad" y
+    nada le decía que eran metros.
+
+    Por qué la lista de ids y no el catálogo entero con su unidad: los ítems en
+    metros son un puñado (cables), así que esto son unos pocos bytes de JSON,
+    mientras que mandar la unidad de cada ítem crecería con el catálogo. Es el
+    mismo criterio de ITEM_PICKER_MAX_INLINE: nada que crezca sin límite dentro
+    del HTML.
+
+    Sirve para los dos modos del selector, el inline y el remoto contra
+    /api/items/search, porque se resuelve por id y no por el <option>.
+    """
+    if not current_user.is_authenticated:
+        return []
+    return [row[0] for row in db.session.query(Item.id).filter(Item.unit == "metros").all()]
+
+
 # ------------------ COSTOS: helpers de plata y parametros ------------------
 # La plata SIEMPRE viaja en centavos (entero) por dentro. Estas dos funciones
 # son la unica frontera entre el entero y el texto que ve/escribe el usuario.
@@ -6382,6 +6631,8 @@ def inject_stock_helpers():
     return {
         "stock_level_class": stock_level_class,
         "fmt_qty": fmt_qty,
+        "item_unit_name": item_unit_name,
+        "items_en_metros": items_en_metros,
         "pending_return_units": pending_return_units,
         "scrap_source_label": scrap_source_label,
         "fmt_money": fmt_money,

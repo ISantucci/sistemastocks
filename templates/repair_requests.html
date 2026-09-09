@@ -68,7 +68,7 @@
         </select>
       </div>
       <div class="field" style="width:120px;">
-        <label>Cant.</label>
+        <label>Cant. <span class="muted" style="font-weight:400;" data-unit-hint="item_id[]"></span></label>
         <input type="number" name="qty[]" min="1" value="1" required>
       </div>
       <div class="field">
@@ -123,43 +123,16 @@
 
 {% if me and me.role == "TECNICO" and trucks and items %}
 <script>
-document.addEventListener("DOMContentLoaded", function () {
-  var allRrItems = [
-    {% for it in items %}{ value: "{{ it.id }}", text: "{{ (it.code ~ ' - ' ~ it.name)|e }}" },
-    {% endfor %}
-  ];
-
-  // Un repuesto = una sola fila: el dedupe saca de cada listado lo ya elegido
-  // en las otras filas. El backend igual rechaza item_id[] repetidos.
-  var rrDedupe = initLineDedupe({
-    itemSel: '.rr-line select[name="item_id[]"]',
-    optionsFor: function () { return allRrItems; }
-  });
-
-  function wireLine(line) {
-    var rm = line.querySelector(".remove-line-btn");
-    // Al borrar la fila, su repuesto vuelve a estar disponible en las demas.
-    if (rm) rm.addEventListener("click", function () { line.remove(); rrDedupe.refresh(); });
-    // Selector de repuesto buscable/tipeable (las lineas se clonan, el init
-    // global de TomSelect no las alcanza, asi que lo inicializamos por linea).
-    var sel = line.querySelector('select[name="item_id[]"]');
-    if (sel && window.TomSelect && !sel.tomselect) {
-      new TomSelect(sel, window.TS_SINGLE_OPTS);
-    }
-    if (sel) {
-      sel.addEventListener("change", function () { rrDedupe.refresh(); });
-    }
-  }
-  function addLine() {
-    var tpl = document.getElementById("rr-line-template");
-    var cont = document.getElementById("rr-lines");
-    cont.appendChild(tpl.content.cloneNode(true));
-    wireLine(cont.lastElementChild);
-    rrDedupe.refresh();
-  }
-  document.getElementById("add-line-btn").addEventListener("click", addLine);
-  addLine();
-});
+  /* Solo DATOS: lo unico de esta pantalla que depende de la base y por
+     eso tiene que renderizarlo el servidor. La logica vive en
+     static/js/repair_requests.js. */
+  window.RR_DATA = {
+    allItems: [
+      {% for it in items %}{ value: "{{ it.id }}", text: "{{ (it.code ~ ' - ' ~ it.name)|e }}" },
+      {% endfor %}
+    ]
+  };
 </script>
+<script src="{{ url_for('static', filename='js/repair_requests.js') }}"></script>
 {% endif %}
 {% endblock %}

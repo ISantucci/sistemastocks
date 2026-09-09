@@ -20,6 +20,13 @@
 #     Server en el proxy.
 #
 #  3) Faltaba HSTS. Se agrega SOLO en el vhost 443, nunca en el 80.
+#
+#  4) No habia compresion. Todo el HTML sale sin comprimir, y este sistema
+#     manda pantallas grandes: el selector de items vuelca hasta 800 opciones
+#     dentro del HTML (ITEM_PICKER_MAX_INLINE), y los listados pueden traer
+#     cientos de filas. Con mod_deflate eso baja del orden de 5 a 10 veces.
+#     Es MUCHO mas de lo que se gana minificando el CSS y el JS, y no requiere
+#     ningun paso de build ni cambia una sola linea de codigo.
 # =============================================================================
 
 # --- Global (httpd.conf): no publicar version ni modulos ---------------------
@@ -70,6 +77,47 @@ TraceEnable Off
     RequestHeader set X-Forwarded-Proto "https"
     RequestHeader set X-Forwarded-Port  "443"
 
+    # --- Compresion -----------------------------------------------------------
+    # Requiere mod_deflate (ver la lista de modulos al final del archivo).
+    #
+    # Se comprime por TIPO y no por extension, porque todo pasa por el proxy y
+    # las respuestas las genera Flask. Se listan solo tipos de texto: las
+    # imagenes, las fuentes .woff2 y los .xlsx YA vienen comprimidos y volver a
+    # comprimirlos gasta CPU del servidor para no ahorrar nada.
+    #
+    # Los CSV que exporta el sistema SI entran: son texto plano y suelen ser el
+    # archivo mas pesado que se descarga.
+    <IfModule mod_deflate.c>
+        AddOutputFilterByType DEFLATE text/html text/plain text/css text/csv
+        AddOutputFilterByType DEFLATE application/javascript text/javascript
+        AddOutputFilterByType DEFLATE application/json
+        AddOutputFilterByType DEFLATE image/svg+xml
+
+        # Internet Explorer viejo declaraba soportar gzip y despues rompia. Si
+        # en la operacion no queda ningun IE, estas dos lineas se pueden borrar.
+        BrowserMatch ^Mozilla/4 gzip-only-text/html
+        BrowserMatch ^Mozilla/4\.0[678] no-gzip
+        BrowserMatch \bMSIE\s7 !no-gzip !gzip-only-text/html
+
+        # Sin esto, un proxy intermedio puede guardar la version comprimida y
+        # servirsela a un cliente que no la soporta.
+        Header append Vary Accept-Encoding
+    </IfModule>
+
+    # --- Cache de estaticos ---------------------------------------------------
+    # NO hace falta configurar nada aca. La aplicacion ya manda la cabecera
+    # correcta por si misma (ver "CACHE DE ASSETS ESTATICOS" en app.py):
+    #
+    #   /static/...?v=<hash>  ->  public, max-age=31536000, immutable
+    #   /static/... sin ?v=   ->  no-cache (revalida)
+    #   cualquier pantalla    ->  no-store (nunca se guarda: son datos de stock)
+    #
+    # IMPORTANTE: no agregar aca un ExpiresByType ni un Header set Cache-Control
+    # para /static. Serian una segunda fuente de verdad, y si alguna vez se
+    # aplicara a una URL sin ?v= volveria el problema que esto resuelve: CSS
+    # viejo cacheado por un anio contra HTML nuevo, sin forma de arreglarlo
+    # desde el servidor.
+
     # --- Cabeceras de seguridad ----------------------------------------------
     # HSTS: activar SOLO cuando HTTPS ya funciona bien en todo el dominio.
     # Recomendado: empezar con max-age chico (300) durante unos dias, verificar
@@ -96,3 +144,4 @@ TraceEnable Off
 #   LoadModule proxy_module        modules/mod_proxy.so
 #   LoadModule proxy_http_module   modules/mod_proxy_http.so
 #   LoadModule ssl_module          modules/mod_ssl.so
+#   LoadModule deflate_module      modules/mod_deflate.so

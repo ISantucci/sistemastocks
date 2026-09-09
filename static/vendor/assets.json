@@ -7,35 +7,41 @@
     "static/vendor/, se calcula el hash SRI y este archivo se actualiza solo:",
     "a partir de ahí la app las sirve locales y deja de depender del CDN.",
     "",
+    "",
+    "Las URLs apuntan a jsDelivr/npm a proposito: jsDelivr sirve el paquete npm",
+    "tal cual, que es de donde salen los archivos de static/vendor/. Asi, si algun",
+    "dia faltara el archivo local y se cayera al CDN, el hash SRI sigue matcheando.",
+    "Con una URL de otro CDN que reempaqueta, el SRI podria fallar y el navegador",
+    "bloquearia el script.",
     "No editar 'integrity' a mano: lo calcula el script desde el archivo real."
   ],
   "assets": {
     "tom-select-css": {
       "version": "2.3.1",
       "url": "https://cdn.jsdelivr.net/npm/tom-select@2.3.1/dist/css/tom-select.bootstrap5.min.css",
-      "local": null,
-      "integrity": null,
+      "local": "vendor/tom-select-css/2.3.1/tom-select.bootstrap5.min.css",
+      "integrity": "sha384-piG3EtH1fBnPi68q4spy+Qgpb0dHK1D1dwk0GaHwFkvmUxYi526bBlk3xJcjEBsD",
       "type": "css"
     },
     "tom-select-js": {
       "version": "2.3.1",
       "url": "https://cdn.jsdelivr.net/npm/tom-select@2.3.1/dist/js/tom-select.complete.min.js",
-      "local": null,
-      "integrity": null,
+      "local": "vendor/tom-select-js/2.3.1/tom-select.complete.min.js",
+      "integrity": "sha384-cnROoUgVILyibe3J0zhzWoJ9p2WmdnK7j/BOTSWqVDbC1pVw2d+i6Q/1ESKJKCYf",
       "type": "js"
     },
     "chartjs": {
       "version": "4.4.1",
-      "url": "https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js",
-      "local": null,
-      "integrity": null,
+      "url": "https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js",
+      "local": "vendor/chartjs/4.4.1/chart.umd.js",
+      "integrity": "sha384-dug+JxfBvklEQdJ4AYuBBAIScUz0bVN73xpy273gcAwHjb3qI0fXmuYNaNfdyYJG",
       "type": "js"
     },
     "html5-qrcode": {
       "version": "2.3.8",
       "url": "https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js",
-      "local": null,
-      "integrity": null,
+      "local": "vendor/html5-qrcode/2.3.8/html5-qrcode.min.js",
+      "integrity": "sha384-c9d8RFSL+u3exBOJ4Yp3HUJXS4znl9f+z66d1y54ig+ea249SpqR+w1wyvXz/lk+",
       "type": "js"
     }
   }

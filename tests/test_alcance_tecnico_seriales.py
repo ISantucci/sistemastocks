@@ -59,7 +59,18 @@ def _login(client, username, password="pass1234"):
 
 
 def _stock_map(html):
-    m = re.search(r"(?:stockMap|stock_map)\s*=\s*(\{.*?\});", html, re.S)
+    """El mapa de stock que el servidor embebe en la pantalla.
+
+    Sigue viajando inline (depende de la base y por eso lo renderiza el
+    servidor), pero ahora dentro del objeto de datos de la pantalla:
+
+        window.MOV_DATA = { stockMap: {...}, ... }
+
+    en vez de la vieja `var stockMap = {...};`. Lo que se verifica no cambió: es
+    el mismo mapa y la misma pregunta —qué ubicaciones ve el usuario— y sigue
+    siendo lo único que separa al técnico del inventario de sus compañeros.
+    """
+    m = re.search(r"stockMap\s*[:=]\s*(\{.*?\})\s*[,;]", html, re.S)
     return json.loads(m.group(1)) if m else None
 
 

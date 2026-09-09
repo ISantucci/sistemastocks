@@ -4,9 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}TNGStocks{% endblock %}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+{#- Tipografia servida desde el mismo origen. Antes eran dos preconnect y un
+    stylesheet a fonts.googleapis.com, los tres bloqueantes: con la red lenta o
+    sin salida a Internet, la pantalla esperaba a Google para pintarse.
+    Sin <link rel="preload"> a proposito: el preload tiene que apuntar a la
+    MISMA url que despues usa el @font-face o el navegador baja el archivo dos
+    veces, y la del @font-face es relativa al CSS. Con font-display:swap el
+    texto ya se ve desde el primer frame, asi que el preload no aportaba. -#}
+<link rel="stylesheet" href="{{ url_for('static', filename='vendor/inter/5.0.17/inter.css') }}">
 {%- set _ts_css = vendor_asset('tom-select-css') %}
 <link rel="stylesheet" href="{{ _ts_css.url }}"{% if _ts_css.integrity %} integrity="{{ _ts_css.integrity }}"{% endif %}{% if not _ts_css.is_local %} crossorigin="anonymous" referrerpolicy="no-referrer"{% endif %}>
 <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
@@ -16,6 +21,23 @@
 <body>
 {% if current_user.is_authenticated and not embed %}
 <div class="app-shell" id="appShell">
+{#- Si el usuario tiene el menu colapsado, la clase se aplica ACA y no en
+    app.js. app.js corre en DOMContentLoaded y esta al final del <body>: la
+    pantalla se pintaba con el menu ancho y saltaba a angosto un instante
+    despues, en CADA cambio de pantalla. Este script es sincrono y esta pegado a
+    la apertura del contenedor, asi que la clase ya esta puesta antes de que el
+    navegador pinte nada de adentro.
+    Va inline a proposito: un archivo aparte seria otro request bloqueante, y
+    seria peor el remedio. El try/catch es porque en ventana privada, o con las
+    cookies y datos de sitio bloqueados, localStorage tira excepcion: si eso
+    pasara sin proteger, no cargaria el resto de la pagina. -#}
+<script>
+  try {
+    if (localStorage.getItem('tngstocks.sidebarCollapsed') === '1') {
+      document.getElementById('appShell').classList.add('sidebar-collapsed');
+    }
+  } catch (e) { /* sin localStorage el menu arranca expandido, que es el default */ }
+</script>
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-brand">
       <span class="brand-mark"><img src="{{ url_for('static', filename='img/logo_tng.png') }}" alt="TNG"></span>
@@ -241,6 +263,11 @@
 {% endif %}
 {%- set _ts_js = vendor_asset('tom-select-js') %}
 <script src="{{ _ts_js.url }}"{% if _ts_js.integrity %} integrity="{{ _ts_js.integrity }}"{% endif %}{% if not _ts_js.is_local %} crossorigin="anonymous" referrerpolicy="no-referrer"{% endif %}></script>
+{#- Ids de los items que se miden en metros. Va antes de los scripts porque
+    unit_hint.js lo lee al arrancar. Son unos pocos ids (los cables), no el
+    catalogo: ver items_en_metros() en app.py. -#}
+<script>window.TNG_ITEMS_METROS = {{ items_en_metros()|tojson }};</script>
+<script src="{{ url_for('static', filename='js/unit_hint.js') }}"></script>
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 <script src="{{ url_for('static', filename='js/serial_picker.js') }}"></script>
 <script src="{{ url_for('static', filename='js/line_dedupe.js') }}"></script>
@@ -248,71 +275,12 @@
 <script src="{{ url_for('static', filename='js/confirm_move.js') }}"></script>
 {% if current_user.is_authenticated and not embed %}
 <script>
-  function openDetail(url) {
-    var f = document.getElementById('detail-frame');
-    var ov = document.getElementById('detail-modal');
-    if (!f || !ov) return;
-    f.src = url + (url.indexOf('?') > -1 ? '&' : '?') + 'embed=1';
-    ov.classList.add('open');
-    document.body.classList.add('modal-open');
-    history.pushState({ detail: true }, '', '#detalle');
-  }
-  function closeDetail() {
-    var f = document.getElementById('detail-frame');
-    var ov = document.getElementById('detail-modal');
-    if (!ov) return;
-    ov.classList.remove('open');
-    document.body.classList.remove('modal-open');
-    if (f) f.src = 'about:blank';
-  }
-  // Cierre manual (X, clic afuera, Escape).
-  //
-  // ANTES esto hacía `history.back()`, y ahí estaba el bug: el contenido del
-  // popup vive en un IFRAME, y cada navegación adentro del iframe (cargar un
-  // serial, editar, paginar) empuja su propia entrada en el historial de la
-  // pestaña. Entonces el back() no sacaba la entrada '#detalle': retrocedía UNA
-  // OPERACIÓN DENTRO del popup. El síntoma era que tocabas afuera y en vez de
-  // cerrarse, el popup "se deshacía" un paso — y hacía falta un clic por cada
-  // cosa que hubieras hecho adentro. Se veía sólo en la ficha de Seriales,
-  // que es la única donde se opera; remitos y solicitudes sólo se leen.
-  //
-  // Ahora se cierra primero —siempre, al primer clic— y el '#detalle' se limpia
-  // con replaceState, que NO navega. El botón "atrás" del navegador sigue
-  // cerrando el popup mientras está abierto: eso lo hace el popstate de abajo,
-  // que no se tocó.
-  function dismissDetail() {
-    closeDetail();
-    if (location.hash === '#detalle') {
-      history.replaceState(null, '', location.pathname + location.search);
-    }
-  }
-  // Cerrar con el botón "atrás" del navegador.
-  window.addEventListener('popstate', function () {
-    var ov = document.getElementById('detail-modal');
-    if (ov && ov.classList.contains('open')) closeDetail();
-  });
-  // Cerrar con Escape.
-  document.addEventListener('keydown', function (e) {
-    var ov = document.getElementById('detail-modal');
-    if (e.key === 'Escape' && ov && ov.classList.contains('open')) dismissDetail();
-  });
-  // Cierre por clic en el fondo. Se exige que el gesto EMPIECE y TERMINE sobre
-  // el fondo: si se arrastra desde adentro (por ejemplo seleccionando texto) y
-  // se suelta afuera, el modal NO se cierra.
-  (function () {
-    var startedOnBackdrop = false;
-    var ov = document.getElementById('detail-modal');
-    if (!ov) return;
-    ov.addEventListener('mousedown', function (e) {
-      startedOnBackdrop = (e.button === 0 && e.target === ov);
-    });
-    ov.addEventListener('mouseup', function (e) {
-      var started = startedOnBackdrop;
-      startedOnBackdrop = false;
-      if (e.button === 0 && started && e.target === ov) dismissDetail();
-    });
-  })();
+  /* Solo DATOS: lo unico de esta pantalla que depende de la base y por
+     eso tiene que renderizarlo el servidor. La logica vive en
+     static/js/detail_modal.js. */
+  window.DETAIL_DATA = {};
 </script>
+<script src="{{ url_for('static', filename='js/detail_modal.js') }}"></script>
 {% endif %}
 {% block extra_scripts %}{% endblock %}
 </body>

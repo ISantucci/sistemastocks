@@ -168,10 +168,14 @@ def test_utilizados_todo_en_blanco_avisa(A, esc):
 # ======================================================================
 
 def test_ingresos_egresos_arranca_con_una_sola_fila(A, esc):
-    """Arrancar con tres dejaba dos filas que el usuario no pidió."""
+    """Arrancar con tres dejaba dos filas que el usuario no pidió.
+
+    El código de la pantalla se mudó del template a static/js/, así que la
+    guarda mira ahí. Lo que se verifica es idéntico.
+    """
     import re
-    html = open("templates/ingresos_egresos.html", encoding="utf-8").read()
-    arranque = re.search(r"^\s*addLine\(\);.*$", html, re.M)
+    js = open("static/js/ingresos_egresos.js", encoding="utf-8").read()
+    arranque = re.search(r"^\s*addLine\(\);.*$", js, re.M)
     assert arranque, "no se encontró el arranque de filas"
     assert arranque.group(0).count("addLine()") == 1
 
@@ -179,18 +183,20 @@ def test_ingresos_egresos_arranca_con_una_sola_fila(A, esc):
 def test_todas_las_pantallas_multifila_arrancan_con_una_fila(A):
     """Misma regla en las cinco: una fila al entrar, como Utilizados."""
     import re
+    # Cada pantalla y la función con la que agrega una fila. El código vive en
+    # static/js/ desde que salió de los templates.
     pantallas = {
-        "movements_bulk.html": "addBulkLine",
-        "item_usage.html": "addUsageLine",
-        "scrap_report.html": "addScrapLine",
-        "ingresos_egresos.html": "addLine",
-        "repair_requests.html": "addLine",
+        "movements_bulk.js": "addBulkLine",
+        "item_usage.js": "addUsageLine",
+        "scrap_report.js": "addScrapLine",
+        "ingresos_egresos.js": "addLine",
+        "repair_requests.js": "addLine",
     }
     for archivo, fn in pantallas.items():
-        html = open(f"templates/{archivo}", encoding="utf-8").read()
+        js = open(f"static/js/{archivo}", encoding="utf-8").read()
         # Llamadas de arranque: las que están solas en su línea, fuera de la
         # definición de la función y del listener del botón "+ Agregar".
-        sueltas = [l.strip() for l in html.split("\n")
+        sueltas = [l.strip() for l in js.split("\n")
                    if l.strip().startswith(f"{fn}();")]
         assert len(sueltas) == 1, f"{archivo}: arranca con {len(sueltas)} filas"
 

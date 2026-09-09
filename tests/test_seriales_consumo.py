@@ -13,7 +13,12 @@ ubicación, de otro ítem o en cantidad equivocada no se consuma, y que un recha
 no mueva stock ni deje registros a medias.
 """
 import pytest
-from conftest import make_user, make_item, make_category, make_location, login
+from conftest import make_user, make_item, make_category, make_location, login, con_js
+# El JS de cada pantalla ya no esta inline en el template: vive en static/js/.
+# con_js() (conftest) devuelve el HTML mas el contenido de los .js que esa
+# pagina carga, asi estas pruebas siguen verificando lo mismo -- que la pantalla
+# enganche el comportamiento correcto -- sin depender de donde este escrito.
+
 
 
 @pytest.fixture()
@@ -312,19 +317,30 @@ def test_el_selector_de_seriales_sigue_enganchado_en_las_tres_pantallas():
         js = fh.read()
     assert "idsInput" in js and "summaryInput" in js
 
+    # El marcado sigue en el template; el código que engancha el selector se
+    # mudó a static/js/. Se revisa cada cosa donde vive ahora.
     for nombre in ("item_usage", "scrap_report"):
         with open(f"templates/{nombre}.html", encoding="utf-8") as fh:
-            html = fh.read()
-        assert 'name="unit_ids[]"' in html, nombre
-        assert "serial-pick-list" in html, nombre
-        assert "initSerialPicker" in html, nombre
+            assert 'name="unit_ids[]"' in fh.read(), nombre
+
+    for nombre in ("item_usage", "scrap_report", "movements"):
+        with open(f"static/js/{nombre}.js", encoding="utf-8") as fh:
+            pantalla_js = fh.read()
+        with open(f"templates/{nombre}.html", encoding="utf-8") as fh:
+            pantalla_html = fh.read()
+        # La lista de seriales la arma el JS en las multifila y la trae el
+        # template en Movimientos, que tiene una sola fila. Alcanza con que
+        # esté en alguno de los dos: lo que importa es que el selector exista.
+        assert "serial-pick-list" in pantalla_js + pantalla_html, nombre
+        assert "initSerialPicker" in pantalla_js, nombre
 
     # Movimientos sigue mandando los seriales por los checkboxes (unit_id),
-    # pero el modal ahora los muestra por el resumen en texto.
+    # pero el modal ahora los muestra por el resumen en texto. El input está en
+    # el template y el código que lo llena en static/js/movements.js.
     with open("templates/movements.html", encoding="utf-8") as fh:
-        movs = fh.read()
-    assert "summaryInput" in movs
-    assert 'id="serial_summary"' in movs
+        assert 'id="serial_summary"' in fh.read()
+    with open("static/js/movements.js", encoding="utf-8") as fh:
+        assert "summaryInput" in fh.read()
 
 
 def test_el_modal_muestra_los_seriales_en_las_tres_pantallas(A, client, esc):
@@ -355,7 +371,8 @@ def test_el_popup_de_seriales_cierra_sin_navegar_el_historial():
 
     Si alguien vuelve a poner history.back() acá, vuelve el bug.
     """
-    with open("templates/base.html", encoding="utf-8") as fh:
+    # dismissDetail() salió de base.html a static/js/detail_modal.js.
+    with open("static/js/detail_modal.js", encoding="utf-8") as fh:
         html = fh.read()
 
     bloque = html[html.index("function dismissDetail"):]

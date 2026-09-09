@@ -172,14 +172,15 @@ def test_requirements_estan_pinneadas():
     assert not sueltas, f"dependencias sin versión fija: {sueltas}"
 
 
-# Únicos orígenes externos aceptados en los templates. Google Fonts queda como
-# excepción documentada: el CSS que devuelve varía por navegador, así que no
-# admite SRI. Todo lo demás (JS/CSS de terceros) tiene que pasar por
-# vendor_asset(), que fija versión y permite vendorizar.
-ORIGENES_EXTERNOS_PERMITIDOS = (
-    "https://fonts.googleapis.com",
-    "https://fonts.gstatic.com",
-)
+# Ya no queda NINGÚN origen externo aceptado en los templates.
+#
+# Google Fonts era la última excepción y se fue: la tipografía está vendorizada
+# en static/vendor/inter/ y se sirve desde el mismo origen. Todo asset de
+# terceros pasa por vendor_asset(), que fija versión y sirve el archivo local.
+#
+# La tupla se deja vacía en vez de borrarla porque es la que define la regla: si
+# mañana hubiera que aceptar un origen externo, se agrega acá y se ve en el diff.
+ORIGENES_EXTERNOS_PERMITIDOS = ()
 
 
 def test_templates_no_hardcodean_cdn():
@@ -193,11 +194,23 @@ def test_templates_no_hardcodean_cdn():
     assert not ofensores, f"URLs externas hardcodeadas: {ofensores}"
 
 
-def test_csp_permite_las_fuentes_que_usan_los_templates():
-    """Si la CSP no contempla Google Fonts, en modo enforce rompería el estilo."""
+def test_la_csp_quedo_cerrada():
+    """Con todos los assets locales, la CSP no tiene por qué permitir a nadie más.
+
+    Antes este test verificaba lo contrario: que la CSP dejara pasar Google
+    Fonts, porque la tipografía venía de ahí. Ahora que es local, cualquier
+    origen externo en la política significa que algo volvió a salir afuera.
+    """
     import app as A
-    for origen in ORIGENES_EXTERNOS_PERMITIDOS:
-        assert origen in A.CSP_POLICY
+    externos = ("cdn.jsdelivr.net", "cdnjs.cloudflare.com",
+                "fonts.googleapis.com", "fonts.gstatic.com")
+    for origen in externos:
+        assert origen not in A.CSP_POLICY, (
+            f"la CSP volvió a habilitar {origen}: se rompió el vendorizado"
+        )
+    # Y lo que sí tiene que estar: el propio origen para scripts, estilos y fuentes.
+    assert "script-src 'self'" in A.CSP_POLICY
+    assert "font-src 'self'" in A.CSP_POLICY
 
 
 def test_manifiesto_de_assets_es_valido():

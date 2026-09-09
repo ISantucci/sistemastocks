@@ -35,3 +35,9 @@ ObsidianVaults/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# --- Carpeta de descarte -----------------------------------------------------
+# Basurero temporal (snapshots, copias, archivos a revisar antes de tirar). No
+# es codigo y no tiene que entrar al historial: sin esta linea, un `git add -A`
+# se lleva puesto lo que haya adentro.
+_a_borrar/

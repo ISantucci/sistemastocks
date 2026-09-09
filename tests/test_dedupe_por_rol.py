@@ -12,7 +12,12 @@ Por eso se verifica por rol y por pantalla que el HTML servido traiga el script
 y el enganche, no solo que responda 200.
 """
 import pytest
-from conftest import make_user, make_item, make_location, login
+from conftest import make_user, make_item, make_location, login, con_js
+# El JS de cada pantalla ya no esta inline en el template: vive en static/js/.
+# con_js() (conftest) devuelve el HTML mas el contenido de los .js que esa
+# pagina carga, asi estas pruebas siguen verificando lo mismo -- que la pantalla
+# enganche el comportamiento correcto -- sin depender de donde este escrito.
+
 
 # OJO: "entrar a la pantalla" y "ver el formulario de carga" NO son lo mismo.
 # /movements e /ingresos-egresos son 200 para el LECTOR (modo lectura del
@@ -83,7 +88,7 @@ def test_dedupe_presente_para_cada_rol(A, esc, role, url, ve, carga, marca):
         assert marca not in html, f"{role} recibe el form de carga en {url}"
         return
     assert "line_dedupe.js" in html, f"{role} en {url}: no carga line_dedupe.js"
-    assert marca in html, f"{role} en {url}: no engancha el dedupe ({marca})"
+    assert marca in con_js(html), f"{role} en {url}: no engancha el dedupe ({marca})"
 
 
 @pytest.mark.parametrize("role", ROLES)
@@ -97,7 +102,7 @@ def test_exclusion_desde_hacia_presente_para_cada_rol(A, esc, role, url, ve, car
     if role not in carga:
         assert 'name="to_location_id"' not in html, f"{role} recibe el form de carga en {url}"
         return
-    assert "initFromToExclusion" in html, f"{role} en {url}: falta la exclusión Desde/Hacia"
+    assert "initFromToExclusion" in con_js(html), f"{role} en {url}: falta la exclusión Desde/Hacia"
 
 
 def test_lector_entra_de_solo_lectura_pero_no_puede_cargar(A, esc):
@@ -124,7 +129,7 @@ def test_tecnico_con_una_sola_ubicacion_recibe_input_hidden(A, esc):
     """
     html = _cli(A, "TECNICO").get("/movements").get_data(as_text=True)
     assert 'type="hidden" name="from_location_id"' in html
-    assert "initFromToExclusion" in html
+    assert "initFromToExclusion" in con_js(html)
 
 
 def test_tecnico_con_dos_ubicaciones_recibe_select(A, esc):
@@ -133,7 +138,7 @@ def test_tecnico_con_dos_ubicaciones_recibe_select(A, esc):
     A.db.session.commit()
     html = _cli(A, "TECNICO").get("/movements").get_data(as_text=True)
     assert '<select name="from_location_id"' in html
-    assert "initFromToExclusion" in html
+    assert "initFromToExclusion" in con_js(html)
 
 
 @pytest.mark.parametrize("role", ["ADMIN", "SUPERVISOR", "TECNICO"])
@@ -166,7 +171,7 @@ def test_item_duplicado_rechazado_para_cada_rol(A, esc, role):
 def test_tecnico_puede_usar_dedupe_en_utilizados(A, esc):
     """El TECNICO en Utilizados: 'Desde' es hidden y el dedupe igual se engancha."""
     html = _cli(A, "TECNICO").get("/item-usage").get_data(as_text=True)
-    assert 'itemSel: ".usage-item"' in html
+    assert 'itemSel: ".usage-item"' in con_js(html)
     assert "line_dedupe.js" in html
     c = _cli(A, "TECNICO")
     antes = A.Movement.query.count()
@@ -180,4 +185,4 @@ def test_tecnico_puede_usar_dedupe_en_utilizados(A, esc):
 
 def test_tecnico_dedupe_en_solicitud_de_repuestos(A, esc):
     html = _cli(A, "TECNICO").get("/solicitudes-repuestos").get_data(as_text=True)
-    assert "initLineDedupe" in html, "el TECNICO no recibe el dedupe en repuestos"
+    assert "initLineDedupe" in con_js(html), "el TECNICO no recibe el dedupe en repuestos"

@@ -182,7 +182,7 @@
         <tr>
           <td>{{ g.item.code }}</td>
           <td>{{ g.item.name }}</td>
-          <td>{{ g.qty }}</td>
+          <td>{{ fmt_qty(g.qty, g.item) }}</td>
           <td>
             <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('serials_{{ g.item.id }}').style.display = (document.getElementById('serials_{{ g.item.id }}').style.display === 'none' ? 'block' : 'none');">Ver seriales ({{ g.qty }})</button>
             <div id="serials_{{ g.item.id }}" style="display:none; margin-top:6px;">

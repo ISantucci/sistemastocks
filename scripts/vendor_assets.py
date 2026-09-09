@@ -84,7 +84,20 @@ def main() -> int:
             continue
 
         if target.exists() and not args.force:
-            print(f"[--] {name}: ya existe, se saltea ({rel})")
+            # El archivo ya esta en disco. Puede venir de una corrida anterior o
+            # haber sido copiado a mano, que es la unica salida cuando la red del
+            # servidor no llega al CDN. En los dos casos el manifiesto tiene que
+            # reflejar lo que hay en disco: si no, queda el archivo local ahi al
+            # lado y la app lo ignora, siguiendo contra el CDN.
+            rel_local = f"vendor/{name}/{meta['version']}/{target.name}"
+            actual = sri_hash(target.read_bytes())
+            if meta.get("local") != rel_local or meta.get("integrity") != actual:
+                meta["local"] = rel_local
+                meta["integrity"] = actual
+                changed = True
+                print(f"[OK] {name}: ya estaba en disco, se registra en el manifiesto ({rel})")
+            else:
+                print(f"[--] {name}: ya existe y esta registrado, se saltea ({rel})")
             continue
 
         print(f"[..] {name}: descargando {meta['url']}")
