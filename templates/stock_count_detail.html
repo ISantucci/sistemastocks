@@ -1,0 +1,251 @@
+{% extends "base.html" %}
+{% block title %}{{ sc.number }} · Conteo de camioneta{% endblock %}
+{% block page_title %}Conteo {{ sc.number }}{% endblock %}
+{% block content %}
+{% set solo_tecnico = me and me.role == "TECNICO" %}
+<div class="page-header">
+  <div>
+    <h2>{{ sc.number }} — {{ sc.location.name }}</h2>
+    <p class="muted">
+      Contó <b>{{ sc.created_by.full_name or sc.created_by.username }}</b>
+      el {{ sc.created_at.strftime("%Y-%m-%d %H:%M") }} ·
+      {{ sc.lines_ok }} de {{ sc.lines_total }} renglones coincidieron
+      ({{ sc.score_pct }}%)
+      {% if sc.status == "SIN_DIFERENCIAS" %}
+        · <span class="badge badge-ok">SIN DIFERENCIAS</span>
+      {% elif sc.status == "APROBADO" %}
+        · <span class="badge badge-ok">APROBADO</span>
+      {% elif sc.status == "RECHAZADO" %}
+        · <span class="badge badge-danger">RECHAZADO</span>
+      {% else %}
+        · <span class="badge badge-neutral">PENDIENTE</span>
+      {% endif %}
+    </p>
+    {% if sc.reviewed_at %}
+    <p class="muted">
+      Revisado por {{ sc.reviewed_by.full_name or sc.reviewed_by.username }}
+      el {{ sc.reviewed_at.strftime("%Y-%m-%d %H:%M") }}
+      {% if sc.review_reason %} · Motivo: {{ sc.review_reason }}{% endif %}
+    </p>
+    {% endif %}
+  </div>
+  <div><a href="{{ url_for('stock_counts') }}" class="btn btn-secondary">Volver</a></div>
+</div>
+
+{% if not solo_tecnico and sc.status == "PENDIENTE" and faltan_seriales_por_cargar %}
+<div class="card">
+  <p style="margin:0;">
+    ⚠ El técnico declaró unidades <b>sin número de serie cargado</b> en el sistema.
+    No se puede mover una unidad que el sistema no conoce, así que
+    <b>escribí los números de serie en la tabla de abajo</b> antes de aprobar:
+    {{ faltan_seriales_por_cargar|join("; ") }}.
+    Se dan de alta en la misma operación y entran a {{ sc.location.name }}.
+  </p>
+</div>
+{% endif %}
+
+{% if not solo_tecnico and sc.status == "PENDIENTE" and sc.system_lines != sc.lines_total %}
+<div class="card">
+  <p class="muted" style="margin:0;">
+    ⚠ Al enviarse, el sistema tenía <b>{{ sc.system_lines }}</b> ítem(s) con stock en
+    {{ sc.location.name }} y el conteo trae <b>{{ sc.lines_total }}</b> renglón(es).
+    La diferencia puede ser por ítems que el técnico agregó a mano, o por renglones que
+    no llegaron. Miralo antes de aprobar.
+  </p>
+</div>
+{% endif %}
+
+{% if hay_desfasaje and not solo_tecnico %}
+<div class="card">
+  <p class="muted" style="margin:0;">
+    ⚠ El stock de {{ sc.location.name }} <b>se movió</b> desde que se hizo el conteo.
+    Abajo ves las dos columnas: contra qué contó el técnico y qué dice el sistema ahora.
+    <b>El ajuste se calcula siempre contra el sistema de ahora</b>, nunca contra la foto.
+  </p>
+</div>
+{% endif %}
+
+{% if sc.comment %}
+<div class="card">
+  <div class="card-header"><span class="card-title">Comentarios del técnico</span></div>
+  <p style="white-space:pre-wrap; margin:0;">{{ sc.comment }}</p>
+</div>
+{% endif %}
+
+<form method="post" action="{{ url_for('stock_count_approve', sc_id=sc.id) }}">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<div class="table-card">
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Ítem</th>
+          {% if not solo_tecnico %}
+          <th class="num">Sistema{% if hay_desfasaje %} (al contar){% endif %}</th>
+          {% if hay_desfasaje %}<th class="num">Sistema (ahora)</th>{% endif %}
+          {% endif %}
+          <th class="num">Conteo técnico</th>
+          {% if not solo_tecnico %}<th class="num">Diferencia</th>{% endif %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in lines_view %}
+        <tr>
+          <td>
+            {{ r.item.code }} — {{ r.item.name }}
+            {% if r.line.added_by_tech and not solo_tecnico %}<span class="badge badge-warn">agregado por el técnico</span>{% endif %}
+            {% if r.serial_view %}
+            <div style="margin-top:6px; display:flex; flex-wrap:wrap; gap:6px;">
+              {% for s in r.serial_view %}
+                {% if s.estado == "falta" %}
+                  {% if not solo_tecnico %}
+                  <span class="badge badge-danger" title="El sistema lo tiene acá y el técnico no lo declaró">
+                    {{ s.serial }} · falta
+                  </span>
+                  {% endif %}
+                {% elif s.estado == "ok" %}
+                  <span class="badge badge-ok">{{ s.serial }}</span>
+                {% elif s.estado == "jaula" %}
+                  <span class="badge badge-warn" title="Hoy figura en el depósito: al aprobar pasa a esta camioneta">
+                    {{ s.serial }} · desde {{ s.donde }}
+                  </span>
+                {% elif s.estado == "cruce" %}
+                  <span class="badge badge-danger" title="Hoy figura en la camioneta de otro técnico">
+                    {{ s.serial }} · en {{ s.donde }}
+                  </span>
+                {% elif s.estado == "mueve" %}
+                  <span class="badge badge-warn">{{ s.serial }} · desde {{ s.donde }}</span>
+                {% else %}
+                  <span class="badge badge-danger" title="Ya no está en stock">
+                    {{ s.serial }} · sin stock
+                  </span>
+                {% endif %}
+              {% endfor %}
+            </div>
+            {% endif %}
+            {% if r.sin_serial and not solo_tecnico %}
+            <div class="muted" style="margin-top:4px;">
+              Declaró {{ r.sin_serial }} unidad(es) más sin número de serie cargado.
+            </div>
+              {% if puede_revisar and sc.status == "PENDIENTE" %}
+              <div class="field" style="margin-top:6px; max-width:420px;">
+                <label>Número(s) de serie de esa(s) {{ r.sin_serial }} unidad(es)</label>
+                {% for n in range(r.sin_serial) %}
+                <input name="nuevo_serial_{{ r.line.id }}" maxlength="120"
+                       placeholder="Número de serie {{ n + 1 }}"
+                       style="margin-bottom:4px;">
+                {% endfor %}
+                <div class="muted" style="font-size:12px;">
+                  Se dan de alta al aprobar y entran a {{ sc.location.name }}.
+                  Si el serial ya existía y había salido del sistema, se reactiva.
+                </div>
+              </div>
+              {% endif %}
+            {% endif %}
+          </td>
+          {% if not solo_tecnico %}
+          <td class="num">{{ fmt_qty(r.sistema_foto, r.item) }}</td>
+          {% if hay_desfasaje %}<td class="num">{{ fmt_qty(r.sistema_ahora, r.item) }}</td>{% endif %}
+          {% endif %}
+          <td class="num">{{ fmt_qty(r.contado, r.item) }}</td>
+          {% if not solo_tecnico %}
+          <td class="num">
+            {% if r.coincide %}
+              <span class="badge badge-ok">OK</span>
+            {% elif r.diff_foto > 0 %}
+              <span class="badge badge-warn">+{{ r.diff_foto }}</span>
+            {% elif r.diff_foto < 0 %}
+              <span class="badge badge-danger">{{ r.diff_foto }}</span>
+            {% else %}
+              <span class="badge badge-danger">seriales</span>
+            {% endif %}
+          </td>
+          {% endif %}
+        </tr>
+        {% else %}
+        <tr><td colspan="{{ 2 if solo_tecnico else 5 }}" class="muted">El conteo no tiene renglones.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% if puede_revisar and sc.status == "PENDIENTE" %}
+<div class="card">
+  <div class="card-header"><span class="card-title">Aprobar el ajuste</span></div>
+  <p class="muted">
+    Aprobar aplica <b>todas</b> las diferencias de una: los sobrantes entran desde
+    Proveedor a {{ sc.location.name }}, los faltantes salen a Descartes con su registro
+    de descarte, y los números de serie declarados que hoy están en otro lado se mueven
+    a esta camioneta. Es todo o nada: si algo no cierra, rechazalo.
+  </p>
+  {% if cruces %}
+  <p style="margin-bottom:8px;">
+    ⚠ Este conteo <b>mueve números de serie que hoy figuran en la camioneta de otro
+    técnico</b>: {{ cruces|join("; ") }}. Puede ser real (se lo pasaron y nadie lo
+    registró) o un serial mal tipeado. Confirmá solo si estás seguro.
+  </p>
+  <label style="display:block; margin-bottom:10px; font-weight:normal;">
+    <input type="checkbox" name="confirmar_cruces" value="1">
+    Confirmo mover esos seriales a {{ sc.location.name }}
+  </label>
+  {% endif %}
+  <button type="submit" class="btn btn-primary"
+          onclick="return confirm('Se van a aplicar todas las diferencias de este conteo. ¿Confirmás?');">
+    Aprobar y aplicar ajustes
+  </button>
+</div>
+{% endif %}
+</form>
+
+{% if puede_revisar and sc.status == "PENDIENTE" %}
+<div class="card">
+  <div class="card-header"><span class="card-title">Rechazar</span></div>
+  <p class="muted">Rechazar <b>no modifica ningún stock</b>. El conteo queda guardado con su puntaje.</p>
+  <form method="post" action="{{ url_for('stock_count_reject', sc_id=sc.id) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="field" style="max-width:560px;">
+      <label>Motivo (lo va a leer el técnico)</label>
+      <input name="review_reason" maxlength="255" required
+             placeholder="Ej: recontá el cable, la diferencia es muy grande">
+    </div>
+    <button type="submit" class="btn btn-danger" style="margin-top:10px;">Rechazar conteo</button>
+  </form>
+</div>
+{% endif %}
+
+{% if mostrar_resultado %}
+<div class="modal-overlay" id="modal-sc-resultado">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">Conteo enviado</span>
+      <button type="button" class="modal-close" onclick="closeModal('modal-sc-resultado')">&times;</button>
+    </div>
+    <div class="modal-body" style="text-align:center;">
+      {% if sc.score_pct == 100 %}
+        <div style="font-size:44px; line-height:1;">🎉</div>
+        <h3 style="margin:0;">¡Felicitaciones, conteo perfecto!</h3>
+        <p class="muted" style="margin:0;">Los {{ sc.lines_total }} renglones coinciden con el sistema.</p>
+      {% else %}
+        <div style="font-size:44px; line-height:1;">📋</div>
+        <h3 style="margin:0;">Conteo {{ sc.score_pct }}% perfecto</h3>
+        <p class="muted" style="margin:0;">
+          Coincidieron {{ sc.lines_ok }} de {{ sc.lines_total }} renglones.
+          Un supervisor va a revisar las diferencias.
+        </p>
+      {% endif %}
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn btn-primary" onclick="closeModal('modal-sc-resultado')">Listo</button>
+    </div>
+  </div>
+</div>
+<script>
+  // Se abre con el helper global (no con la clase `open` a mano) para que el
+  // body quede en el mismo estado que en cualquier otro modal del sistema.
+  document.addEventListener("DOMContentLoaded", function () {
+    openModal('modal-sc-resultado');
+  });
+</script>
+{% endif %}
+{% endblock %}

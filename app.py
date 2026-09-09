@@ -1344,6 +1344,7 @@ SCRAP_SOURCES = {
     "PENDIENTE": "Devolución de pendiente",
     "REPARACION": "Reparación descartada",
     "CONTEO": "Faltante de conteo",
+    "CONTEO_CAMIONETA": "Faltante de conteo de camioneta",
 }
 
 
@@ -1519,6 +1520,156 @@ class RepairRequestLine(db.Model):
     qty_entregada = db.Column(db.Integer, nullable=False, default=0)  # entregada al cerrar
 
     item = db.relationship("Item")
+
+
+# ================================================================
+#  CONTEO DE CAMIONETA (lo declara el TECNICO, lo aprueba ADMIN/SUPERVISOR)
+#  Aditivo: dos tablas NUEVAS. No modifica ningun modelo existente, no toca
+#  stock y no altera /conteo. El impacto sobre stock ocurre SOLO al aprobar.
+# ================================================================
+
+# Estados de un conteo de camioneta:
+#   PENDIENTE        enviado, hay diferencias, espera decision de admin/supervisor
+#   SIN_DIFERENCIAS  enviado y todo coincidia: no hay nada que aprobar
+#   APROBADO         se confirmaron las diferencias y se aplicaron los ajustes
+#   RECHAZADO        se rechazo: NO se toco stock, movimientos ni descartes
+STOCK_COUNT_PENDIENTE = "PENDIENTE"
+STOCK_COUNT_SIN_DIFERENCIAS = "SIN_DIFERENCIAS"
+STOCK_COUNT_APROBADO = "APROBADO"
+STOCK_COUNT_RECHAZADO = "RECHAZADO"
+
+
+class StockCount(db.Model):
+    """Cabecera de un conteo fisico de camioneta declarado por un tecnico.
+
+    El tecnico cuenta A CIEGAS (no ve la cantidad del sistema) y envia. Lo que
+    queda guardado es la declaracion COMPLETA: todas las lineas, coincidan o
+    no. Ese registro es el dato de auditoria; el ajuste de stock es posterior,
+    opcional y solo lo dispara un ADMIN/SUPERVISOR al aprobar.
+    """
+    __tablename__ = "stock_counts"
+    id = db.Column(db.Integer, primary_key=True)
+    created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
+
+    year = db.Column(db.Integer, nullable=False)
+    seq = db.Column(db.Integer, nullable=False)
+    number = db.Column(db.String(32), unique=True, nullable=False)  # CT-2026-0001
+
+    status = db.Column(db.String(20), nullable=False, default=STOCK_COUNT_PENDIENTE)
+
+    location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), nullable=False)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+
+    # Puntaje POR RENGLONES, congelado al enviar: cuantas lineas coincidieron
+    # sobre el total. Se guarda calculado y NO se recalcula despues, para que
+    # la metrica historica no cambie si el stock se mueve mas tarde.
+    lines_total = db.Column(db.Integer, nullable=False, default=0)
+    lines_ok = db.Column(db.Integer, nullable=False, default=0)
+    score_pct = db.Column(db.Integer, nullable=False, default=0)
+    # Cuantos items tenia el sistema en esa camioneta al momento de enviar.
+    # Si no coincide con la cantidad de renglones contados, quien aprueba lo
+    # ve: es la senal de que el conteo se envio incompleto.
+    system_lines = db.Column(db.Integer, nullable=False, default=0)
+
+    # Caja de comentarios del tecnico. Ahi van los items que tiene y que NO
+    # existen en el catalogo: no puede darlos de alta el.
+    comment = db.Column(db.Text, nullable=True)
+
+    reviewed_at = db.Column(db.DateTime, nullable=True)
+    reviewed_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    review_reason = db.Column(db.String(255), nullable=True)
+
+    location = db.relationship("Location", foreign_keys=[location_id])
+    created_by = db.relationship("User", foreign_keys=[created_by_user_id])
+    reviewed_by = db.relationship("User", foreign_keys=[reviewed_by_user_id])
+    lines = db.relationship(
+        "StockCountLine",
+        backref="header",
+        cascade="all, delete-orphan",
+        order_by="StockCountLine.id",
+    )
+
+    @property
+    def diff_lines(self):
+        """Lineas con diferencia contra la foto del sistema al contar."""
+        return [ln for ln in self.lines if not ln.coincide]
+
+
+class StockCountLine(db.Model):
+    """Un renglon del conteo: que decia el sistema y que conto el tecnico.
+
+    `qty_sistema` es la FOTO al momento de enviar: no se toca nunca mas, es
+    contra lo que el tecnico realmente conto y lo que fija el puntaje.
+    `qty_sistema_aprob` se completa al aprobar con el valor RECALCULADO, porque
+    entre el viernes que se cuenta y el lunes que se aprueba el stock se pudo
+    haber movido y el ajuste tiene que salir del valor real, no de la foto.
+    """
+    __tablename__ = "stock_count_lines"
+    id = db.Column(db.Integer, primary_key=True)
+    stock_count_id = db.Column(db.Integer, db.ForeignKey("stock_counts.id"), nullable=False)
+    item_id = db.Column(db.Integer, db.ForeignKey("items.id"), nullable=False)
+
+    qty_sistema = db.Column(db.Integer, nullable=False, default=0)
+    qty_contada = db.Column(db.Integer, nullable=False, default=0)
+    qty_sistema_aprob = db.Column(db.Integer, nullable=True)
+
+    # Solo para items SERIALIZADOS: cuantas unidades dice tener el tecnico que
+    # no figuran en la lista de seriales del sistema. Si es > 0, el conteo NO se
+    # puede aprobar hasta que un admin/supervisor cargue esos seriales: no se
+    # puede mover una unidad que el sistema no conoce.
+    qty_sin_serial = db.Column(db.Integer, nullable=False, default=0)
+
+    # Si la linea coincidio con el sistema al momento de enviar. Se guarda
+    # calculado porque en los serializados "coincidir" no es que de la misma
+    # cantidad: es que sean LOS MISMOS seriales. Dos camaras cambiadas entre dos
+    # camionetas dan la misma cantidad y son una inconsistencia real.
+    coincide = db.Column(db.Boolean, nullable=False, default=True)
+
+    # True = el renglon lo agrego el tecnico a mano porque tiene el item y el
+    # sistema no se lo tenia asignado en la camioneta.
+    added_by_tech = db.Column(db.Boolean, nullable=False, default=False)
+
+    item = db.relationship("Item")
+
+    serials = db.relationship(
+        "StockCountSerial",
+        backref="line",
+        cascade="all, delete-orphan",
+        order_by="StockCountSerial.serial",
+    )
+
+    @property
+    def diff(self):
+        return self.qty_contada - self.qty_sistema
+
+
+class StockCountSerial(db.Model):
+    """Un numero de serie declarado por el tecnico en un renglon del conteo.
+
+    Un item serializado NO se cuenta por cantidad: se cuenta por serial. La
+    cantidad contada del renglon es la cantidad de estas filas (mas las que el
+    tecnico dice tener y no figuran, en `qty_sin_serial`). Pedir cantidad Y
+    seriales garantiza que tarde o temprano no coincidan.
+
+    Se guarda tambien el texto del serial y donde figuraba al momento de contar,
+    porque son la foto: la unidad se puede mover despues y el registro del
+    conteo tiene que seguir diciendo lo que el tecnico declaro ese dia.
+    """
+    __tablename__ = "stock_count_serials"
+    id = db.Column(db.Integer, primary_key=True)
+    stock_count_line_id = db.Column(
+        db.Integer, db.ForeignKey("stock_count_lines.id"), nullable=False
+    )
+    unit_id = db.Column(db.Integer, db.ForeignKey("item_units.id"), nullable=False)
+    serial = db.Column(db.String(120), nullable=False)
+    # Ubicacion donde figuraba el serial cuando el tecnico lo declaro. Si no es
+    # la camioneta contada, al aprobar se genera el movimiento hacia ella.
+    location_id_al_contar = db.Column(
+        db.Integer, db.ForeignKey("locations.id"), nullable=True
+    )
+
+    unit = db.relationship("ItemUnit")
+    location_al_contar = db.relationship("Location")
 
 
 # ------------------ LOGIN MANAGER ------------------
@@ -1895,6 +2046,22 @@ def next_repair_request_number():
     )
     seq = (last.seq or 0) + 1 if last else 1
     return y, seq, f"SR-{y}-{seq:04d}"
+
+
+def next_stock_count_number():
+    """Siguiente numero de conteo de camioneta. Formato: CT-YYYY-0001.
+
+    Secuencia propia e independiente: no toca la numeracion de remitos (R-),
+    movimientos (MOV-), solicitudes de compra (SC-) ni de repuestos (SR-).
+    """
+    y = now_ar().year
+    last = (
+        StockCount.query.filter_by(year=y)
+        .order_by(StockCount.seq.desc())
+        .first()
+    )
+    seq = (last.seq or 0) + 1 if last else 1
+    return y, seq, f"CT-{y}-{seq:04d}"
 
 
 _BOOL_TRUE = {"1", "true", "verdadero", "yes", "y", "si", "sí", "s"}
@@ -6304,6 +6471,23 @@ def inject_repair_request_badge():
     except Exception:
         count = 0
     return {"repair_badge_count": count}
+
+@app.context_processor
+def inject_stock_count_badge():
+    """Badge de 'Conteo de camioneta'.
+
+    - ADMIN/SUPERVISOR: conteos PENDIENTE (esperando aprobacion).
+    - TECNICO / LECTOR: sin badge, igual que en solicitudes de repuestos: la
+      alerta es para quien tiene que decidir, no para quien pide.
+    """
+    count = 0
+    try:
+        if current_user.is_authenticated and current_user.role in ("ADMIN", "SUPERVISOR"):
+            count = StockCount.query.filter_by(status=STOCK_COUNT_PENDIENTE).count()
+    except Exception:
+        count = 0
+    return {"stock_count_badge_count": count}
+
 # ------------------ ADMIN: EDICIÓN (solo ADMIN) ------------------
 
 @app.route("/locations/<int:loc_id>/edit", methods=["GET", "POST"])
@@ -8503,6 +8687,930 @@ def repair_request_close(rr_id: int):
         db.session.rollback()
         flash(f"No se pudo cerrar la solicitud: {e}", "error")
     return redirect(url_for("repair_request_detail", rr_id=rr.id))
+
+
+# ================================================================
+#  CONTEO DE CAMIONETA
+#  El TECNICO cuenta su camioneta A CIEGAS (no ve la cantidad del sistema) y
+#  envia. El conteo queda registrado SIEMPRE, coincida o no, y NO toca stock.
+#  Si hay diferencias, ADMIN/SUPERVISOR aprueban (se aplican los ajustes, todo
+#  o nada) o rechazan (no se toca absolutamente nada).
+#
+#  Bloque aditivo: no modifica /conteo, /stock, items_visible_query() ni
+#  ninguna otra ruta existente.
+# ================================================================
+
+# Etiqueta propia en Scrap para poder separar en metricas un faltante de
+# conteo de camioneta de un faltante de conteo de deposito.
+STOCK_COUNT_SCRAP_SOURCE = "CONTEO_CAMIONETA"
+
+# Roles que ven la seccion. El TECNICO solo ve y crea los propios; la
+# aprobacion es ADMIN/SUPERVISOR y se valida en cada ruta, no en el menu.
+STOCK_COUNT_VIEW_ROLES = ("ADMIN", "SUPERVISOR", "TECNICO")
+STOCK_COUNT_REVIEW_ROLES = ("ADMIN", "SUPERVISOR")
+
+
+def _stock_count_visible_query():
+    """Conteos que puede ver el usuario actual. Filtro de BACKEND, no de vista.
+
+    El TECNICO ve solo los suyos, mismo criterio que en solicitudes de
+    repuestos. Ocultar el link no seria un permiso.
+    """
+    q = StockCount.query
+    if getattr(current_user, "role", None) == "TECNICO":
+        q = q.filter(StockCount.created_by_user_id == current_user.id)
+    return q
+
+
+def _stock_count_can_review():
+    return getattr(current_user, "role", None) in STOCK_COUNT_REVIEW_ROLES
+
+
+def _stock_count_truck_rows(location_id):
+    """Items que el sistema dice que hay hoy en esa camioneta.
+
+    Solo filas con cantidad > 0: una fila en 0 es ruido para el que cuenta. Si
+    el tecnico igual tiene ese item, lo agrega como renglon nuevo.
+    """
+    return (
+        db.session.query(Stock, Item)
+        .join(Item, Item.id == Stock.item_id)
+        .filter(
+            Stock.location_id == location_id,
+            Stock.quantity > 0,
+            Item.is_active == True,
+        )
+        .order_by(Item.code)
+        .all()
+    )
+
+
+def _stock_count_open_for(location_id):
+    """Conteo PENDIENTE ya abierto para esa camioneta, si existe.
+
+    Dos conteos pendientes de la misma camioneta se pisarian entre si al
+    aprobar (el segundo se calcularia sobre un stock que el primero ya movio).
+    Se permite uno por vez.
+    """
+    return StockCount.query.filter_by(
+        location_id=location_id, status=STOCK_COUNT_PENDIENTE
+    ).first()
+
+
+@app.route("/api/conteo-camioneta/items")
+@login_required
+@role_required(*STOCK_COUNT_VIEW_ROLES)
+def api_stock_count_items():
+    """Buscador de items SOLO para agregar renglones a un conteo de camioneta.
+
+    Es la unica pantalla donde el TECNICO ve el catalogo completo, y es a
+    proposito: el pedido es que pueda declarar algo que el sistema no le tiene
+    asignado (lo compro el, o se le cargo mal una entrega). Es SELECT puro y
+    devuelve solo codigo y nombre: no expone stock, ubicaciones ni precios.
+
+    NO toca items_visible_query(), que sigue rigiendo el alcance del tecnico en
+    /stock y en /api/items/search.
+    """
+    term = (request.args.get("q") or "").strip()
+    q = Item.query.filter(Item.is_active == True)
+    if term:
+        like = f"%{term}%"
+        q = q.filter(db.or_(Item.code.ilike(like), Item.name.ilike(like)))
+    rows = q.order_by(Item.code).limit(ITEM_SEARCH_LIMIT).all()
+    return jsonify([
+        {
+            "id": it.id,
+            "code": it.code,
+            "name": it.name,
+            "label": f"{it.code} - {it.name}",
+            # El formulario cambia el campo de cantidad por el selector de
+            # seriales cuando el item es serializado.
+            "serialized": bool(it.serialized),
+        }
+        for it in rows
+    ])
+
+
+
+
+def _stock_count_near_location_ids(location_id=None):
+    """Ubicaciones "cercanas" al que cuenta: sus camionetas + la Jaula.
+
+    Son las unicas cuyos seriales se le listan. Los de OTRAS camionetas existen
+    y se pueden declarar, pero solo aparecen si escribe el serial completo: no
+    se le muestra a cada tecnico el inventario de sus companeros.
+    """
+    ids = set()
+    if location_id:
+        ids.add(int(location_id))
+    for t in _tech_trucks(getattr(current_user, "id", 0)):
+        ids.add(t.id)
+    jaula = get_jaula_location()
+    if jaula:
+        ids.add(jaula.id)
+    return ids
+
+
+def _stock_count_serial_row(u, near_ids):
+    loc = u.location.name if u.location else "—"
+    ajeno = u.location_id not in near_ids
+    return {
+        "unit_id": u.id,
+        "serial": u.serial,
+        "location": loc,
+        "ajeno": ajeno,
+        "label": f"{u.serial} · {loc}",
+    }
+
+
+@app.route("/api/conteo-camioneta/seriales")
+@login_required
+@role_required(*STOCK_COUNT_VIEW_ROLES)
+def api_stock_count_serials():
+    """Seriales elegibles para contar un item serializado.
+
+    Alcance deliberado (decidido con Ignacio):
+      - los de SUS camionetas y los de la Jaula se listan y se buscan por texto
+        parcial;
+      - los de OTRAS camionetas NO se listan: solo aparecen si escribe el
+        serial COMPLETO. Puede declararlos (es la inconsistencia que el conteo
+        existe para encontrar), pero no se le muestra el inventario ajeno.
+
+    Solo lectura: devuelve serial y nombre de ubicacion, nada mas.
+    """
+    raw_item = (request.args.get("item_id") or "").strip()
+    if not raw_item.isdigit():
+        return jsonify([])
+    item = Item.query.get(int(raw_item))
+    if item is None or not item.serialized:
+        return jsonify([])
+
+    term = (request.args.get("q") or "").strip()
+    near_ids = _stock_count_near_location_ids(request.args.get("location_id"))
+
+    base = ItemUnit.query.filter(
+        ItemUnit.item_id == item.id,
+        ItemUnit.status == UNIT_EN_STOCK,
+        ItemUnit.location_id.isnot(None),
+    )
+
+    cercanos = base.filter(ItemUnit.location_id.in_(list(near_ids) or [-1]))
+    if term:
+        cercanos = cercanos.filter(ItemUnit.serial.ilike(f"%{term}%"))
+    rows = cercanos.order_by(ItemUnit.serial).limit(ITEM_SEARCH_LIMIT).all()
+
+    # Los de otras ubicaciones SOLO por serial exacto.
+    if term:
+        ajenos = (
+            base.filter(
+                ~ItemUnit.location_id.in_(list(near_ids) or [-1]),
+                func.lower(ItemUnit.serial) == term.lower(),
+            )
+            .order_by(ItemUnit.serial)
+            .limit(5)
+            .all()
+        )
+        rows = rows + ajenos
+
+    return jsonify([_stock_count_serial_row(u, near_ids) for u in rows])
+
+
+@app.route("/conteo-camioneta", methods=["GET"])
+@login_required
+@role_required(*STOCK_COUNT_VIEW_ROLES)
+def stock_counts():
+    """Listado de conteos. El TECNICO ve los suyos; ADMIN/SUPERVISOR, todos."""
+    counts_page = paginate(
+        _stock_count_visible_query().order_by(StockCount.created_at.desc())
+    )
+    trucks = _tech_trucks(current_user.id) if current_user.role == "TECNICO" else []
+    # Camionetas del tecnico que ya tienen un conteo esperando aprobacion: no
+    # se le ofrece arrancar otro hasta que se resuelva el anterior.
+    open_by_truck = {t.id: _stock_count_open_for(t.id) for t in trucks}
+    return render_template(
+        "stock_counts.html",
+        counts=counts_page.items,
+        page_obj=counts_page,
+        trucks=trucks,
+        open_by_truck=open_by_truck,
+    )
+
+
+@app.route("/conteo-camioneta/nuevo", methods=["GET"])
+@login_required
+@role_required("TECNICO")
+def stock_count_new():
+    """Formulario de conteo A CIEGAS: item y campo vacio, sin la cantidad del
+    sistema. Mostrarsela convertiria el conteo en copiar una columna."""
+    trucks = _tech_trucks(current_user.id)
+    if not trucks:
+        flash("No tenés una camioneta asignada. Pedile a un supervisor que te asigne una.", "error")
+        return redirect(url_for("stock_counts"))
+
+    loc_raw = (request.args.get("location_id") or "").strip()
+    truck_ids = {t.id for t in trucks}
+    if len(trucks) == 1 and not loc_raw:
+        location = trucks[0]
+    elif loc_raw.isdigit() and int(loc_raw) in truck_ids:
+        location = Location.query.get(int(loc_raw))
+    else:
+        flash("Elegí qué camioneta vas a contar.", "error")
+        return redirect(url_for("stock_counts"))
+
+    abierto = _stock_count_open_for(location.id)
+    if abierto is not None:
+        flash(
+            f"Ya hay un conteo de {location.name} esperando aprobación "
+            f"({abierto.number}). Cuando lo resuelvan vas a poder contar de nuevo.",
+            "error",
+        )
+        return redirect(url_for("stock_counts"))
+
+    rows = _stock_count_truck_rows(location.id)
+
+    # Seriales precargados por item serializado: los de su camioneta y los de la
+    # Jaula. Los de otras camionetas no se listan (se buscan por serial exacto
+    # contra /api/conteo-camioneta/seriales).
+    near_ids = _stock_count_near_location_ids(location.id)
+    serial_options = {}
+    serialized_ids = [it.id for _s, it in rows if it.serialized]
+    if serialized_ids:
+        units = (
+            ItemUnit.query.filter(
+                ItemUnit.item_id.in_(serialized_ids),
+                ItemUnit.status == UNIT_EN_STOCK,
+                ItemUnit.location_id.in_(list(near_ids) or [-1]),
+            )
+            .order_by(ItemUnit.serial)
+            .all()
+        )
+        for u in units:
+            serial_options.setdefault(u.item_id, []).append(
+                _stock_count_serial_row(u, near_ids)
+            )
+
+    return render_template(
+        "stock_count_new.html",
+        location=location,
+        rows=rows,
+        serial_options=serial_options,
+    )
+
+
+@app.route("/conteo-camioneta/nuevo", methods=["POST"])
+@login_required
+@role_required("TECNICO")
+def stock_count_create():
+    """Guarda el conteo declarado por el tecnico. NO toca stock.
+
+    Todo-o-nada: si algo esta mal no se guarda nada y se vuelve al formulario
+    con el motivo. La cantidad del sistema se lee ACA (no se confia en nada que
+    venga del navegador) y queda como foto de la linea.
+    """
+    trucks = _tech_trucks(current_user.id)
+    truck_ids = {t.id for t in trucks}
+    loc_raw = (request.form.get("location_id") or "").strip()
+    if not (loc_raw.isdigit() and int(loc_raw) in truck_ids):
+        flash("Esa camioneta no es tuya.", "error")
+        return redirect(url_for("stock_counts"))
+    location = Location.query.get(int(loc_raw))
+
+    if _stock_count_open_for(location.id) is not None:
+        flash(f"Ya hay un conteo de {location.name} esperando aprobación.", "error")
+        return redirect(url_for("stock_counts"))
+
+    volver = url_for("stock_count_new", location_id=location.id)
+
+    # ------------------------------------------------------------------
+    # Un item SERIALIZADO no se cuenta por cantidad: se cuenta POR SERIAL.
+    # Su cantidad contada es (seriales elegidos + los que dice tener y no
+    # figuran en el sistema). Pedir cantidad Y seriales garantiza que tarde o
+    # temprano no coincidan, asi que el campo de cantidad ni se le muestra.
+    # ------------------------------------------------------------------
+    contados = {}          # item_id -> cantidad contada
+    seriales = {}          # item_id -> [ItemUnit] declaradas
+    sin_serial = {}        # item_id -> cuantas dice tener sin serial cargado
+    agregados = set()      # items que agrego el tecnico a mano
+    unidades_vistas = {}   # unit_id -> item_id, para no declarar dos veces el mismo serial
+
+    def _leer_serializado(item, es_extra):
+        """Lee los seriales declarados de un item. Devuelve (cantidad, error)."""
+        units = []
+        for raw in request.form.getlist(f"serial_unit_ids_{item.id}"):
+            raw = (raw or "").strip()
+            if not raw:
+                continue
+            if not raw.isdigit():
+                return None, f"«{item.code} - {item.name}»: serial inválido."
+            u = ItemUnit.query.filter_by(
+                id=int(raw), item_id=item.id, status=UNIT_EN_STOCK
+            ).first()
+            if u is None or u.location_id is None:
+                return None, (
+                    f"«{item.code} - {item.name}»: uno de los seriales que elegiste "
+                    f"ya no está disponible. Volvé a abrir el conteo."
+                )
+            if u.id in unidades_vistas:
+                return None, f"El número de serie {u.serial} está declarado dos veces."
+            unidades_vistas[u.id] = item.id
+            units.append(u)
+
+        raw_sin = (request.form.get(f"sin_serial_{item.id}", "") or "").strip()
+        try:
+            extra = int(raw_sin) if raw_sin else 0
+            if extra < 0:
+                raise ValueError()
+        except Exception:
+            return None, (
+                f"«{item.code} - {item.name}»: la cantidad sin número de serie "
+                f"tiene que ser un entero de 0 en adelante."
+            )
+
+        total = len(units) + extra
+        if total == 0:
+            if es_extra:
+                return None, f"«{item.code} - {item.name}»: elegí los números de serie que tenés."
+            if request.form.get(f"sin_ninguno_{item.id}") != "1":
+                return None, (
+                    f"«{item.code} - {item.name}»: elegí los números de serie que tenés, "
+                    f"o tildá «no tengo ninguno»."
+                )
+        seriales[item.id] = units
+        sin_serial[item.id] = extra
+        return total, None
+
+    # --- Renglones que mostro el formulario. Se exige uno por uno: al contar a
+    #     ciegas, un campo vacio no es "no lo conte", es un renglon salteado, y
+    #     saltear renglones inflaria el puntaje.
+    for raw_id in request.form.getlist("row_item_id[]"):
+        if not raw_id.isdigit():
+            flash("El formulario llegó incompleto. Volvé a abrir el conteo.", "error")
+            return redirect(volver)
+        iid = int(raw_id)
+        item = Item.query.get(iid)
+        if item is None or not item.is_active:
+            flash("Uno de los ítems del conteo ya no existe. Volvé a abrir el conteo.", "error")
+            return redirect(volver)
+        if iid in contados:
+            flash(f"«{item.code} - {item.name}» aparece dos veces en el conteo.", "error")
+            return redirect(volver)
+
+        if item.serialized:
+            qty, err = _leer_serializado(item, es_extra=False)
+            if err:
+                flash(err, "error")
+                return redirect(volver)
+        else:
+            raw_qty = (request.form.get(f"contado_{iid}", "") or "").strip()
+            if raw_qty == "":
+                flash(
+                    f"Te falta contar «{item.code} - {item.name}». Si no tenés ninguno, poné 0.",
+                    "error",
+                )
+                return redirect(volver)
+            try:
+                qty = int(raw_qty)
+                if qty < 0:
+                    raise ValueError()
+            except Exception:
+                flash(
+                    f"«{item.code} - {item.name}»: la cantidad tiene que ser un número entero de 0 en adelante.",
+                    "error",
+                )
+                return redirect(volver)
+        contados[iid] = qty
+
+    # --- Renglones agregados a mano por el tecnico (lo que tiene y el sistema
+    #     no le tiene asignado). Aca tiene que declarar algo: una fila agregada
+    #     y vacia no existe.
+    extra_ids = request.form.getlist("extra_item_id[]")
+    extra_qtys = request.form.getlist("extra_qty[]")
+    for idx, raw_id in enumerate(extra_ids):
+        raw_id = (raw_id or "").strip()
+        if not raw_id:
+            continue  # fila agregada y dejada vacia: no existe
+        n = len(agregados) + 1
+        if not raw_id.isdigit():
+            flash(f"Ítem agregado {n}: inválido.", "error")
+            return redirect(volver)
+        iid = int(raw_id)
+        item = Item.query.get(iid)
+        if item is None or not item.is_active:
+            flash(f"Ítem agregado {n}: no existe o está dado de baja.", "error")
+            return redirect(volver)
+        if iid in contados:
+            flash(
+                f"«{item.code} - {item.name}» ya está en la lista de arriba: contalo ahí, no lo agregues aparte.",
+                "error",
+            )
+            return redirect(volver)
+
+        if item.serialized:
+            qty, err = _leer_serializado(item, es_extra=True)
+            if err:
+                flash(err, "error")
+                return redirect(volver)
+        else:
+            raw_qty = (extra_qtys[idx] or "").strip() if idx < len(extra_qtys) else ""
+            try:
+                qty = int(raw_qty)
+                if qty < 1:
+                    raise ValueError()
+            except Exception:
+                flash(f"«{item.code} - {item.name}»: poné cuántos tenés (1 o más).", "error")
+                return redirect(volver)
+        contados[iid] = qty
+        agregados.add(iid)
+
+    if not contados:
+        flash("El conteo está vacío: no hay nada que declarar.", "error")
+        return redirect(volver)
+
+    comment = (request.form.get("comment", "") or "").strip() or None
+
+    # --- Foto del sistema AL ENVIAR. Se lee de la base, no del formulario.
+    stock_ahora = {
+        s.item_id: s.quantity
+        for s in Stock.query.filter_by(location_id=location.id).all()
+    }
+    # Solo items ACTIVOS: son los unicos que se le mostraron al tecnico. Contar
+    # tambien los dados de baja dispararia el aviso de "conteo incompleto" sin
+    # que faltara nada.
+    system_lines = len(_stock_count_truck_rows(location.id))
+
+    # Seriales que el sistema tiene HOY en esa camioneta, por item.
+    units_truck = {}
+    if seriales:
+        for u in ItemUnit.query.filter(
+            ItemUnit.item_id.in_(list(seriales.keys())),
+            ItemUnit.status == UNIT_EN_STOCK,
+            ItemUnit.location_id == location.id,
+        ).all():
+            units_truck.setdefault(u.item_id, set()).add(u.id)
+
+    def _coincide(iid):
+        """Si el renglon dio igual que el sistema.
+
+        En un item serializado coincidir NO es dar la misma cantidad: es que
+        sean LOS MISMOS seriales. Dos camaras cambiadas entre dos camionetas dan
+        la misma cantidad y son una inconsistencia real que hay que ver.
+        """
+        if contados[iid] != stock_ahora.get(iid, 0):
+            # Vale para todos: si la CANTIDAD no da, no coincide. En un
+            # serializado esto ademas atrapa el stock viejo cargado por cantidad
+            # sin seriales: comparar solo los seriales daria "coincide" (dos
+            # conjuntos vacios) aunque el sistema diga que hay tres.
+            return False
+        if iid in seriales:
+            if sin_serial.get(iid, 0):
+                return False
+            return {u.id for u in seriales[iid]} == units_truck.get(iid, set())
+        return True
+
+    coincidencias = {iid: _coincide(iid) for iid in contados}
+    lines_total = len(contados)
+    lines_ok = sum(1 for ok in coincidencias.values() if ok)
+    score = int(round(100.0 * lines_ok / lines_total)) if lines_total else 100
+    status = STOCK_COUNT_SIN_DIFERENCIAS if lines_ok == lines_total else STOCK_COUNT_PENDIENTE
+
+    try:
+        y, seq, number = next_stock_count_number()
+        sc = StockCount(
+            year=y, seq=seq, number=number,
+            status=status,
+            location_id=location.id,
+            created_by_user_id=current_user.id,
+            lines_total=lines_total,
+            lines_ok=lines_ok,
+            score_pct=score,
+            system_lines=system_lines,
+            comment=comment,
+        )
+        db.session.add(sc)
+        db.session.flush()
+        for iid in sorted(contados):
+            ln = StockCountLine(
+                stock_count_id=sc.id,
+                item_id=iid,
+                qty_sistema=stock_ahora.get(iid, 0),
+                qty_contada=contados[iid],
+                qty_sin_serial=sin_serial.get(iid, 0),
+                coincide=coincidencias[iid],
+                added_by_tech=iid in agregados,
+            )
+            db.session.add(ln)
+            db.session.flush()
+            for u in seriales.get(iid, []):
+                db.session.add(StockCountSerial(
+                    stock_count_line_id=ln.id,
+                    unit_id=u.id,
+                    serial=u.serial,
+                    location_id_al_contar=u.location_id,
+                ))
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        flash(f"No se pudo guardar el conteo: {e}", "error")
+        return redirect(volver)
+
+    # `enviado=1` es lo que dispara el cartel de resultado en el detalle.
+    return redirect(url_for("stock_count_detail", sc_id=sc.id, enviado=1))
+
+
+def _stock_count_tecnico(sc):
+    """Nombre del tecnico que conto, para la observacion del movimiento."""
+    u = sc.created_by
+    return (u.full_name or u.username) if u else "—"
+
+
+def _stock_count_motivo_entrada(sc, origen):
+    """Por que un serial que estaba en otro lado pasa a la camioneta contada."""
+    tecnico = _stock_count_tecnico(sc)
+    if origen is None:
+        donde = "otra ubicación"
+    elif origen.name == LOCATION_JAULA_TNG:
+        donde = "el depósito"
+    else:
+        donde = origen.name
+    return f"{tecnico} lo declaró en su camioneta y figuraba en {donde}"
+
+
+def _stock_count_movement(sc, item, qty, from_id, to_id, motivo, serials):
+    """Registra el Movement de un ajuste de conteo. Devuelve 1 (ajuste aplicado).
+
+    La observacion lleva el numero de conteo primero (para poder filtrar todos
+    los ajustes de un mismo conteo) y despues el MOTIVO de ESE movimiento en
+    particular. Antes todos los movimientos de un conteo compartian el resumen
+    del renglon ("sistema 1 -> contado 2"), asi que tres movimientos que eran
+    tres cosas distintas —un serial que vino de otra camioneta, uno que se
+    descarto y un alta nueva— decian exactamente lo mismo y habia que deducir
+    que paso mirando origen y destino.
+    """
+    obs = f"CONTEO {sc.number} · {motivo}"
+    y, seq, number = next_movement_number()
+    db.session.add(Movement(
+        item_id=item.id,
+        qty=qty,
+        from_location_id=from_id,
+        to_location_id=to_id,
+        user_id=current_user.id,
+        observation=serial_obs(obs, serials),
+        year=y, seq=seq, number=number,
+    ))
+    db.session.flush()  # para que next_movement_number vea el seq recien creado
+    return 1
+
+
+@app.route("/conteo-camioneta/<int:sc_id>", methods=["GET"])
+@login_required
+@role_required(*STOCK_COUNT_VIEW_ROLES)
+def stock_count_detail(sc_id: int):
+    """Detalle del conteo: Sistema / Conteo tecnico / Diferencia, renglon por
+    renglon. El TECNICO ve SOLO su columna (el template lo acota): si viera
+    contra que conto, el conteo de la semana siguiente deja de medir nada.
+
+    Muestra dos columnas de sistema cuando difieren: la FOTO de cuando se conto
+    (contra la que se calculo el puntaje) y la ACTUAL. Si el stock se movio
+    entre que se conto y ahora, quien aprueba tiene que verlo antes de ajustar.
+    """
+    sc = _stock_count_visible_query().filter(StockCount.id == sc_id).first()
+    if sc is None:
+        flash("Ese conteo no existe o no es tuyo.", "error")
+        return redirect(url_for("stock_counts"))
+
+    stock_actual = {
+        s.item_id: s.quantity
+        for s in Stock.query.filter_by(location_id=sc.location_id).all()
+    }
+    pendiente = sc.status == STOCK_COUNT_PENDIENTE
+
+    lines_view = []
+    hay_desfasaje = False
+    faltan_seriales_por_cargar = []
+    cruces = []   # seriales declarados que hoy estan en la camioneta de otro
+    for ln in sc.lines:
+        sistema_ahora = stock_actual.get(ln.item_id, 0)
+        sistema_ref = ln.qty_sistema_aprob if ln.qty_sistema_aprob is not None else sistema_ahora
+        if pendiente and sistema_ahora != ln.qty_sistema:
+            hay_desfasaje = True
+
+        # --- Serializados: el detalle es por unidad, no por cantidad. ---
+        serial_view = []
+        if ln.item.serialized:
+            declarados = {s.unit_id: s for s in ln.serials}
+            en_camioneta = {
+                u.id: u for u in units_in_stock_query(ln.item_id, sc.location_id).all()
+            } if pendiente else {}
+            for s in ln.serials:
+                u = s.unit
+                donde = s.location_al_contar.name if s.location_al_contar else "—"
+                if s.unit_id in en_camioneta:
+                    estado = "ok"          # ya estaba en la camioneta
+                elif not pendiente:
+                    estado = "ok"
+                elif u is not None and u.status == UNIT_EN_STOCK and u.location_id:
+                    loc = Location.query.get(u.location_id)
+                    donde = loc.name if loc else donde
+                    if loc is not None and loc.is_truck:
+                        estado = "cruce"       # esta en la camioneta de otro
+                        cruces.append(f"{s.serial} ({donde})")
+                    elif loc is not None and loc.name == LOCATION_JAULA_TNG:
+                        estado = "jaula"
+                    else:
+                        estado = "mueve"
+                else:
+                    estado = "perdido"     # salio del sistema desde que se conto
+                serial_view.append({"serial": s.serial, "donde": donde, "estado": estado})
+            # Seriales que el sistema tiene en la camioneta y el tecnico NO declaro.
+            for uid, u in en_camioneta.items():
+                if uid not in declarados:
+                    serial_view.append({
+                        "serial": u.serial, "donde": sc.location.name, "estado": "falta",
+                    })
+            if pendiente and ln.qty_sin_serial:
+                faltan_seriales_por_cargar.append(
+                    f"{ln.item.code} {ln.item.name} ({ln.qty_sin_serial})"
+                )
+
+        lines_view.append({
+            "line": ln,
+            "item": ln.item,
+            "sistema_foto": ln.qty_sistema,
+            "sistema_ahora": sistema_ahora,
+            "sistema_ref": sistema_ref,
+            "contado": ln.qty_contada,
+            "diff_foto": ln.qty_contada - ln.qty_sistema,
+            "diff_ahora": ln.qty_contada - sistema_ahora,
+            "coincide": ln.coincide,
+            "serial_view": sorted(serial_view, key=lambda r: r["serial"]),
+            "sin_serial": ln.qty_sin_serial,
+        })
+
+    return render_template(
+        "stock_count_detail.html",
+        sc=sc,
+        lines_view=lines_view,
+        hay_desfasaje=hay_desfasaje,
+        faltan_seriales_por_cargar=faltan_seriales_por_cargar,
+        cruces=cruces,
+        puede_revisar=_stock_count_can_review(),
+        mostrar_resultado=bool(request.args.get("enviado")),
+    )
+
+
+@app.route("/conteo-camioneta/<int:sc_id>/aprobar", methods=["POST"])
+@login_required
+@role_required(*STOCK_COUNT_REVIEW_ROLES)
+def stock_count_approve(sc_id: int):
+    """Aprueba el conteo y aplica los ajustes. TODO O NADA.
+
+    Items NO serializados: mismo criterio que /conteo, que a su vez es el de
+    Ajustar stock:
+      - sobrante -> entra desde Proveedor a la camioneta
+      - faltante -> sale de la camioneta a Descartes + registro en Scrap
+
+    Items SERIALIZADOS: se resuelve POR UNIDAD, que es mas preciso que por
+    cantidad:
+      - serial declarado que estaba en otro lado -> se mueve a la camioneta
+        (desde la Jaula, o desde la camioneta de otro tecnico)
+      - serial que el sistema tiene en la camioneta y el tecnico NO declaro ->
+        sale a Descartes, como cualquier faltante
+    Ya no hay que elegir a mano que serial falta: el conteo lo dice.
+
+    La diferencia se recalcula contra el stock ACTUAL, no contra la foto del
+    conteo: entre contar y aprobar el stock se pudo mover y ajustar sobre la
+    foto reintroduciria el error que se quiere corregir.
+    """
+    sc = StockCount.query.get_or_404(sc_id)
+    if sc.status != STOCK_COUNT_PENDIENTE:
+        flash("Ese conteo ya no está pendiente.", "error")
+        return redirect(url_for("stock_count_detail", sc_id=sc.id))
+
+    proveedor = get_proveedor_location()
+    baja = Location.query.filter_by(name=LOCATION_DESCARTES).first()
+    if proveedor is None or baja is None:
+        flash(
+            f"Faltan ubicaciones requeridas: '{LOCATION_PROVEEDOR}' y/o "
+            f"'{LOCATION_DESCARTES}'. Revisá Ubicaciones.",
+            "error",
+        )
+        return redirect(url_for("stock_count_detail", sc_id=sc.id))
+
+    # --- Pasada 1: se arma el plan y se valida TODO sin tocar nada. ---
+    plan = []
+    sobrantes_serializados = []
+    cruces = []
+    for ln in sc.lines:
+        item = ln.item
+        row = Stock.query.filter_by(item_id=item.id, location_id=sc.location_id).first()
+        sistema = row.quantity if row else 0
+        entry = {
+            "line": ln, "item": item, "sistema": sistema,
+            "delta": ln.qty_contada - sistema,
+            "entran": [], "salen": [], "nuevos": [],
+        }
+
+        if item.serialized:
+            declarados = []
+            for s in ln.serials:
+                u = ItemUnit.query.filter_by(
+                    id=s.unit_id, item_id=item.id, status=UNIT_EN_STOCK
+                ).first()
+                if u is None or u.location_id is None:
+                    flash(
+                        f"«{item.code} - {item.name}»: el número de serie {s.serial} "
+                        f"ya no está en stock. No se puede aprobar este conteo tal "
+                        f"como está: rechazalo y que lo recuenten.",
+                        "error",
+                    )
+                    return redirect(url_for("stock_count_detail", sc_id=sc.id))
+                declarados.append(u)
+                if u.location_id != sc.location_id:
+                    entry["entran"].append(u)
+                    origen = Location.query.get(u.location_id)
+                    if origen is not None and origen.is_truck:
+                        cruces.append(f"{u.serial} ({origen.name})")
+
+            declarados_ids = {u.id for u in declarados}
+            for u in units_in_stock_query(item.id, sc.location_id).all():
+                if u.id not in declarados_ids:
+                    entry["salen"].append(u)
+
+        plan.append(entry)
+
+    # Hay algo que ajustar si se mueve alguna unidad serializada O si queda
+    # diferencia de cantidad. Lo segundo tambien aplica a los serializados: es
+    # el residuo del stock viejo cargado por cantidad sin seriales.
+    hay_algo = any(
+        p["entran"] or p["salen"] or p["delta"] != 0
+        for p in plan
+    )
+    if not hay_algo:
+        flash(
+            "Contra el stock actual ya no queda ninguna diferencia: no hay nada que ajustar. "
+            "Si igual querés cerrarlo, rechazalo indicando el motivo.",
+            "error",
+        )
+        return redirect(url_for("stock_count_detail", sc_id=sc.id))
+
+    # --- Un serial que estaba en la camioneta de OTRO tecnico se mueve a esta.
+    #     Es la inconsistencia que el conteo existe para encontrar, pero tambien
+    #     lo que pasaria si el tecnico tipeo mal un serial: pide tilde aparte.
+    if cruces and request.form.get("confirmar_cruces") != "1":
+        flash(
+            "Este conteo mueve números de serie que hoy figuran en la camioneta de "
+            "otro técnico: " + "; ".join(cruces)
+            + ". Confirmá esa casilla si es correcto antes de aprobar.",
+            "error",
+        )
+        return redirect(url_for("stock_count_detail", sc_id=sc.id))
+
+    # --- Unidades que el tecnico dice tener y el sistema no conocia. Se cargan
+    #     ACA, en la misma aprobacion: por Items no se puede, porque esa pantalla
+    #     exige que el stock ya este en la ubicacion y justamente todavia no
+    #     esta. Se usa el mismo helper que cualquier ingreso serializado, asi un
+    #     serial que ya existia y habia salido se REACTIVA en vez de duplicarse.
+    for p in plan:
+        ln, item = p["line"], p["item"]
+        if not ln.qty_sin_serial:
+            continue
+        crudos = request.form.getlist(f"nuevo_serial_{ln.id}")
+        nuevos, err = resolve_serial_units_in(item.id, crudos, ln.qty_sin_serial)
+        if err:
+            db.session.rollback()
+            flash(f"«{item.code} - {item.name}»: {err}", "error")
+            return redirect(url_for("stock_count_detail", sc_id=sc.id))
+        p["nuevos"] = nuevos
+
+    # --- Pasada 2: aplicar. Cualquier error hace rollback completo. ---
+    aplicados = 0
+    try:
+        for p in plan:
+            ln, item, sistema = p["line"], p["item"], p["sistema"]
+            ln.qty_sistema_aprob = sistema
+
+            # 1) Unidades serializadas que ENTRAN a la camioneta (venian de la
+            #    Jaula o de otra camioneta).
+            for u in p["entran"]:
+                origen_id = u.location_id
+                origen = Location.query.get(origen_id)
+                motivo = _stock_count_motivo_entrada(sc, origen)
+                upsert_stock(item.id, origen_id, -1)
+                upsert_stock(item.id, sc.location_id, 1)
+                u.location_id = sc.location_id
+                aplicados += _stock_count_movement(sc, item, 1, origen_id, sc.location_id,
+                                                   motivo, [u.serial])
+
+            # 2) Unidades serializadas que el sistema tenia y el tecnico NO
+            #    declaro: faltan, van a Descartes como cualquier faltante.
+            for u in p["salen"]:
+                upsert_stock(item.id, sc.location_id, -1)
+                upsert_stock(item.id, baja.id, 1)
+                apply_serial_units_out([u], baja.id)
+                db.session.add(Scrap(
+                    item_id=item.id, location_id=sc.location_id, quantity=1,
+                    reason=f"Faltante de conteo de camioneta · {sc.number}",
+                    user_id=current_user.id, source=STOCK_COUNT_SCRAP_SOURCE,
+                ))
+                aplicados += _stock_count_movement(
+                    sc, item, 1, sc.location_id, baja.id,
+                    f"Faltante: el serial estaba asignado a la camioneta y "
+                    f"{_stock_count_tecnico(sc)} no lo declaró",
+                    [u.serial],
+                )
+
+            # 3) Unidades nuevas: el serial que el tecnico declaro y el sistema
+            #    no tenia. Entra desde Proveedor, que es como entra al sistema
+            #    cualquier unidad serializada nueva.
+            for u in p["nuevos"]:
+                upsert_stock(item.id, sc.location_id, 1)
+                apply_serial_units_out([u], sc.location_id)
+                aplicados += _stock_count_movement(
+                    sc, item, 1, proveedor.id, sc.location_id,
+                    "Serial nuevo declarado en el conteo, no existía en el sistema",
+                    [u.serial],
+                )
+
+            # 4) Resto por CANTIDAD. En un item no serializado es toda la
+            #    diferencia. En uno serializado es el residuo entre la cantidad
+            #    de stock y la cantidad de unidades, que existe cuando hay stock
+            #    viejo cargado sin seriales; se ajusta y se avisa.
+            fila = Stock.query.filter_by(item_id=item.id, location_id=sc.location_id).first()
+            actual = fila.quantity if fila else 0
+            delta = ln.qty_contada - actual
+            if delta != 0:
+                if item.serialized and delta > 0:
+                    sobrantes_serializados.append(f"{item.code} {item.name}")
+                if delta > 0:
+                    upsert_stock(item.id, sc.location_id, delta)
+                    from_id, to_id = proveedor.id, sc.location_id
+                else:
+                    upsert_stock(item.id, sc.location_id, delta)
+                    upsert_stock(item.id, baja.id, -delta)
+                    from_id, to_id = sc.location_id, baja.id
+                    db.session.add(Scrap(
+                        item_id=item.id, location_id=sc.location_id, quantity=-delta,
+                        reason=f"Faltante de conteo de camioneta · {sc.number}",
+                        user_id=current_user.id, source=STOCK_COUNT_SCRAP_SOURCE,
+                    ))
+                tecnico = _stock_count_tecnico(sc)
+                if item.serialized:
+                    # Residuo entre la cantidad de stock y la de seriales: no es
+                    # un sobrante ni un faltante real, es stock viejo cargado sin
+                    # seriales. Decirlo evita que se lea como que falto algo.
+                    motivo = (f"Ajuste de cantidad (stock sin seriales cargados): "
+                              f"{tecnico} contó {ln.qty_contada} y el sistema tenía {actual}")
+                elif delta > 0:
+                    motivo = f"Sobrante: {tecnico} contó {ln.qty_contada} y el sistema tenía {actual}"
+                else:
+                    motivo = f"Faltante: {tecnico} contó {ln.qty_contada} y el sistema tenía {actual}"
+                aplicados += _stock_count_movement(sc, item, abs(delta), from_id, to_id,
+                                                   motivo, [])
+
+        sc.status = STOCK_COUNT_APROBADO
+        sc.reviewed_at = now_ar()
+        sc.reviewed_by_user_id = current_user.id
+        db.session.commit()
+        flash(f"Conteo {sc.number} aprobado: {aplicados} ajuste(s) registrado(s).", "ok")
+        if sobrantes_serializados:
+            flash(
+                "Ítems serializados donde la cantidad de stock no coincidía con la de "
+                "seriales cargados: se ajustó la cantidad, pero falta cargar el número "
+                "de serie desde Ítems → " + "; ".join(sobrantes_serializados),
+                "error",
+            )
+    except Exception as e:
+        db.session.rollback()
+        flash(f"No se pudo aprobar el conteo: {e}", "error")
+    return redirect(url_for("stock_count_detail", sc_id=sc.id))
+
+
+@app.route("/conteo-camioneta/<int:sc_id>/rechazar", methods=["POST"])
+@login_required
+@role_required(*STOCK_COUNT_REVIEW_ROLES)
+def stock_count_reject(sc_id: int):
+    """Rechaza el conteo. NO toca stock, movimientos ni descartes.
+
+    El conteo queda guardado igual con su puntaje: rechazarlo no lo borra del
+    historial, solo dice que no se ajusta nada a partir de el.
+    """
+    sc = StockCount.query.get_or_404(sc_id)
+    if sc.status != STOCK_COUNT_PENDIENTE:
+        flash("Ese conteo ya no está pendiente.", "error")
+        return redirect(url_for("stock_count_detail", sc_id=sc.id))
+
+    motivo = (request.form.get("review_reason", "") or "").strip()
+    if not motivo:
+        flash("Poné el motivo del rechazo: el técnico lo tiene que poder leer.", "error")
+        return redirect(url_for("stock_count_detail", sc_id=sc.id))
+
+    sc.status = STOCK_COUNT_RECHAZADO
+    sc.review_reason = motivo[:255]
+    sc.reviewed_at = now_ar()
+    sc.reviewed_by_user_id = current_user.id
+    db.session.commit()
+    flash(f"Conteo {sc.number} rechazado. No se modificó ningún stock.", "ok")
+    return redirect(url_for("stock_count_detail", sc_id=sc.id))
 
 
 # ================================================================

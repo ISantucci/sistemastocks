@@ -1,0 +1,261 @@
+{% extends "base.html" %}
+{% block title %}Contar {{ location.name }} · TNGStocks{% endblock %}
+{% block page_title %}Contar {{ location.name }}{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <h2>Contar {{ location.name }}</h2>
+    <p class="muted">
+      Escribí cuántos tenés de cada cosa. <b>Si no tenés ninguno, poné 0</b> — no dejes
+      campos vacíos. A propósito no te mostramos lo que dice el sistema: la idea es
+      contar de verdad, no copiar un número.
+      Los ítems con número de serie se cuentan eligiendo los seriales que tenés.
+    </p>
+  </div>
+  <div><a href="{{ url_for('stock_counts') }}" class="btn btn-secondary">Cancelar</a></div>
+</div>
+
+<form method="post" action="{{ url_for('stock_count_create') }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <input type="hidden" name="location_id" value="{{ location.id }}">
+
+  <div class="card">
+    <div class="card-header"><span class="card-title">1) Lo que figura a tu nombre</span></div>
+    <div class="table-scroll" style="max-height:60vh;">
+      <table class="data-table">
+        <thead>
+          <tr><th>Ítem</th><th class="num" style="width:340px;">¿Qué tenés?</th></tr>
+        </thead>
+        <tbody>
+          {% for stock, item in rows %}
+          <tr>
+            <td>
+              {{ item.code }} — {{ item.name }}
+              {% if item.unit == "metros" %}<span class="muted">(en metros)</span>{% endif %}
+              {% if item.serialized %}<span class="badge badge-neutral">con número de serie</span>{% endif %}
+            </td>
+            <td>
+              <input type="hidden" name="row_item_id[]" value="{{ item.id }}">
+              {% if item.serialized %}
+                <div class="field" style="margin:0;">
+                  <select multiple name="serial_unit_ids_{{ item.id }}"
+                          class="js-sc-serial" data-item-id="{{ item.id }}">
+                    {% for o in serial_options.get(item.id, []) %}
+                      <option value="{{ o.unit_id }}">{{ o.label }}</option>
+                    {% endfor %}
+                  </select>
+                  <div class="muted" style="font-size:12px; margin-top:4px;">
+                    Elegí los que tenés. Si tenés uno que no aparece, escribí el número
+                    de serie completo para buscarlo.
+                  </div>
+                  <label style="display:block; margin-top:6px; font-weight:normal;">
+                    <input type="checkbox" name="sin_ninguno_{{ item.id }}" value="1">
+                    No tengo ninguno
+                  </label>
+                  <label style="display:block; margin-top:4px; font-weight:normal;">
+                    Tengo <input type="number" name="sin_serial_{{ item.id }}" min="0" step="1"
+                                 value="0" style="width:70px;"> más que no aparecen en la lista
+                  </label>
+                </div>
+              {% else %}
+                <input type="number" name="contado_{{ item.id }}" min="0" step="1"
+                       inputmode="numeric" required style="width:110px;">
+              {% endif %}
+            </td>
+          </tr>
+          {% else %}
+          <tr><td colspan="2" class="muted">El sistema no te tiene nada cargado en esta camioneta. Agregá abajo lo que tengas.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><span class="card-title">2) ¿Tenés algo que no está en la lista?</span></div>
+    <p class="muted">
+      Agregalo acá. Si lo que tenés no aparece en el buscador es porque no está cargado
+      en el sistema: en ese caso escribilo en los comentarios del final.
+    </p>
+    <div id="sc-extra-lines"></div>
+    <div style="margin-top:12px;">
+      <button type="button" id="sc-add-line-btn" class="btn btn-secondary">+ Agregar ítem</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><span class="card-title">3) Comentarios</span></div>
+    <div class="field">
+      <label>Anotá acá lo que tengas y no aparezca en el sistema, o cualquier cosa que quieras aclarar</label>
+      <textarea name="comment" rows="4"
+                placeholder="Ej: tengo 2 rollos de cable que compré yo y no figuran en ningún lado"></textarea>
+    </div>
+  </div>
+
+  <div style="margin:16px 0 32px;">
+    <button type="submit" class="btn btn-primary">Terminar conteo</button>
+  </div>
+</form>
+
+<template id="sc-extra-template">
+  <div class="sc-extra-line" style="display:flex; gap:12px; align-items:flex-end; margin-bottom:10px; flex-wrap:wrap;">
+    <div class="field" style="flex:1; min-width:260px;">
+      <label>Ítem</label>
+      <select name="extra_item_id[]" class="js-sc-item">
+        <option value="" selected></option>
+      </select>
+    </div>
+    <div class="field sc-extra-qty" style="width:140px;">
+      <label>¿Cuántos?</label>
+      <input type="number" name="extra_qty[]" min="0" step="1" inputmode="numeric" value="1">
+    </div>
+    <div class="field sc-extra-serial" style="flex:1; min-width:260px; display:none;">
+      <label>Números de serie que tenés</label>
+      <select multiple class="js-sc-serial-extra"></select>
+    </div>
+    <div class="field">
+      <label>&nbsp;</label>
+      <button type="button" class="sc-remove-line-btn btn btn-danger btn-sm">X</button>
+    </div>
+  </div>
+</template>
+
+<script>
+(function () {
+  var SERIAL_SRC = "{{ url_for('api_stock_count_serials') }}";
+  var ITEM_SRC = "{{ url_for('api_stock_count_items') }}";
+  var LOCATION_ID = "{{ location.id }}";
+
+  // unit_id -> { serial, location, ajeno }. Se llena con lo precargado en el
+  // HTML y con lo que devuelve la busqueda remota, para saber si hay que
+  // preguntar antes de aceptar un serial que hoy figura en otra camioneta.
+  var serialMeta = {};
+  {% for iid, opts in serial_options.items() %}
+    {% for o in opts %}
+      serialMeta["{{ o.unit_id }}"] = {
+        serial: {{ o.serial|tojson }},
+        location: {{ o.location|tojson }},
+        ajeno: {{ 'true' if o.ajeno else 'false' }}
+      };
+    {% endfor %}
+  {% endfor %}
+
+  function serialOpts(itemId) {
+    return {
+      plugins: ['remove_button'],
+      valueField: 'unit_id',
+      labelField: 'label',
+      searchField: ['serial'],
+      create: false,
+      persist: false,
+      loadThrottle: 250,
+      placeholder: 'Elegí los números de serie...',
+      load: function (query, callback) {
+        fetch(SERIAL_SRC + '?item_id=' + encodeURIComponent(itemId) +
+              '&location_id=' + encodeURIComponent(LOCATION_ID) +
+              '&q=' + encodeURIComponent(query),
+              { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
+          .then(function (r) { return r.ok ? r.json() : []; })
+          .then(function (rows) {
+            (rows || []).forEach(function (r) { serialMeta[String(r.unit_id)] = r; });
+            callback(rows || []);
+          })
+          .catch(function () { callback(); });
+      },
+      onItemAdd: function (value) {
+        // Un serial que hoy figura en la camioneta de otro técnico se puede
+        // declarar —es justo la inconsistencia que el conteo busca— pero no en
+        // silencio: si fue un error de tipeo, acá se corta.
+        var meta = serialMeta[String(value)];
+        var self = this;
+        if (!meta || !meta.ajeno) return;
+        setTimeout(function () {
+          var ok = window.confirm(
+            'Ese serial se encuentra en "' + meta.location + '". ¿Estás seguro?');
+          if (!ok) { self.removeItem(value, true); }
+          self.refreshOptions(false);
+        }, 0);
+      }
+    };
+  }
+
+  function initSerial(el, itemId) {
+    if (!el || el.tomselect || !window.TomSelect) return;
+    new TomSelect(el, serialOpts(itemId));
+  }
+
+  document.addEventListener("DOMContentLoaded", function () {
+    // El globito nativo de Chrome dice "Completa este campo", que en una pantalla
+    // llena de renglones no le dice nada a nadie. Se reemplaza SOLO el texto: la
+    // validacion sigue siendo la del navegador, y el backend valida igual.
+    document.querySelectorAll('input[name^="contado_"]').forEach(function (el) {
+      el.addEventListener("invalid", function () {
+        this.setCustomValidity(this.validity.valueMissing ? "Completá el conteo" : "");
+      });
+      el.addEventListener("input", function () { this.setCustomValidity(""); });
+    });
+
+    document.querySelectorAll('select.js-sc-serial').forEach(function (el) {
+      initSerial(el, el.getAttribute('data-item-id'));
+    });
+
+    var tpl = document.getElementById("sc-extra-template");
+    var cont = document.getElementById("sc-extra-lines");
+
+    function wireLine(line) {
+      var rm = line.querySelector(".sc-remove-line-btn");
+      if (rm) rm.addEventListener("click", function () { line.remove(); });
+
+      var sel = line.querySelector('select[name="extra_item_id[]"]');
+      if (!sel || !window.TomSelect || sel.tomselect) return;
+      var ts = new TomSelect(sel, Object.assign({}, window.TS_SINGLE_OPTS, {
+        valueField: 'id',
+        labelField: 'label',
+        searchField: ['code', 'name'],
+        preload: 'focus',
+        loadThrottle: 250,
+        sortField: null,
+        load: function (query, callback) {
+          fetch(ITEM_SRC + '?q=' + encodeURIComponent(query),
+                { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
+            .then(function (r) { return r.ok ? r.json() : []; })
+            .then(function (rows) { callback(rows || []); })
+            .catch(function () { callback(); });
+        },
+        onChange: function (value) {
+          var data = this.options[value] || {};
+          var qtyBox = line.querySelector('.sc-extra-qty');
+          var serBox = line.querySelector('.sc-extra-serial');
+          var serSel = line.querySelector('select.js-sc-serial-extra');
+          var qtyInput = line.querySelector('input[name="extra_qty[]"]');
+          if (data.serialized) {
+            // Un serializado se cuenta por serial, no por cantidad. El campo de
+            // cantidad se oculta pero SIGUE enviándose: el backend alinea
+            // extra_item_id[] con extra_qty[] por posición.
+            qtyBox.style.display = 'none';
+            if (qtyInput) qtyInput.value = '0';
+            serBox.style.display = '';
+            if (serSel) {
+              if (serSel.tomselect) { serSel.tomselect.destroy(); }
+              serSel.name = 'serial_unit_ids_' + value;
+              initSerial(serSel, value);
+            }
+          } else {
+            qtyBox.style.display = '';
+            if (qtyInput && qtyInput.value === '0') qtyInput.value = '1';
+            serBox.style.display = 'none';
+            if (serSel) { serSel.name = ''; }
+          }
+        }
+      }));
+      if (ts) { /* referencia para que no la recolecte el GC */ }
+    }
+
+    document.getElementById("sc-add-line-btn").addEventListener("click", function () {
+      cont.appendChild(tpl.content.cloneNode(true));
+      wireLine(cont.lastElementChild);
+    });
+  });
+})();
+</script>
+{% endblock %}
