@@ -12,8 +12,16 @@
     veces, y la del @font-face es relativa al CSS. Con font-display:swap el
     texto ya se ve desde el primer frame, asi que el preload no aportaba. -#}
 <link rel="stylesheet" href="{{ url_for('static', filename='vendor/inter/5.0.17/inter.css') }}">
+{#- Todo lo que sigue es para pantallas de trabajo. La de login no usa un solo
+    <select>, ni modales, ni nada de esto: sin este {% if %} le entregaba 146 KB
+    a cualquiera en Internet, 1.143 lineas de JavaScript del sistema incluidas
+    (como funciona la seleccion de seriales, el dedupe de filas, el modal de
+    confirmacion de movimientos). Todo eso, sin necesitar una cuenta.
+    No es ofuscar: es no publicarlo. -#}
+{% if current_user.is_authenticated %}
 {%- set _ts_css = vendor_asset('tom-select-css') %}
 <link rel="stylesheet" href="{{ _ts_css.url }}"{% if _ts_css.integrity %} integrity="{{ _ts_css.integrity }}"{% endif %}{% if not _ts_css.is_local %} crossorigin="anonymous" referrerpolicy="no-referrer"{% endif %}>
+{% endif %}
 <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/legacy.css') }}">
 {% block extra_head %}{% endblock %}
@@ -261,6 +269,7 @@
 {% else %}
 </main>
 {% endif %}
+{% if current_user.is_authenticated %}
 {%- set _ts_js = vendor_asset('tom-select-js') %}
 <script src="{{ _ts_js.url }}"{% if _ts_js.integrity %} integrity="{{ _ts_js.integrity }}"{% endif %}{% if not _ts_js.is_local %} crossorigin="anonymous" referrerpolicy="no-referrer"{% endif %}></script>
 {#- Ids de los items que se miden en metros. Va antes de los scripts porque
@@ -273,6 +282,7 @@
 <script src="{{ url_for('static', filename='js/line_dedupe.js') }}"></script>
 <script src="{{ url_for('static', filename='js/form_errors.js') }}"></script>
 <script src="{{ url_for('static', filename='js/confirm_move.js') }}"></script>
+{% endif %}
 {% if current_user.is_authenticated and not embed %}
 <script>
   /* Solo DATOS: lo unico de esta pantalla que depende de la base y por

@@ -380,15 +380,47 @@ def _asset_version(filename: str) -> str | None:
     return digest
 
 
+# ------------------ ASSETS MINIFICADOS (static/dist) ------------------
+# scripts/build_assets.mjs deja en static/dist/ una copia minificada de cada
+# archivo de static/js y static/css. Si esa copia existe, es la que se sirve.
+#
+# El FUENTE nunca se pisa: sigue en static/js y static/css, comentado y con los
+# nombres de siempre. Los templates tampoco cambian: siguen escribiendo
+# url_for('static', filename='js/app.js') y el desvio ocurre acá, en un solo
+# lugar. Si static/dist/ no existe (nadie corrió el build, o se borró), se
+# sirven los fuentes y el sistema anda igual. Es degradación segura: el build
+# mejora lo que se publica, no es una dependencia dura para arrancar.
+#
+# En modo debug se sirve SIEMPRE el fuente. Si no, editar el CSS en desarrollo
+# no se vería hasta rebuildear, y se pierden dos horas antes de darse cuenta.
+_ASSET_DIST_CACHE: dict[str, str] = {}
+
+
+def _asset_servido(filename: str) -> str:
+    """Nombre del archivo que se sirve: el minificado si está, si no el fuente."""
+    if app.debug or not filename.startswith(("js/", "css/")):
+        return filename
+    cacheado = _ASSET_DIST_CACHE.get(filename)
+    if cacheado is not None:
+        return cacheado
+    candidato = f"dist/{filename}"
+    elegido = candidato if (BASE_DIR / "static" / candidato).exists() else filename
+    _ASSET_DIST_CACHE[filename] = elegido
+    return elegido
+
+
 @app.url_defaults
 def _versionar_assets(endpoint, values):
-    """Agrega ?v=<hash> a todo url_for('static', filename=...)."""
+    """Manda al minificado (si existe) y agrega ?v=<hash> del archivo servido."""
     if endpoint != "static" or "v" in values:
         return
     filename = values.get("filename")
     if not filename:
         return
-    version = _asset_version(filename)
+    servido = _asset_servido(filename)
+    if servido != filename:
+        values["filename"] = servido
+    version = _asset_version(servido)
     if version:
         values["v"] = version
 
@@ -5500,6 +5532,10 @@ def movements_bulk():
             flash("Tenes que cargar al menos un item.", "error")
             return redirect(url_for("movements_bulk"))
 
+        # Seriales elegidos por fila. Viene un string por linea ("12,15"),
+        # alineado con item_id[] y qty[], igual que en Utilizados y Descartes.
+        unit_ids_raw = request.form.getlist("unit_ids[]")
+
         pending_responsible_id = None
 
         # Validacion de responsable solo si alguna linea genera pendiente
@@ -5558,15 +5594,44 @@ def movements_bulk():
                 return redirect(url_for("movements_bulk"))
             seen_items[item_id] = idx
 
-            # Serializados: la carga múltiple no permite elegir seriales, así que
-            # se bloquea para no desincronizar las unidades. Se usa Movimientos.
+            # --- Serializados: qué unidades se mueven en esta línea ---
+            #
+            # Antes esto era un bloqueo: la pantalla ofrecía los ítems
+            # serializados en el selector y recién al enviar avisaba que no se
+            # podían cargar acá. El usuario perdía toda la carga y tenía que
+            # rehacerla en Movimientos de a un ítem por vez.
+            #
+            # Ahora se resuelve igual que en Utilizados y Descartes: cada fila
+            # manda sus unidades en unit_ids[] y se usa la MISMA función que
+            # esas pantallas (resolve_serial_units_out). No hay lógica nueva de
+            # stock serializado: si un día cambia la regla, cambia en un lugar.
+            units = []
             if it.serialized:
-                flash(
-                    f"Linea {idx}: «{it.code} - {it.name}» es serializado. "
-                    "Cargalo desde Movimientos para elegir los seriales.",
-                    "error",
+                if location_is_external(from_id):
+                    # Ingreso desde Proveedor/Baja: no se eligen seriales
+                    # existentes, se dan de ALTA seriales nuevos, y eso necesita
+                    # un campo de texto por unidad. Ese flujo sigue viviendo en
+                    # Movimientos. El front tampoco ofrece estos ítems con un
+                    # origen externo, así que a este mensaje no se llega
+                    # cargando normal: es la red de seguridad.
+                    _origen = Location.query.get(from_id)
+                    flash(
+                        f"Linea {idx}: «{it.code} - {it.name}» es serializado y entra "
+                        f"desde «{_origen.name if _origen else 'un origen externo'}». "
+                        "Para dar de alta seriales nuevos usá Movimientos.",
+                        "error",
+                    )
+                    return redirect(url_for("movements_bulk"))
+
+                elegidos = parse_unit_ids(
+                    unit_ids_raw[idx - 1] if idx - 1 < len(unit_ids_raw) else ""
                 )
-                return redirect(url_for("movements_bulk"))
+                units, err = resolve_serial_units_out(
+                    item_id, from_id, qty, ids=elegidos
+                )
+                if err:
+                    flash(f"Linea {idx}: {err}", "error")
+                    return redirect(url_for("movements_bulk"))
 
             # Devolución esperada del pendiente (opcional, misma flexibilidad que
             # Movimientos): qué ítem debe volver y cuántas unidades.
@@ -5595,6 +5660,7 @@ def movements_bulk():
             parsed_lines.append({
                 "item_id": item_id,
                 "qty": qty,
+                "units": units,
                 "generate_pending": line["generate_pending"],
                 "pending_comment": line["pending_comment"],
                 "pending_return_item_id": pending_return_item_id,
@@ -5614,6 +5680,13 @@ def movements_bulk():
                 if not location_is_external(to_id):
                     upsert_stock(item_id, to_id, qty)
 
+                # Los seriales van a la observación, igual que en Movimientos y
+                # en Utilizados: es lo que después se lee en el historial y en
+                # el remito para saber QUÉ unidad se movió.
+                obs_linea = observation
+                if line["units"]:
+                    obs_linea = serial_obs(observation, [u.serial for u in line["units"]])
+
                 y, seq, number = next_movement_number()
                 m = Movement(
                     item_id=item_id,
@@ -5621,13 +5694,18 @@ def movements_bulk():
                     from_location_id=from_id,
                     to_location_id=to_id,
                     user_id=current_user.id,
-                    observation=observation,
+                    observation=obs_linea,
                     year=y,
                     seq=seq,
                     number=number,
                 )
                 db.session.add(m)
                 db.session.flush()
+
+                # Misma transacción que el stock y el movimiento: si algo falla
+                # más abajo, las unidades tampoco se mueven.
+                if line["units"]:
+                    apply_serial_units_out(line["units"], to_id)
 
                 if line["generate_pending"]:
                     # Un pendiente por unidad que debe volver (cada uno qty 1),
@@ -5676,6 +5754,10 @@ def movements_bulk():
     # Externas: ofrecer todos los items al elegirlas como origen (no tienen stock).
     external_location_ids = [l.id for l in locations_list if l.is_external]
 
+    # Seriales disponibles por ítem y ubicación, para el selector de cada fila.
+    # Mismo mapa que usan Movimientos, Utilizados y Descartes.
+    units_map, serialized_item_ids = build_units_map()
+
     return render_template(
         "movements_bulk.html",
         items=items_list,
@@ -5685,6 +5767,8 @@ def movements_bulk():
         stock_map=stock_map,
         stock_qty_map=stock_qty_map,
         external_location_ids=external_location_ids,
+        units_map=units_map,
+        serialized_item_ids=serialized_item_ids,
     )
 
 

@@ -59,6 +59,8 @@
 
   // Responsables del destino, para el selector de pendientes.
   var bulkRespMap = D.respMap;
+  var unitsMap = D.unitsMap || {};
+  var serializedItemIds = D.serializedItems || [];
   function refreshBulkResponsibles() {
     var toSel = document.getElementById("bulk_to_location_id");
     var sel = document.getElementById("bulk_pending_responsible_id");
@@ -113,10 +115,22 @@
 
   // Opciones permitidas por STOCK para las filas (sin considerar el dedupe).
   // Externa (Proveedor/Baja): todos los ítems; interna: solo con stock.
+  //
+  // Con origen EXTERNO se sacan además los serializados: dar de alta seriales
+  // nuevos necesita un campo de texto por unidad y ese flujo vive en
+  // Movimientos. El backend lo rechaza igual; no ofrecerlos evita que alguien
+  // cargue diez líneas y recién al enviar se entere. Con origen interno sí se
+  // ofrecen: para ésos la fila trae su selector de seriales.
+  function esSerializado(itemId) {
+    return serializedItemIds.indexOf(parseInt(itemId, 10)) !== -1;
+  }
   function bulkStockOptions() {
     var info = allowedForCurrentFrom();
     if (!info.locId) return [];
-    return allBulkItems.filter(function (o) { return info.all || info.set[o.value]; });
+    return allBulkItems.filter(function (o) {
+      if (info.all) return !esSerializado(o.value);
+      return !!info.set[o.value];
+    });
   }
 
   // Un ítem = una sola fila: el dedupe saca de cada listado lo ya elegido en
@@ -161,9 +175,12 @@
       onItemAdd: function () { this.setTextboxValue(''); this.blur(); },
       onChange: function () {
         this.blur();
-        clampBulkQty(el.closest(".bulk-line"));
+        var linea = el.closest(".bulk-line");
+        clampBulkQty(linea);
         // Liberar/tomar el ítem en las demás filas.
         applyStockFilterAllLines();
+        // Cambió el ítem: los seriales que ofrece la fila son otros.
+        if (linea && linea._syncSerials) linea._syncSerials();
       }
     });
     applyStockFilterAllLines();
@@ -172,6 +189,12 @@
   function applyDescartes(isDescartes) {
     document.querySelectorAll(".scrap-reason-wrap").forEach(function(el) {
       el.style.display = isDescartes ? "block" : "none";
+    });
+  }
+
+  function syncSerialsAllLines() {
+    document.querySelectorAll(".bulk-line").forEach(function (l) {
+      if (l._syncSerials) l._syncSerials();
     });
   }
 
@@ -190,11 +213,46 @@
       new TomSelect(returnItemSel, window.TS_SINGLE_OPTS);
     }
 
+    /* Selector de seriales de la fila. Es el MISMO initSerialPicker que usan
+       Movimientos, Utilizados y Descartes: acá no hay lógica propia de
+       seriales, solo se le dicen cuáles son los elementos de esta fila.
+
+       Antes esta pantalla ofrecía los ítems serializados en el selector y
+       recién al enviar el backend rechazaba la carga entera. */
+    var refreshSeriales = initSerialPicker({
+      unitsMap: unitsMap,
+      serializedItems: serializedItemIds,
+      itemEl: itemSelect,
+      fromSel: document.getElementById("bulk_from_location_id"),
+      qtyInput: line.querySelector('input[name="qty[]"]'),
+      pickBox: line.querySelector(".serial-pick-box"),
+      pickList: line.querySelector(".serial-pick-list"),
+      pickStatus: line.querySelector(".serial-pick-status"),
+      autoHint: line.querySelector(".serial-auto-box"),
+      autoText: line.querySelector(".serial-auto-text"),
+      idsInput: line.querySelector(".serial-ids"),
+      summaryInput: line.querySelector(".serial-summary")
+    });
+
+    /* El bloque del resumen sólo se muestra si hay algo que resumir, igual que
+       en las otras pantallas. */
+    var resumen = line.querySelector(".serial-summary-box");
+    var summaryEl = line.querySelector(".serial-summary");
+    function syncSeriales() {
+      refreshSeriales();
+      if (resumen) {
+        resumen.style.display = (summaryEl && summaryEl.value) ? "" : "none";
+      }
+    }
+    line._syncSerials = syncSeriales;
+    syncSeriales();
+
     var qtyEl = line.querySelector('input[name="qty[]"]');
     if (qtyEl) {
       qtyEl.addEventListener("input", function () {
         clampBulkQty(line);
         clampBulkReturnQty(line);
+        syncSeriales();
       });
     }
     var retQtyEl = line.querySelector(".pending-return-qty");
@@ -272,7 +330,9 @@
     var bulkFromSel = document.getElementById("bulk_from_location_id");
     if (bulkFromSel) {
       bulkFromSel.addEventListener("change", function () {
-        resetStockFilterAllLines(); clampBulkAll();
+        // Cambió el origen: cambian los ítems ofrecidos y también los seriales
+        // disponibles de cada fila.
+        resetStockFilterAllLines(); clampBulkAll(); syncSerialsAllLines();
       });
     }
   });

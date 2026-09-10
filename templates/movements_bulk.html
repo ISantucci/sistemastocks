@@ -109,6 +109,28 @@
       <label>&nbsp;</label>
       <button type="button" class="remove-line-btn btn btn-danger btn-sm">X</button>
     </div>
+    {#- Seriales de ESTA fila. Mismo marcado que Utilizados y Descartes, para que
+        initSerialPicker (static/js/serial_picker.js) lo maneje sin cambios: si en
+        el origen hay tantos seriales como la cantidad, se usan solos; si hay más,
+        el usuario elige cuáles. Los ids elegidos viajan en unit_ids[], un string
+        por fila alineado con item_id[] y qty[]. -#}
+    <div class="serial-pick-box field" style="flex-basis:100%; display:none;">
+      <label>¿Cuál/es salen? <span class="muted serial-pick-status" style="font-weight:400;"></span></label>
+      <div class="serial-pick-list"></div>
+    </div>
+    <div class="serial-auto-box field" style="flex-basis:100%; display:none;">
+      <label>Seriales</label>
+      <div class="muted serial-auto-text"></div>
+    </div>
+    {#- El resumen es un <input> a propósito: es la única forma de que
+        confirm_move.js lo lleve al modal de confirmación. No se lee en el backend. -#}
+    <div class="serial-summary-box field" style="flex-basis:100%; display:none;">
+      <label>Seriales que salen</label>
+      <input type="text" class="serial-summary" name="serials_txt[]" readonly tabindex="-1"
+             style="border:0; background:transparent; padding:0; height:auto;
+                    font-size:13px; color:var(--text-secondary,#666);">
+    </div>
+    <input type="hidden" name="unit_ids[]" class="serial-ids">
   </div>
 </template>
 
@@ -122,6 +144,8 @@
     stockQtyMap: {{ stock_qty_map|tojson }},
     externalLocIds: {{ external_location_ids|tojson }},
     respMap: {{ responsibles_map|tojson }},
+    unitsMap: {{ units_map|tojson }},
+    serializedItems: {{ serialized_item_ids|tojson }},
     allItems: [
       {% for i in items %}{ value: "{{ i.id }}", text: "{{ (i.code ~ ' - ' ~ i.name)|e }}" },
       {% endfor %}

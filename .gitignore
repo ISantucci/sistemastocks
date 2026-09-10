@@ -31,6 +31,14 @@ ObsidianVaults/
 .obsidian/
 *.obsidian/
 
+# --- Build de los assets del front -------------------------------------------
+# node_modules NO va al repo (lo reinstala 'npm install').
+# static/dist/ SI VA: el deploy es 'git pull' + reiniciar y no corre el build,
+# asi que si el minificado no esta commiteado, produccion sirve los fuentes.
+# tests/test_build_assets.py verifica que este al dia con los fuentes.
+node_modules/
+npm-debug.log*
+
 # --- Pytest / herramientas ---------------------------------------------------
 .pytest_cache/
 .coverage

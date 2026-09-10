@@ -83,7 +83,8 @@ def test_todo_static_lleva_version_en_la_url(A, client):
 def test_static_con_version_se_cachea_un_anio(A, client):
     _admin(A, client)
     html = client.get("/stock").get_data(as_text=True)
-    url = re.search(r'/static/css/app\.css\?v=[0-9a-f]+', html).group(0)
+    # dist/ cuando el build corrió, el fuente si no: las dos rutas valen.
+    url = re.search(r'/static/(?:dist/)?css/app\.css\?v=[0-9a-f]+', html).group(0)
     cc = client.get(url).headers["Cache-Control"]
     assert "max-age=31536000" in cc
     assert "immutable" in cc
@@ -104,7 +105,7 @@ def test_los_estaticos_no_varian_por_cookie(A, client):
     """
     _admin(A, client)
     html = client.get("/stock").get_data(as_text=True)
-    url = re.search(r'/static/css/app\.css\?v=[0-9a-f]+', html).group(0)
+    url = re.search(r'/static/(?:dist/)?css/app\.css\?v=[0-9a-f]+', html).group(0)
     vary = client.get(url).headers.get("Vary", "")
     assert "cookie" not in vary.lower(), (
         f"volvió el Vary: Cookie en /static ({vary!r}): el cache deja de funcionar"
@@ -197,6 +198,45 @@ def test_el_csv_no_queda_marcado_como_no_store(A, client):
     r = client.get("/stock/export.csv")
     assert r.status_code == 200
     assert "no-store" not in r.headers.get("Cache-Control", "")
+
+
+# --------------------------------------------- lo que ve Internet sin cuenta
+
+def test_el_login_no_publica_el_javascript_del_sistema(A, client):
+    """La pantalla de login es la única que ve Internet entero.
+
+    Antes entregaba 146 KB a cualquiera, con 1.143 líneas de JS del sistema
+    adentro: cómo funciona la selección de seriales, el dedupe de filas, el
+    modal de confirmación de movimientos. Todo eso sin necesitar una cuenta, y
+    para un formulario de usuario y contraseña que no usa nada de eso.
+
+    Esto no es ofuscación: el código no está ofuscado, simplemente no se manda.
+    """
+    html = client.get("/login").get_data(as_text=True)
+    js = re.findall(r'src="(/static/[^"]*\.js)', html)
+    assert not js, f"el login sigue publicando JavaScript: {js}"
+
+
+def test_el_login_no_carga_tom_select(A, client):
+    """No tiene un solo <select>: eran 65 KB (JS + CSS) al pedo, y publicados."""
+    html = client.get("/login").get_data(as_text=True)
+    assert "tom-select" not in html
+
+
+def test_el_login_conserva_sus_estilos(A, client):
+    """Lo que sí necesita tiene que seguir estando, o la pantalla queda rota."""
+    html = client.get("/login").get_data(as_text=True)
+    assert "css/app.css" in html
+    assert 'name="username"' in html and 'name="password"' in html
+    assert 'name="csrf_token"' in html
+
+
+def test_una_pantalla_logueada_sigue_cargando_todo(A, client):
+    """El contrapeso: al entrar, el sistema tiene que traer sus herramientas."""
+    _admin(A, client)
+    html = client.get("/movements").get_data(as_text=True)
+    for necesario in ("tom-select", "js/app.js", "js/serial_picker.js", "js/movements.js"):
+        assert necesario in html, f"una pantalla de trabajo perdió {necesario}"
 
 
 def test_el_estado_del_menu_se_aplica_antes_de_pintar(A, client):

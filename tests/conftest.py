@@ -129,7 +129,11 @@ def con_js(html):
     """
     partes = [html]
     vistos = set()
-    for ruta in re.findall(r'src="/static/(js/[^"?]+)', html):
+    # La página puede estar sirviendo el minificado (static/dist/js/x.js) o el
+    # fuente (static/js/x.js). Siempre se lee EL FUENTE: estos tests verifican
+    # qué hace el código, y el minificado renombra todo lo que es interno. Que
+    # el dist corresponda al fuente lo cubre tests/test_build_assets.py.
+    for ruta in re.findall(r'src="/static/(?:dist/)?(js/[^"?]+)', html):
         if ruta in vistos or ruta in JS_GLOBALES:
             continue
         vistos.add(ruta)
