@@ -1,0 +1,94 @@
+/* Inter 5.0.17 - servida localmente (antes venia de fonts.googleapis.com).
+ *
+ * Por que esta local: el <link> a Google Fonts era render-blocking y externo.
+ * Con la red lenta, el CDN caido o el servidor sin salida a Internet, la
+ * pantalla quedaba esperando y el usuario veia el HTML sin estilar. Ademas era
+ * el ultimo origen de terceros que quedaba: con esto la CSP se cierra sola
+ * (ver CDN_ORIGINS / CSP_POLICY en app.py).
+ *
+ * Subsets: latin y latin-ext, los mismos que servia Google para este family.
+ * El unicode-range hace que el navegador baje SOLO el que necesita: en la
+ * practica solo latin (~22 KB por peso). Los simbolos que usa el menu
+ * (flechas, cuadrados) no estan en estos subsets y caen al fallback del
+ * sistema, exactamente igual que antes.
+ *
+ * font-display: swap -> el texto se ve desde el primer frame con la tipografia
+ * del sistema y cambia a Inter cuando llega. Nunca hay texto invisible.
+ *
+ * El ?v=5017 de cada url no es un capricho: sin el, el archivo se pide sin
+ * version y cae en el "no-cache" de app.py, o sea que se revalida en cada
+ * pantalla. La version va fija a mano (y no calculada) porque la carpeta ya
+ * esta versionada: si algun dia se sube Inter, cambia la carpeta entera.
+ *
+ * Los .woff2 salen del paquete npm @fontsource/inter@5.0.17 (mismos binarios
+ * que publica Google). Para actualizar: bajar el paquete, reemplazar los
+ * archivos de files/ y subir la version de la carpeta.
+ */
+
+/* ---------------------------------------------------------------- latin */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(files/inter-latin-400-normal.woff2?v=5017) format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+2074, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url(files/inter-latin-500-normal.woff2?v=5017) format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+2074, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url(files/inter-latin-600-normal.woff2?v=5017) format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+2074, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url(files/inter-latin-700-normal.woff2?v=5017) format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+2074, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/* ------------------------------------------------------------ latin-ext */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(files/inter-latin-ext-400-normal.woff2?v=5017) format('woff2');
+  unicode-range: U+0100-02AF, U+0304, U+0308, U+0329, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url(files/inter-latin-ext-500-normal.woff2?v=5017) format('woff2');
+  unicode-range: U+0100-02AF, U+0304, U+0308, U+0329, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url(files/inter-latin-ext-600-normal.woff2?v=5017) format('woff2');
+  unicode-range: U+0100-02AF, U+0304, U+0308, U+0329, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url(files/inter-latin-ext-700-normal.woff2?v=5017) format('woff2');
+  unicode-range: U+0100-02AF, U+0304, U+0308, U+0329, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}

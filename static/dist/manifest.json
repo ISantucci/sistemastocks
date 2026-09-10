@@ -1,0 +1,36 @@
+{
+  "_readme": [
+    "Generado por scripts/build_assets.mjs. No editar a mano.",
+    "'fuentes' guarda el hash de cada archivo de static/js y static/css al",
+    "momento del build. tests/test_build_assets.py lo compara contra los",
+    "fuentes actuales: si alguien edita el fuente y no corre 'npm run build',",
+    "el test falla. Sin eso, produccion serviria la version vieja en silencio."
+  ],
+  "generado": "2026-09-10T15:09:18.351Z",
+  "fuentes": {
+    "css/app.css": "b6fbe4d34a8d",
+    "css/legacy.css": "b0da420aaf8a",
+    "css/metricas.css": "b775f40b3452",
+    "js/app.js": "17b4f1486ee2",
+    "js/confirm_move.js": "78c9051762ef",
+    "js/detail_modal.js": "2334952cb26e",
+    "js/form_errors.js": "477b444a107c",
+    "js/ingresos_egresos.js": "c5f48be2b160",
+    "js/item_usage.js": "deb74ca6af0b",
+    "js/items_form.js": "c957a1b48cbe",
+    "js/items_modales.js": "2398118b8f92",
+    "js/line_dedupe.js": "79ba9db2cca4",
+    "js/metricas.js": "752cf9f703c1",
+    "js/movements.js": "f0bc849eec27",
+    "js/movements_bulk.js": "f2f9b9747397",
+    "js/movements_pendiente.js": "81f9fa6ccb83",
+    "js/remitos.js": "7f66feb6b4a2",
+    "js/repair_request_detail.js": "e23af98cff66",
+    "js/repair_requests.js": "6658e6550b68",
+    "js/scrap_report.js": "16ad49644416",
+    "js/serial_picker.js": "3d7103f6c569",
+    "js/serial_scan.js": "16eee1970d15",
+    "js/stock_count_new.js": "31c26109330e",
+    "js/unit_hint.js": "46365405a89c"
+  }
+}

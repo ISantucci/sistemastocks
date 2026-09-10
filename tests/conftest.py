@@ -95,6 +95,55 @@ def login(client, username, password="pass1234", A=None):
     return client.post("/login", data=data, follow_redirects=False)
 
 
+# Los que base.html carga en todas las pantallas: son librerías, no el código de
+# una pantalla en particular. Ver con_js().
+JS_GLOBALES = {
+    "js/app.js",
+    "js/unit_hint.js",
+    "js/serial_picker.js",
+    "js/line_dedupe.js",
+    "js/form_errors.js",
+    "js/confirm_move.js",
+    "js/detail_modal.js",
+}
+
+
+def con_js(html):
+    """El HTML de una pantalla MAS el JS propio que esa pantalla carga.
+
+    Desde que el JS de cada pantalla vive en static/js/ (antes estaba inline en
+    el template), buscar una línea de código dentro del HTML ya no alcanza: hay
+    que mirar también los archivos que la página referencia.
+
+    Esto pega todo en un solo texto para que el test pueda seguir preguntando lo
+    mismo de siempre —"esta pantalla engancha el dedupe", "pasa el selector
+    correcto"— sin depender de en qué archivo terminó escrito.
+
+    Deja afuera los archivos que base.html carga en TODAS las pantallas
+    (app.js, line_dedupe.js, serial_picker.js…). Esos son las librerías: tienen
+    la *definición* de initFromToExclusion, initSerialPicker y compañía. Si se
+    incluyeran, un test que pregunta "¿esta pantalla LLAMA al dedupe?" daría que
+    sí en todas, y justamente hay tests que verifican que en algunas NO esté.
+
+    Sólo lee archivos de static/js/ del propio repo: no baja nada.
+    """
+    partes = [html]
+    vistos = set()
+    # La página puede estar sirviendo el minificado (static/dist/js/x.js) o el
+    # fuente (static/js/x.js). Siempre se lee EL FUENTE: estos tests verifican
+    # qué hace el código, y el minificado renombra todo lo que es interno. Que
+    # el dist corresponda al fuente lo cubre tests/test_build_assets.py.
+    for ruta in re.findall(r'src="/static/(?:dist/)?(js/[^"?]+)', html):
+        if ruta in vistos or ruta in JS_GLOBALES:
+            continue
+        vistos.add(ruta)
+        archivo = os.path.join(_APP_DIR, "static", *ruta.split("/"))
+        if os.path.exists(archivo):
+            with open(archivo, encoding="utf-8") as fh:
+                partes.append(fh.read())
+    return "\n".join(partes)
+
+
 def csrf_from(client, path):
     html = client.get(path).get_data(as_text=True)
     m = re.search(r'name="csrf_token" value="([^"]+)"', html)

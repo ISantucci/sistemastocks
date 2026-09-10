@@ -54,10 +54,25 @@
       <label>Buscar item</label>
       {# Con catalogo chico se listan todos los items (igual que siempre). Si el
          catalogo crece, items_remote pasa a true y el select busca contra la
-         API en vez de volcar miles de <option> en el HTML. #}
-      <select name="q" class="js-buscar{% if items_remote %} js-buscar-remoto{% endif %}"
+         API en vez de volcar miles de <option> en el HTML.
+
+         js-buscar-libre: el mismo control, pero acepta TEXTO LIBRE, igual que
+         el buscador de /items. Escribiendo "NEO" el desplegable ofrece los
+         items que coinciden y ademas la opcion «Buscar NEO», que filtra por
+         texto y trae TODOS en vez de obligar a elegir uno. El backend de esta
+         pantalla ya lo soportaba (ilike contra codigo, nombre y descripcion):
+         faltaba solo la clase. Elegir un item puntual sigue andando igual,
+         porque el value es el CODIGO. #}
+      {% set codigos_visibles = items | map(attribute='code') | list %}
+      <select name="q" class="js-buscar js-buscar-libre{% if items_remote %} js-buscar-remoto{% endif %}"
               {% if items_remote %}data-src="{{ url_for('api_items_search') }}" data-value-field="code"{% endif %}>
         <option value="">Todos</option>
+        {% if selected_q and selected_q not in codigos_visibles %}
+          {# Texto libre ya buscado: se re-emite como opcion para que el control
+             lo siga mostrando despues de recargar la pagina. Sin esto el filtro
+             queda aplicado en la tabla pero el select vuelve a "Todos". #}
+          <option value="{{ selected_q }}" selected>{{ selected_q }}</option>
+        {% endif %}
         {% for it in items %}
           <option value="{{ it.code }}" {% if selected_q == it.code %}selected{% endif %}>{{ it.code }} - {{ it.name }}</option>
         {% endfor %}
@@ -104,7 +119,7 @@
           <td>{{ row.location.name }}</td>
           <td>{{ row.item.code }}</td>
           <td>
-            {{ row.item.name }}
+            {{ row.item.name }} {% if row.item.unit == "metros" %}<span class="muted" style="font-weight:400;">(en metros)</span>{% endif %}
             {% if row.item.serialized %}
               <button type="button" class="badge badge-ok" style="cursor:pointer;border:none;margin-left:6px;" onclick="openDetail('{{ url_for('item_units', item_id=row.item.id, loc=row.location.id) }}')">Seriales</button>
             {% endif %}

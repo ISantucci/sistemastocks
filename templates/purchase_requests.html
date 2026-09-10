@@ -68,7 +68,7 @@
                 {% for e in alert_items %}
                 <tr>
                   <td><input type="checkbox" name="item_id" value="{{ e.item.id }}"></td>
-                  <td>{{ e.item.code }} — {{ e.item.name }}</td>
+                  <td>{{ e.item.code }} — {{ e.item.name }} {% if e.item.unit == "metros" %}<span class="muted" style="font-weight:400;">(en metros)</span>{% endif %}</td>
                   <td>
                     {% if e.worst == 'stock-red' %}
                       <span class="badge badge-danger">Crítico</span>
@@ -76,8 +76,8 @@
                       <span class="badge badge-warn">Bajo</span>
                     {% endif %}
                   </td>
-                  <td class="num">{{ e.total_qty }}</td>
-                  <td class="num">{{ e.item.stock_min }}</td>
+                  <td class="num">{{ fmt_qty(e.total_qty, e.item) }}</td>
+                  <td class="num">{{ fmt_qty(e.item.stock_min, e.item) }}</td>
                   {% set sugerido = e.item.stock_min - e.total_qty %}
                   {% if sugerido < 1 %}{% set sugerido = 1 %}{% endif %}
                   <td class="num"><input type="number" name="qty_{{ e.item.id }}" min="1" value="{{ sugerido }}" style="width:90px;" title="Sugerido para llegar al mínimo. Podés pedir más."></td>

@@ -11,7 +11,12 @@ pierda: el backend descarta movimientos repetidos, los de otra relación y los
 que ya están remitados.
 """
 import pytest
-from conftest import make_user, make_item, make_location, login
+from conftest import make_user, make_item, make_location, login, con_js
+# El JS de cada pantalla ya no esta inline en el template: vive en static/js/.
+# con_js() (conftest) devuelve el HTML mas el contenido de los .js que esa
+# pagina carga, asi estas pruebas siguen verificando lo mismo -- que la pantalla
+# enganche el comportamiento correcto -- sin depender de donde este escrito.
+
 
 ROLES = {"ADMIN": ("admin", "admin123"), "SUPERVISOR": ("u_sup", "pass1234"),
          "TECNICO": ("u_tec", "pass1234"), "LECTOR": ("u_lec", "pass1234")}
@@ -170,5 +175,5 @@ def test_ui_avisa_al_instante_si_la_relacion_es_la_misma(A, esc):
 def test_exclusion_desde_hacia_llega_a_quien_edita(A, esc, rol, espera):
     """El modal de nuevo remito solo se le sirve a ADMIN/SUPERVISOR."""
     html = cli(A, rol).get("/remitos").get_data(as_text=True)
-    assert ("initFromToExclusion" in html) is espera
+    assert ("initFromToExclusion" in con_js(html)) is espera
     assert ('id="rm-to"' in html) is espera

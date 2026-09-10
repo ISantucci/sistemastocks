@@ -170,7 +170,7 @@
         {% set avail = jaula_stock.get(ln.item.id, 0) %}
         {% set maxd = ln.qty if ln.qty < avail else avail %}
         <div class="field" style="max-width:220px; margin-top:8px;">
-          <label>Cantidad a entregar <span class="muted">(en Jaula: {{ fmt_qty(avail, ln.item) }})</span></label>
+          <label>Cantidad a entregar {% if ln.item.unit == "metros" %}<span class="muted" style="font-weight:400;">(en metros)</span>{% endif %} <span class="muted">(en Jaula: {{ fmt_qty(avail, ln.item) }})</span></label>
           <input type="number" name="qty_entregada_{{ ln.id }}" min="0" max="{{ maxd }}" value="{{ maxd }}"
                  class="rr-qty" data-line="{{ ln.id }}">
         </div>
@@ -196,7 +196,7 @@
             </select>
           </div>
           <div class="field">
-            <label>Cantidad a devolver</label>
+            <label>Cantidad a devolver <span class="muted" style="font-weight:400;" data-unit-hint="pending_return_item_id_{{ ln.id }}" data-unit-default="{{ ln.item.unit }}"></span></label>
             <input type="number" name="pending_return_qty_{{ ln.id }}" min="1" placeholder="Igual a la entregada"
                    class="rr-return-qty" data-line="{{ ln.id }}" style="width:100%;">
             <p class="muted rr-return-hint" data-line="{{ ln.id }}" style="margin:4px 0 0; font-size:13px;"></p>
@@ -211,92 +211,11 @@
 </div>
 
 <script>
-// Limita la selección de seriales por línea a la cantidad pedida.
-document.addEventListener("DOMContentLoaded", function () {
-  // Cuánto se está entregando en una línea (cantidad o seriales tildados).
-  function deliveredFor(line) {
-    var qty = document.querySelector('.rr-qty[data-line="' + line + '"]');
-    if (qty) {
-      var n = parseInt(qty.value, 10);
-      return isNaN(n) || n < 0 ? 0 : n;
-    }
-    return document.querySelectorAll(
-      'input[type="checkbox"][data-line="' + line + '"]:not(.rr-pending-flag):checked'
-    ).length;
-  }
-
-  /* No se puede pedir que devuelvan más de lo que se entregó. El backend ya lo
-     rechaza (repair_request_close); esto es para no dejar cargar algo que iba a
-     ser rechazado al enviar. */
-  function syncReturnMax(line) {
-    var input = document.querySelector('.rr-return-qty[data-line="' + line + '"]');
-    if (!input) return;
-    var hint = document.querySelector('.rr-return-hint[data-line="' + line + '"]');
-    var d = deliveredFor(line);
-    if (d > 0) {
-      input.max = d;
-      input.disabled = false;
-      input.placeholder = "Igual a la entregada (" + d + ")";
-      var v = parseInt(input.value, 10);
-      if (!isNaN(v) && v > d) input.value = d;
-      if (hint) hint.textContent = "Máximo " + d + " (lo que se entrega en esta línea).";
-    } else {
-      input.value = "";
-      input.removeAttribute("max");
-      input.placeholder = "Sin entrega en esta línea";
-      if (hint) hint.textContent = "Esta línea no entrega nada: no genera pendiente.";
-    }
-  }
-
-  document.querySelectorAll('input[type="checkbox"][data-line]:not(.rr-pending-flag)').forEach(function (cb) {
-    cb.addEventListener("change", function () {
-      var line = cb.getAttribute("data-line");
-      var max = parseInt(cb.getAttribute("data-max"), 10) || 0;
-      var checked = document.querySelectorAll('input[data-line="' + line + '"]:not(.rr-pending-flag):checked');
-      if (checked.length > max) { cb.checked = false; }
-      syncReturnMax(line);
-    });
-  });
-
-  document.querySelectorAll(".rr-qty").forEach(function (q) {
-    var apply = function () { syncReturnMax(q.getAttribute("data-line")); };
-    q.addEventListener("input", apply);
-    q.addEventListener("change", apply);
-  });
-
-  document.querySelectorAll(".rr-return-qty").forEach(function (input) {
-    var line = input.getAttribute("data-line");
-    var clamp = function () {
-      var d = deliveredFor(line);
-      var v = parseInt(input.value, 10);
-      if (!isNaN(v) && d > 0 && v > d) input.value = d;
-    };
-    input.addEventListener("input", clamp);
-    input.addEventListener("change", clamp);
-    syncReturnMax(line);
-  });
-  // El selector de responsable aparece si alguna línea genera pendiente.
-  function refreshRespBox() {
-    var box = document.getElementById("rr_pending_resp_box");
-    if (!box) return;
-    var any = Array.prototype.some.call(
-      document.querySelectorAll(".rr-pending-flag"),
-      function (f) { return f.checked; }
-    );
-    box.style.display = any ? "block" : "none";
-  }
-
-  // Mostrar/ocultar el detalle del pendiente por línea.
-  document.querySelectorAll(".rr-pending-flag").forEach(function (flag) {
-    flag.addEventListener("change", function () {
-      var line = flag.getAttribute("data-line");
-      var box = document.querySelector('.rr-pending-box[data-line="' + line + '"]');
-      if (box) box.style.display = flag.checked ? "block" : "none";
-      refreshRespBox();
-    });
-  });
-  refreshRespBox();
-});
+  /* Solo DATOS: lo unico de esta pantalla que depende de la base y por
+     eso tiene que renderizarlo el servidor. La logica vive en
+     static/js/repair_request_detail.js. */
+  window.RRD_DATA = {};
 </script>
+<script src="{{ url_for('static', filename='js/repair_request_detail.js') }}"></script>
 {% endif %}
 {% endblock %}

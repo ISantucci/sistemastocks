@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% block title %}Contar {{ location.name }} · TNGStocks{% endblock %}
+{% block page_title %}Contar {{ location.name }}{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <h2>Contar {{ location.name }}</h2>
+    <p class="muted">
+      Escribí cuántos tenés de cada cosa. <b>Si no tenés ninguno, poné 0</b> — no dejes
+      campos vacíos. A propósito no te mostramos lo que dice el sistema: la idea es
+      contar de verdad, no copiar un número.
+      Los ítems con número de serie se cuentan eligiendo los seriales que tenés.
+    </p>
+  </div>
+  <div><a href="{{ url_for('stock_counts') }}" class="btn btn-secondary">Cancelar</a></div>
+</div>
+
+<form method="post" action="{{ url_for('stock_count_create') }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <input type="hidden" name="location_id" value="{{ location.id }}">
+
+  <div class="card">
+    <div class="card-header"><span class="card-title">1) Lo que figura a tu nombre</span></div>
+    <div class="table-scroll" style="max-height:60vh;">
+      <table class="data-table">
+        <thead>
+          <tr><th>Ítem</th><th class="num" style="width:340px;">¿Qué tenés?</th></tr>
+        </thead>
+        <tbody>
+          {% for stock, item in rows %}
+          <tr>
+            <td>
+              {{ item.code }} — {{ item.name }}
+              {% if item.unit == "metros" %}<span class="muted">(en metros)</span>{% endif %}
+              {% if item.serialized %}<span class="badge badge-neutral">con número de serie</span>{% endif %}
+            </td>
+            <td>
+              <input type="hidden" name="row_item_id[]" value="{{ item.id }}">
+              {% if item.serialized %}
+                <div class="field" style="margin:0;">
+                  <select multiple name="serial_unit_ids_{{ item.id }}"
+                          class="js-sc-serial" data-item-id="{{ item.id }}">
+                    {% for o in serial_options.get(item.id, []) %}
+                      <option value="{{ o.unit_id }}">{{ o.label }}</option>
+                    {% endfor %}
+                  </select>
+                  <div class="muted" style="font-size:12px; margin-top:4px;">
+                    Elegí los que tenés. Si tenés uno que no aparece, escribí el número
+                    de serie completo para buscarlo.
+                  </div>
+                  <label style="display:block; margin-top:6px; font-weight:normal;">
+                    <input type="checkbox" name="sin_ninguno_{{ item.id }}" value="1">
+                    No tengo ninguno
+                  </label>
+                  <label style="display:block; margin-top:4px; font-weight:normal;">
+                    Tengo <input type="number" name="sin_serial_{{ item.id }}" min="0" step="1"
+                                 value="0" style="width:70px;"> más que no aparecen en la lista
+                  </label>
+                </div>
+              {% else %}
+                <input type="number" name="contado_{{ item.id }}" min="0" step="1"
+                       inputmode="numeric" required style="width:110px;">
+              {% endif %}
+            </td>
+          </tr>
+          {% else %}
+          <tr><td colspan="2" class="muted">El sistema no te tiene nada cargado en esta camioneta. Agregá abajo lo que tengas.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><span class="card-title">2) ¿Tenés algo que no está en la lista?</span></div>
+    <p class="muted">
+      Agregalo acá. Si lo que tenés no aparece en el buscador es porque no está cargado
+      en el sistema: en ese caso escribilo en los comentarios del final.
+    </p>
+    <div id="sc-extra-lines"></div>
+    <div style="margin-top:12px;">
+      <button type="button" id="sc-add-line-btn" class="btn btn-secondary">+ Agregar ítem</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><span class="card-title">3) Comentarios</span></div>
+    <div class="field">
+      <label>Anotá acá lo que tengas y no aparezca en el sistema, o cualquier cosa que quieras aclarar</label>
+      <textarea name="comment" rows="4"
+                placeholder="Ej: tengo 2 rollos de cable que compré yo y no figuran en ningún lado"></textarea>
+    </div>
+  </div>
+
+  <div style="margin:16px 0 32px;">
+    <button type="submit" class="btn btn-primary">Terminar conteo</button>
+  </div>
+</form>
+
+<template id="sc-extra-template">
+  <div class="sc-extra-line" style="display:flex; gap:12px; align-items:flex-end; margin-bottom:10px; flex-wrap:wrap;">
+    <div class="field" style="flex:1; min-width:260px;">
+      <label>Ítem</label>
+      <select name="extra_item_id[]" class="js-sc-item">
+        <option value="" selected></option>
+      </select>
+    </div>
+    <div class="field sc-extra-qty" style="width:140px;">
+      <label>¿Cuántos? <span class="muted" style="font-weight:400;" data-unit-hint="extra_item_id[]"></span></label>
+      <input type="number" name="extra_qty[]" min="0" step="1" inputmode="numeric" value="1">
+    </div>
+    <div class="field sc-extra-serial" style="flex:1; min-width:260px; display:none;">
+      <label>Números de serie que tenés</label>
+      <select multiple class="js-sc-serial-extra"></select>
+    </div>
+    <div class="field">
+      <label>&nbsp;</label>
+      <button type="button" class="sc-remove-line-btn btn btn-danger btn-sm">X</button>
+    </div>
+  </div>
+</template>
+
+<script>
+  /* Solo DATOS: lo unico de esta pantalla que depende de la base y por
+     eso tiene que renderizarlo el servidor. La logica vive en
+     static/js/stock_count_new.js. */
+  window.SC_DATA = {
+    serialSrc: {{ url_for('api_stock_count_serials')|tojson }},
+    itemSrc: {{ url_for('api_stock_count_items')|tojson }},
+    locationId: {{ location.id|string|tojson }},
+    /* unit_id -> { serial, location, ajeno }: los seriales ya precargados. */
+    serialMeta: {
+      {% for iid, opts in serial_options.items() %}{% for o in opts %}
+      "{{ o.unit_id }}": {
+        serial: {{ o.serial|tojson }},
+        location: {{ o.location|tojson }},
+        ajeno: {{ 'true' if o.ajeno else 'false' }}
+      },
+      {% endfor %}{% endfor %}
+    }
+  };
+</script>
+<script src="{{ url_for('static', filename='js/stock_count_new.js') }}"></script>
+{% endblock %}

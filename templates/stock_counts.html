@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% from "_pagination.html" import pagination %}
+{% block title %}Conteo de camioneta · TNGStocks{% endblock %}
+{% block page_title %}Conteo de camioneta{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <h2>Conteo de camioneta</h2>
+    <p class="muted">
+      {% if me and me.role == "TECNICO" %}
+        Contá lo que tenés arriba de la camioneta. No vas a ver lo que dice el sistema:
+        escribí lo que hay de verdad. Al terminar te decimos cómo te fue, y un supervisor
+        revisa las diferencias.
+      {% else %}
+        Conteos declarados por los técnicos. Mientras no los apruebes, <b>no modifican ningún stock</b>.
+      {% endif %}
+    </p>
+  </div>
+</div>
+
+{% if me and me.role == "TECNICO" %}
+<div class="card">
+  <div class="card-header"><span class="card-title">Nuevo conteo</span></div>
+  {% if not trucks %}
+    <p class="muted">No tenés una camioneta asignada. Pedile a un supervisor que te asigne una.</p>
+  {% else %}
+    <div style="display:flex; gap:10px; flex-wrap:wrap;">
+      {% for t in trucks %}
+        {% if open_by_truck.get(t.id) %}
+          <span class="btn btn-secondary" style="opacity:.6; cursor:not-allowed;"
+                title="Ya hay un conteo esperando aprobación">
+            {{ t.name }} — esperando aprobación ({{ open_by_truck.get(t.id).number }})
+          </span>
+        {% else %}
+          <a class="btn btn-primary" href="{{ url_for('stock_count_new', location_id=t.id) }}">
+            Contar {{ t.name }}
+          </a>
+        {% endif %}
+      {% endfor %}
+    </div>
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="table-card">
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Número</th><th>Fecha</th><th>Camioneta</th><th>Técnico</th>
+          <th class="num">Renglones</th><th class="num">Puntaje</th><th>Estado</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in counts %}
+        <tr>
+          <td><a href="{{ url_for('stock_count_detail', sc_id=c.id) }}">{{ c.number }}</a></td>
+          <td>{{ c.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+          <td>{{ c.location.name if c.location else "-" }}</td>
+          <td>{{ c.created_by.full_name or c.created_by.username }}</td>
+          <td class="num">{{ c.lines_ok }}/{{ c.lines_total }}</td>
+          <td class="num">
+            {% if c.score_pct == 100 %}
+              <span class="badge badge-ok">{{ c.score_pct }}%</span>
+            {% elif c.score_pct >= 80 %}
+              <span class="badge badge-warn">{{ c.score_pct }}%</span>
+            {% else %}
+              <span class="badge badge-danger">{{ c.score_pct }}%</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if c.status == "SIN_DIFERENCIAS" %}
+              <span class="badge badge-ok">SIN DIFERENCIAS</span>
+            {% elif c.status == "APROBADO" %}
+              <span class="badge badge-ok">APROBADO</span>
+            {% elif c.status == "RECHAZADO" %}
+              <span class="badge badge-danger">RECHAZADO</span>
+            {% else %}
+              <span class="badge badge-neutral">PENDIENTE</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7" class="muted">Todavía no hay conteos.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {{ pagination(page_obj, "conteo", "conteos") }}
+</div>
+{% endblock %}

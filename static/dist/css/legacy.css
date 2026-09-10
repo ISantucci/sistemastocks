@@ -1,0 +1,1 @@
+.filter{grid-column:var(--col,1)/span var(--span,1);grid-row:var(--row,1)}.filter-item{display:flex;flex-direction:column}.filters-actions{display:flex;gap:10px;align-items:center}.muted{color:#777}.row{display:flex;gap:16px;flex-wrap:wrap}

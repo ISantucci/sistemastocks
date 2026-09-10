@@ -115,14 +115,14 @@
         <tr {% if not it.is_active %}class="row-inactive"{% endif %}>
           <td>{{ it.code }}</td>
           <td>
-            {{ it.name }}
+            {{ it.name }} {% if it.unit == "metros" %}<span class="muted" style="font-weight:400;">(en metros)</span>{% endif %}
             {% if it.serialized %}
               <button type="button" class="badge badge-ok" style="cursor:pointer;border:none;margin-left:6px;" onclick="openDetail('{{ url_for('item_units', item_id=it.id) }}')">Seriales</button>
             {% endif %}
           </td>
           <td>{{ it.category.name }}</td>
           <td>{{ "Sí" if it.trackable else "No" }}</td>
-          <td class="num">{{ "-" if it.trackable else it.stock_min }}</td>
+          <td class="num">{{ "-" if it.trackable else fmt_qty(it.stock_min, it) }}</td>
           <td>{{ it.description or "" }}</td>
           <td>{% if it.is_active %}<span class="badge badge-ok">Activo</span>{% else %}<span class="badge badge-danger">Inactivo</span>{% endif %}</td>
           {% if can_see_costs %}
@@ -167,60 +167,12 @@
   </div>
 </div>
 <script>
-  // El contenido se inserta con textContent / createElement, nunca con innerHTML
-  // sobre datos: los nombres de ítems y proveedores los escribe el usuario y no
-  // se pueden interpretar como HTML.
-  function verHistorialPrecios(itemId){
-    var body = document.getElementById('precios-body');
-    body.textContent = 'Cargando...';
-    openModal('modal-precios');
-    fetch('/costos/item/' + itemId + '/historial', {credentials:'same-origin'})
-      .then(function(r){ if(!r.ok) throw new Error('http'); return r.json(); })
-      .then(function(d){
-        body.textContent = '';
-
-        var h = document.createElement('p');
-        h.appendChild(document.createElement('strong')).textContent = d.item;
-        body.appendChild(h);
-
-        var res = document.createElement('p');
-        res.className = 'muted';
-        res.textContent = 'Promedio simple: ' + d.promedio_simple
-                        + ' · Ponderado por cantidad: ' + d.promedio_ponderado;
-        body.appendChild(res);
-
-        if(!d.ingresos.length){
-          var p = document.createElement('p');
-          p.className = 'muted';
-          p.textContent = 'Este ítem todavía no tuvo ningún ingreso con precio.';
-          body.appendChild(p);
-          return;
-        }
-
-        var tbl = document.createElement('table');
-        tbl.className = 'data-table';
-        var thead = document.createElement('thead');
-        var htr = document.createElement('tr');
-        ['Fecha','Proveedor','Cantidad','Precio unit.','Total',''].forEach(function(t){
-          var th = document.createElement('th'); th.textContent = t; htr.appendChild(th);
-        });
-        thead.appendChild(htr); tbl.appendChild(thead);
-
-        var tb = document.createElement('tbody');
-        d.ingresos.forEach(function(r){
-          var tr = document.createElement('tr');
-          [r.fecha, r.proveedor, r.cantidad, r.precio, r.total,
-           r.editado ? 'corregido' : ''].forEach(function(v){
-            var td = document.createElement('td'); td.textContent = v; tr.appendChild(td);
-          });
-          tb.appendChild(tr);
-        });
-        tbl.appendChild(tb);
-        body.appendChild(tbl);
-      })
-      .catch(function(){ body.textContent = 'No se pudo cargar el historial.'; });
-  }
+  /* Solo DATOS: lo unico de esta pantalla que depende de la base y por
+     eso tiene que renderizarlo el servidor. La logica vive en
+     static/js/items_modales.js. */
+  window.ITEMS_UI_DATA = {};
 </script>
+<script src="{{ url_for('static', filename='js/items_modales.js') }}"></script>
 {% endif %}
 
 {% if can_edit_items %}
@@ -357,47 +309,12 @@
 {% endif %}
 
 <script>
-  function updateItemCodePreview() {
-    var sel = document.getElementById('item_new_category');
-    var out = document.getElementById('item_new_code_preview');
-    if (!sel || !out) return;
-    var opt = sel.options[sel.selectedIndex];
-    var next = opt ? (opt.getAttribute('data-next') || '') : '';
-    out.value = next || '(esta categoría no tiene prefijo asignado)';
-  }
-
-  // Alta de ítem por AJAX: si falla, el error se muestra dentro del modal
-  // sin recargar la página, así no se pierde lo cargado.
-  (function () {
-    var form = document.getElementById('form-item-new');
-    var errBox = document.getElementById('item-new-error');
-    if (!form) return;
-    form.addEventListener('submit', function (e) {
-      e.preventDefault();
-      if (errBox) { errBox.style.display = 'none'; errBox.textContent = ''; }
-      var btn = form.querySelector('button[type="submit"]');
-      if (btn) btn.disabled = true;
-      fetch(form.action, {
-        method: 'POST',
-        body: new FormData(form),
-        headers: { 'X-Requested-With': 'XMLHttpRequest' },
-        credentials: 'same-origin'
-      }).then(function (r) {
-        return r.json().then(function (data) { return { ok: r.ok, data: data }; });
-      }).then(function (res) {
-        if (res.ok && res.data && res.data.ok) {
-          window.location = res.data.redirect || "{{ url_for('items') }}";
-          return;
-        }
-        if (btn) btn.disabled = false;
-        var msg = (res.data && res.data.error) || 'No se pudo crear el ítem.';
-        if (errBox) { errBox.textContent = msg; errBox.style.display = ''; }
-      }).catch(function () {
-        // Si algo falla con el fetch, caemos al envío tradicional del form.
-        if (btn) btn.disabled = false;
-        form.submit();
-      });
-    });
-  })();
+  /* Solo DATOS: lo unico de esta pantalla que depende de la base y por
+     eso tiene que renderizarlo el servidor. La logica vive en
+     static/js/items_form.js. */
+  window.ITEMS_FORM_DATA = {
+    itemsUrl: {{ url_for('items')|tojson }}
+  };
 </script>
+<script src="{{ url_for('static', filename='js/items_form.js') }}"></script>
 {% endblock %}

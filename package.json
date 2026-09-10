@@ -1,0 +1,14 @@
+{
+  "name": "sistemastocks-assets",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Build de los assets del front. NO es una app Node: el sistema sigue siendo Flask + Jinja. Esto solo minifica static/js y static/css hacia static/dist.",
+  "scripts": {
+    "build": "node scripts/build_assets.mjs",
+    "check": "node scripts/build_assets.mjs --check"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.12"
+  },
+  "_nota_esbuild": "Minimo 0.25: las versiones <=0.24.2 tienen GHSA-67mh-4wv8-2f99, una falla del DEV SERVER de esbuild (que este proyecto no usa: solo se usa la API de build). Se sube igual para que 'npm audit' quede limpio y la proxima alerta real no se pierda entre ruido. No bajar de 0.25."
+}
