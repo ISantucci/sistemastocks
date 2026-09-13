@@ -25,10 +25,14 @@ from app import (
     csrf,
     db,
     Item,
+    ItemUnit,
     Location,
     Movement,
     Stock,
     User,
+    UNIT_EN_STOCK,
+    apply_serial_units_out,
+    serial_obs,
     upsert_stock,
     next_movement_number,
 )
@@ -117,14 +121,18 @@ def _find_truck_location_by_id(location_id):
 
 
 def _find_consumable_item(code: str):
-    """Item activo y NO serializado por code exacto. None si no existe o si
-    existe pero esta inactivo o serializado (fuera de alcance, ver contrato).
+    """Item activo por code exacto (serializado o no). None si no existe o
+    esta inactivo.
+
+    Los items serializados YA se permiten aca (antes se excluian): el
+    contrato ahora es que create_consumo() exige un `unit_id` puntual para
+    ellos -- ver validacion en esa funcion.
     """
     code = (code or "").strip()
     if not code:
         return None
     item = Item.query.filter_by(code=code).first()
-    if not item or not item.is_active or item.serialized:
+    if not item or not item.is_active:
         return None
     return item
 
@@ -204,16 +212,33 @@ def location_items(location_id):
             Stock.location_id == loc.id,
             Stock.quantity > 0,
             Item.is_active.is_(True),
-            Item.serialized.is_(False),
         )
         .order_by(Item.name.asc())
         .all()
     )
 
-    items = [
-        {"code": item.code, "name": item.name, "unit": item.unit, "quantity": stock.quantity}
-        for stock, item in rows
-    ]
+    items = []
+    for stock, item in rows:
+        entry = {
+            "code": item.code,
+            "name": item.name,
+            "unit": item.unit,
+            "quantity": stock.quantity,
+            "serialized": item.serialized,
+        }
+        if item.serialized:
+            # Seriales EN_STOCK de este item, puntualmente en ESTA ubicacion
+            # (misma regla que build_units_map/resolve_serial_units_out en
+            # app.py) -- el tecnico elige uno especifico desde la ticketera.
+            unidades = (
+                ItemUnit.query
+                .filter_by(item_id=item.id, status=UNIT_EN_STOCK, location_id=loc.id)
+                .order_by(ItemUnit.serial.asc())
+                .all()
+            )
+            entry["serials"] = [{"id": u.id, "serial": u.serial} for u in unidades]
+        items.append(entry)
+
     return _ok({"location": {"id": loc.id, "name": loc.name}, "items": items})
 
 
@@ -227,6 +252,7 @@ def create_consumo():
     location_id = body.get("location_id")
     item_code = (body.get("item_code") or "").strip()
     cantidad_raw = body.get("cantidad")
+    unit_id_raw = body.get("unit_id")
     ticket_id = body.get("ticket_id")
     tecnico_legajo = body.get("tecnico_legajo")
     tecnico_nombre = body.get("tecnico_nombre")
@@ -254,16 +280,46 @@ def create_consumo():
         return _err(
             404,
             "item_not_found",
-            f"No existe un item activo y no serializado con codigo '{item_code}'",
+            f"No existe un item activo con codigo '{item_code}'",
         )
 
-    try:
-        cantidad = float(cantidad_raw)
-    except (TypeError, ValueError):
-        return _err(400, "cantidad_invalida", "cantidad debe ser numerica")
-    if cantidad <= 0 or cantidad != int(cantidad):
-        return _err(400, "cantidad_invalida", "cantidad debe ser un entero mayor a 0")
-    cantidad = int(cantidad)
+    # Items SERIALIZADOS: se consume una unidad fisica puntual, elegida por
+    # `unit_id` (no una cantidad libre). El tecnico la elige desde la
+    # ticketera entre los seriales EN_STOCK de esta misma camioneta (los que
+    # devuelve GET /locations/<id>/items). cantidad queda fijo en 1 -- nunca
+    # se confia en lo que mande el body para esto, aunque el frontend ya lo
+    # mande en 1.
+    unit = None
+    if item.serialized:
+        try:
+            unit_id = int(unit_id_raw)
+        except (TypeError, ValueError):
+            return _err(
+                400,
+                "serial_requerido",
+                "Este item es serializado: falta indicar que numero de serie se usa.",
+            )
+        unit = (
+            ItemUnit.query
+            .filter_by(id=unit_id, item_id=item.id, status=UNIT_EN_STOCK, location_id=loc.id)
+            .first()
+        )
+        if not unit:
+            return _err(
+                404,
+                "serial_invalido",
+                "El numero de serie elegido ya no esta disponible en esta camioneta "
+                "(puede que otro tecnico ya lo haya consumido). Volve a cargar los items.",
+            )
+        cantidad = 1
+    else:
+        try:
+            cantidad = float(cantidad_raw)
+        except (TypeError, ValueError):
+            return _err(400, "cantidad_invalida", "cantidad debe ser numerica")
+        if cantidad <= 0 or cantidad != int(cantidad):
+            return _err(400, "cantidad_invalida", "cantidad debe ser un entero mayor a 0")
+        cantidad = int(cantidad)
 
     # Reintento de red del otro sistema: mismo idempotency_key ya aplicado
     # antes. Se devuelve el resultado de esa vez, SIN volver a tocar stock.
@@ -310,6 +366,11 @@ def create_consumo():
             f"Consumo desde ticket #{ticket_id} (TNGTickets) - "
             f"tecnico: {tecnico_nombre or 's/d'}"
         )
+        if unit is not None:
+            # Mismo criterio que Utilizados/Movimientos: el serial va en la
+            # observacion (no hay vinculo formal ItemUnit -> Movement en
+            # ningun lugar del sistema, ver apply_serial_units_out).
+            observacion = serial_obs(observacion, [unit.serial])
         movement = Movement(
             item_id=item.id,
             qty=cantidad,
@@ -323,6 +384,11 @@ def create_consumo():
         )
         db.session.add(movement)
         db.session.flush()
+
+        if unit is not None:
+            # "Utilizado" es is_external=True -> deja la unidad en ENTREGADO
+            # (misma transicion que la pantalla Utilizados en app.py).
+            apply_serial_units_out([unit], utilizado_loc.id)
 
         registro = IntegrationConsumo(
             movement_id=movement.id,
@@ -361,6 +427,7 @@ def create_consumo():
         "item_code": item.code,
         "cantidad": cantidad,
         "location_name": loc.name,
+        "unit_serial": (unit.serial if unit is not None else None),
     })
 
 
@@ -385,6 +452,9 @@ def ticket_consumos(ticket_id):
             "location_name": loc.name,
             "tecnico_nombre": ic.tecnico_nombre,
             "created_at": ic.created_at.isoformat(),
+            # Trae el "S/N: ..." que agrega serial_obs() para items
+            # serializados (ver create_consumo) -- None/vacio para el resto.
+            "observacion": mv.observation,
         }
         for ic, mv, item, loc in rows
     ]
