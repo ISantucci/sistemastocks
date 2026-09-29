@@ -1482,12 +1482,70 @@ class PendingDelivery(db.Model):
     returned_at = db.Column(db.DateTime, nullable=True)
     returned_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
 
+    # Anulación (aditivo, nullable). Un pendiente que ya no corresponde (cargado
+    # por error, resuelto por otro lado) se ANULA: deja de ser deuda, no toca
+    # stock ni movimientos y NO se borra: queda quién, cuándo y por qué.
+    # Filas viejas quedan en NULL = no anuladas. Ver pending_open_filter().
+    cancelled_at = db.Column(db.DateTime, nullable=True)
+    cancelled_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    cancel_reason = db.Column(db.Text, nullable=True)
+
     movement = db.relationship("Movement")
     responsible_from = db.relationship("User", foreign_keys=[responsible_from_id])
     responsible_to = db.relationship("User", foreign_keys=[responsible_to_id])
     returned_by = db.relationship("User", foreign_keys=[returned_by_user_id])
+    cancelled_by = db.relationship("User", foreign_keys=[cancelled_by_user_id])
     item = db.relationship("Item", foreign_keys=[item_id])
     return_item = db.relationship("Item", foreign_keys=[return_item_id])
+
+
+class PendingReturn(db.Model):
+    """Pendiente de devolución SIN entrega.
+
+    Caso real: el técnico repara un equipo con un repuesto que YA tenía en su
+    camioneta y tiene que traer el que sacó. No hubo entrega (el repuesto ya
+    estaba en su stock), así que no hay movimiento del que colgar un
+    PendingDelivery: su movement_id es NOT NULL y sacarle eso exige reconstruir
+    la tabla. Por eso vive en una tabla propia y NUEVA: ninguna tabla existente
+    cambia y la crea sola db.create_all() al arrancar.
+
+    Generarlo NO toca stock ni crea movimientos: es sólo la deuda. El stock se
+    mueve recién al cerrarlo, con el MISMO núcleo de cierre que PendingDelivery
+    (_close_pending_stock). Igual que PendingDelivery, uno por unidad
+    (return_qty=1) para que cada unidad se cierre por separado.
+    """
+    __tablename__ = "pending_returns"
+
+    id = db.Column(db.Integer, primary_key=True)
+    created_at = db.Column(db.DateTime, default=now_ar)
+
+    # Ubicación del técnico (su camioneta): es la que se descuenta si al cerrar
+    # se elige "del stock del técnico".
+    location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), nullable=False)
+    responsible_from_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)  # quién lo generó
+    responsible_to_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)    # quién debe devolver
+    item_id = db.Column(db.Integer, db.ForeignKey("items.id"), nullable=False)              # qué debe devolver
+    return_qty = db.Column(db.Integer, nullable=False, default=1)
+    # Motivo OBLIGATORIO: sin entrega, es lo único que explica por qué debe algo.
+    comment = db.Column(db.Text, nullable=False)
+
+    returned = db.Column(db.Boolean, default=False, nullable=False)
+    returned_at = db.Column(db.DateTime, nullable=True)
+    returned_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    # Movimiento que generó el cierre: es el único movimiento de este pendiente.
+    return_movement_id = db.Column(db.Integer, db.ForeignKey("movements.id"), nullable=True)
+
+    cancelled_at = db.Column(db.DateTime, nullable=True)
+    cancelled_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    cancel_reason = db.Column(db.Text, nullable=True)
+
+    location = db.relationship("Location")
+    item = db.relationship("Item")
+    return_movement = db.relationship("Movement")
+    responsible_from = db.relationship("User", foreign_keys=[responsible_from_id])
+    responsible_to = db.relationship("User", foreign_keys=[responsible_to_id])
+    returned_by = db.relationship("User", foreign_keys=[returned_by_user_id])
+    cancelled_by = db.relationship("User", foreign_keys=[cancelled_by_user_id])
 
 # ------------------ REMITOS ------------------
 
@@ -2968,7 +3026,7 @@ def home():
         # respetando ubicaciones responsables. No usar quantity < stock_min.
         alertas_bajo = len(alert_items_distinct())
         movimientos_hoy = Movement.query.filter(Movement.created_at >= hoy).count()
-        remitos_pendientes = PendingDelivery.query.filter_by(returned=False).count()
+        remitos_pendientes = count_open_pendings()
 
         # --- KPIs adicionales (SOLO LECTURA, no tocan stock ni esquema) ---
         # "Consumo" = movimientos cuyo destino es la ubicación "Utilizado",
@@ -4249,7 +4307,10 @@ def item_delete(item_id: int):
     it = Item.query.get_or_404(item_id)
 
     n_mov = Movement.query.filter_by(item_id=it.id).count()
-    n_pend = PendingDelivery.query.filter_by(item_id=it.id).count()
+    n_pend = (
+        PendingDelivery.query.filter_by(item_id=it.id).count()
+        + PendingReturn.query.filter_by(item_id=it.id).count()
+    )
     stock_rows = Stock.query.filter_by(item_id=it.id).all()
     qty_total = sum((s.quantity or 0) for s in stock_rows)
 
@@ -5401,7 +5462,12 @@ def movement_revert(movement_id: int):
         # Pendientes abiertos: son deudas de devolución creadas por el
         # movimiento que se está anulando. Si el movimiento no existió, la
         # deuda tampoco. Los ya devueltos bloquean antes (ver blockers).
-        pendientes = PendingDelivery.query.filter_by(movement_id=m.id, returned=False).all()
+        # Los ANULADOS no se tocan: ya no eran deuda y quedan como historial.
+        pendientes = (
+            PendingDelivery.query.filter_by(movement_id=m.id)
+            .filter(pending_open_filter(PendingDelivery))
+            .all()
+        )
         for p in pendientes:
             db.session.delete(p)
         if pendientes:
@@ -6710,6 +6776,59 @@ def pending_return_units(p) -> int:
     return max(1, mov_qty // n)
 
 
+# Tope del alta de un pendiente SIN entrega. Se genera uno por unidad, así que
+# una cantidad absurda por error de tipeo llenaría la pantalla de filas.
+PENDING_RETURN_MAX_QTY = 100
+
+
+def pending_is_open(p) -> bool:
+    """Un pendiente (de cualquiera de los dos tipos) sigue siendo deuda."""
+    return not p.returned and not getattr(p, "cancelled_at", None)
+
+
+def pending_open_filter(model):
+    """Condición SQL de "pendiente abierto": ni devuelto ni ANULADO.
+
+    Antes alcanzaba con returned=False. Desde que un pendiente se puede anular,
+    ese filtro solo contaría como abiertos a los anulados. Todo lo que cuenta o
+    lista pendientes abiertos pasa por acá (badge, inicio, métricas, reversión).
+    """
+    return db.and_(model.returned == False, model.cancelled_at.is_(None))  # noqa: E712
+
+
+def count_open_pendings(responsible_to_id=None) -> int:
+    """Pendientes abiertos de los DOS tipos (con y sin entrega)."""
+    total = 0
+    for model in (PendingDelivery, PendingReturn):
+        q = model.query.filter(pending_open_filter(model))
+        if responsible_to_id is not None:
+            q = q.filter(model.responsible_to_id == responsible_to_id)
+        total += q.count()
+    return total
+
+
+def open_pendings_by_user(limit=12):
+    """[(User, abiertos)] sumando los dos tipos de pendiente, de mayor a menor."""
+    counts = {}
+    for model in (PendingDelivery, PendingReturn):
+        rows = (
+            db.session.query(model.responsible_to_id, func.count(model.id))
+            .filter(pending_open_filter(model))
+            .group_by(model.responsible_to_id)
+            .all()
+        )
+        for uid, n in rows:
+            counts[uid] = counts.get(uid, 0) + int(n)
+    if not counts:
+        return []
+    users = {u.id: u for u in User.query.filter(User.id.in_(list(counts))).all()}
+    ordered = sorted(
+        ((users[uid], n) for uid, n in counts.items() if uid in users),
+        key=lambda t: (-t[1], (t[0].full_name or t[0].username or "").lower()),
+    )
+    return ordered[:limit]
+
+
 @app.context_processor
 def inject_stock_helpers():
     return {
@@ -6767,7 +6886,8 @@ def inject_alert_badge():
 def inject_pending_badge():
     """Badge rojo de 'Pendientes' (persistente, no session).
 
-    Cuenta pendientes abiertos (returned=False). A diferencia del badge de
+    Cuenta pendientes abiertos (ni devueltos ni anulados), de los dos tipos:
+    con entrega y sin entrega. A diferencia del badge de
     Alertas, no usa 'visto/no visto': se muestra siempre que haya pendientes
     abiertos y desaparece cuando llega a 0.
 
@@ -6780,11 +6900,9 @@ def inject_pending_badge():
         if current_user.is_authenticated:
             role = current_user.role
             if role == "TECNICO":
-                count = PendingDelivery.query.filter_by(
-                    returned=False, responsible_to_id=current_user.id
-                ).count()
+                count = count_open_pendings(responsible_to_id=current_user.id)
             elif role in ("ADMIN", "SUPERVISOR"):
-                count = PendingDelivery.query.filter_by(returned=False).count()
+                count = count_open_pendings()
     except Exception:
         count = 0
     return {"pending_badge_count": count}
@@ -6928,6 +7046,345 @@ def user_password(user_id):
 
     return render_template("edit_user_password.html", u=u)
 
+class PendingCloseError(Exception):
+    """Corta el cierre de un pendiente con un mensaje para el usuario.
+
+    Se lanza SOLO en validaciones previas a tocar stock (ubicación reservada
+    inexistente, serial inválido), igual que los redirect que reemplaza.
+    """
+
+
+def _resolve_returned_by(location_id, responsible_to_id, raw_value):
+    """Quién trae la devolución. Devuelve (user_id, error).
+
+    Por defecto, la persona a la que quedó el pendiente; se puede elegir otro
+    responsable de la ubicación donde está la mercadería (dos técnicos en la
+    misma camioneta). Solo se registra: no cambia stock.
+    """
+    candidate_ids = {u.id for u in location_responsible_users(location_id)}
+    candidate_ids.add(responsible_to_id)
+    raw = (raw_value or "").strip()
+    if raw.isdigit() and int(raw) in candidate_ids:
+        return int(raw), None
+    if raw.isdigit():
+        return None, (
+            "Quien devuelve tiene que ser el responsable del pendiente o un "
+            "responsable de la ubicación donde estaba la mercadería."
+        )
+    return responsible_to_id, None
+
+
+def _close_pending_stock(*, ref, item_id, qty, holder_location_id,
+                         return_to_location_id, is_swap, return_action,
+                         scrap_reason, return_origin, return_observation, form,
+                         repair_pending_id=None):
+    """Núcleo del cierre de un pendiente: mueve el stock y deja el registro.
+
+    Lo usan LOS DOS tipos de pendiente, para que el circuito que toca stock sea
+    uno solo y no dos copias que con el tiempo se desalinean:
+
+      - PendingDelivery (con entrega): holder = destino del movimiento original;
+        "Devolver" vuelve al origen de ese movimiento (la Jaula si es swap).
+      - PendingReturn (sin entrega): holder = la ubicación del técnico;
+        "Devolver" entra a la Jaula.
+
+    return_to_location_id=None significa Jaula TNG. return_origin ya viene
+    validado ('stock' | 'campo'). NO commitea: quien llama marca el pendiente
+    como devuelto y hace el commit en la misma transacción. Devuelve el Movement.
+
+    El cuerpo es el que tenía la ruta; lo único que cambió es de dónde salen
+    las ubicaciones (parámetros en vez de leerlas del movimiento original).
+    """
+    #   stock -> sale de la ubicación donde quedó la mercadería (descuenta)
+    #   campo -> entra por 'Recuperado' (externa): NO descuenta
+    if return_origin == "campo":
+        recuperado = Location.query.filter_by(name=LOCATION_RECUPERADO).first()
+        if not recuperado:
+            raise PendingCloseError("Ubicación 'Recuperado' no existe.")
+        from_id = recuperado.id
+    else:
+        from_id = holder_location_id
+
+    if return_action == "scrap":
+        descartes_loc = Location.query.filter_by(name="Descartes").first()
+        if not descartes_loc:
+            raise PendingCloseError("Ubicación 'Descartes' no existe.")
+        to_id = descartes_loc.id
+    elif return_action == "repair":
+        repair_loc = Location.query.filter_by(name=LOCATION_EN_REPARACION).first()
+        if not repair_loc:
+            raise PendingCloseError("Ubicación 'En reparación' no existe.")
+        to_id = repair_loc.id
+    elif return_to_location_id is None:
+        jaula = Location.query.filter_by(name=LOCATION_JAULA_TNG).first()
+        if not jaula:
+            raise PendingCloseError("Ubicación 'Jaula TNG' no existe.")
+        to_id = jaula.id
+    else:
+        to_id = return_to_location_id
+
+    # SERIALIZADOS: misma regla que el resto del sistema. Origen interno -> se
+    # ELIGE cuál sale; origen externo -> se CARGA el serial que entra.
+    _ret_item = Item.query.get(item_id)
+    serial_units = []
+    if _ret_item and _ret_item.serialized:
+        if location_is_external(from_id):
+            serial_units, _serr = resolve_serial_units_in(
+                item_id, form.getlist("unit_serial"), qty
+            )
+        else:
+            serial_units, _serr = resolve_serial_units_out(
+                item_id, from_id, qty, form
+            )
+        if _serr:
+            raise PendingCloseError(_serr)
+
+    if not location_is_external(from_id):
+        upsert_stock(item_id, from_id, -qty)
+    if not location_is_external(to_id):
+        upsert_stock(item_id, to_id, qty)
+
+    if return_action == "scrap":
+        obs = return_observation or f"Scrap ({scrap_reason}) de {ref}"
+    elif return_action == "repair":
+        obs = return_observation or f"A reparación de {ref}"
+    else:
+        obs = return_observation or f"Devolucion de {ref}"
+    if is_swap:
+        obs = f"[Devolución distinta] {obs}"
+    if return_origin == "campo" and not is_swap:
+        # Que el historial diga que no salió del stock del técnico: sin esto,
+        # un cierre que no descuenta parece un cierre normal.
+        obs = f"[Recuperado en campo] {obs}"
+    # El serial va a la observación del movimiento, igual que en el resto del
+    # sistema (no hay historial por serial: ver 03_Estado_Actual).
+    obs = serial_obs(obs, apply_serial_units_out(serial_units, to_id)) if serial_units else obs
+
+    y, seq, number = next_movement_number()
+    m = Movement(
+        item_id=item_id,
+        qty=qty,
+        from_location_id=from_id,
+        to_location_id=to_id,
+        user_id=current_user.id,
+        observation=obs,
+        year=y,
+        seq=seq,
+        number=number,
+    )
+    db.session.add(m)
+
+    if return_action == "scrap":
+        db.session.add(Scrap(
+            item_id=item_id,
+            location_id=from_id,
+            quantity=qty,
+            reason=scrap_reason,
+            user_id=current_user.id,
+            source="PENDIENTE",
+        ))
+    elif return_action == "repair":
+        db.session.add(Repair(
+            item_id=item_id,
+            quantity=qty,
+            status="EN_REPARACION",
+            pending_id=repair_pending_id,
+            source_location_id=from_id,
+            created_by_user_id=current_user.id,
+        ))
+    return m
+
+
+def _pending_return_create():
+    """Alta de un pendiente de devolución SIN entrega (ADMIN/SUPERVISOR).
+
+    NO toca stock ni crea movimientos: registra la deuda. Uno por unidad.
+    La autorización la hace la ruta antes de llegar acá (el TÉCNICO no puede
+    hacer POST en /pending-deliveries y el LECTOR no entra a la ruta).
+    """
+    back = redirect(url_for("pending_deliveries"))
+    holder_raw = (request.form.get("holder") or "").strip()   # "<location_id>:<user_id>"
+    item_raw = (request.form.get("item_id") or "").strip()
+    qty_raw = (request.form.get("qty") or "").strip()
+    comment = (request.form.get("comment") or "").strip()
+
+    loc_raw, _, user_raw = holder_raw.partition(":")
+    if not loc_raw.isdigit():
+        flash("Elegí quién tiene que devolver.", "error")
+        return back
+    loc = Location.query.get(int(loc_raw))
+    if not loc:
+        flash("Ubicación inválida.", "error")
+        return back
+    if loc.is_external:
+        # "Del stock del técnico" descontaría de una ubicación externa, que no
+        # lleva stock: el pendiente sería imposible de cerrar por esa vía.
+        flash("La ubicación tiene que ser interna (la camioneta del técnico).", "error")
+        return back
+    # Mismo criterio que al generar un pendiente desde Movimientos: tiene que
+    # ser responsable de ESA ubicación (validado acá, no solo en el select).
+    responsible_id, err = resolve_pending_responsible(loc.id, user_raw)
+    if err:
+        flash(err, "error")
+        return back
+
+    if not item_raw.isdigit():
+        flash("Elegí el ítem que tiene que devolver.", "error")
+        return back
+    it = Item.query.get(int(item_raw))
+    if not it or not it.is_active:
+        flash("Ítem inválido o inactivo.", "error")
+        return back
+
+    if not qty_raw.isdigit() or not (1 <= int(qty_raw) <= PENDING_RETURN_MAX_QTY):
+        flash(
+            f"Cantidad inválida: tiene que ser un número entero entre 1 y {PENDING_RETURN_MAX_QTY}.",
+            "error",
+        )
+        return back
+    qty = int(qty_raw)
+
+    if not comment:
+        flash("El motivo es obligatorio: sin entrega, es lo único que explica por qué tiene que devolverlo.", "error")
+        return back
+
+    try:
+        for _ in range(qty):
+            db.session.add(PendingReturn(
+                location_id=loc.id,
+                responsible_from_id=current_user.id,
+                responsible_to_id=responsible_id,
+                item_id=it.id,
+                return_qty=1,
+                comment=comment,
+                returned=False,
+            ))
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        flash(f"No se pudo generar el pendiente: {e}", "error")
+        return back
+
+    u = User.query.get(responsible_id)
+    flash(
+        f"Pendiente de devolución generado: {qty} x {it.code} a nombre de "
+        f"{(u.full_name or u.username) if u else '—'}. No se movió stock.",
+        "ok",
+    )
+    return back
+
+
+def _pending_cancel(kind):
+    """Anula un pendiente abierto, de cualquiera de los dos tipos.
+
+    No toca stock ni movimientos y NO borra: queda como Anulado con quién,
+    cuándo y por qué. Un pendiente ya devuelto no se anula (su devolución ya
+    movió stock; eso se corrige con un movimiento inverso, no anulando).
+    """
+    back = redirect(url_for("pending_deliveries"))
+    if kind not in ("delivery", "return"):
+        flash("Pendiente invalido.", "error")
+        return back
+    model = PendingReturn if kind == "return" else PendingDelivery
+    pid = (request.form.get("pending_id") or "").strip()
+    reason = (request.form.get("cancel_reason") or "").strip()
+
+    if not pid.isdigit():
+        flash("Pendiente invalido.", "error")
+        return back
+    p = model.query.get(int(pid))
+    if not p:
+        flash("Pendiente no encontrado.", "error")
+        return back
+    if p.returned:
+        flash("Ese pendiente ya fue devuelto: no se puede anular.", "error")
+        return back
+    if p.cancelled_at:
+        flash("Ese pendiente ya estaba anulado.", "ok")
+        return back
+    if not reason:
+        flash("Motivo de anulación obligatorio.", "error")
+        return back
+
+    p.cancelled_at = now_ar()
+    p.cancelled_by_user_id = current_user.id
+    p.cancel_reason = reason
+    db.session.commit()
+    flash("Pendiente anulado. No se movió stock.", "ok")
+    return back
+
+
+def _pending_return_close():
+    """Cierre de un pendiente SIN entrega, con el mismo núcleo que el resto."""
+    back = redirect(url_for("pending_deliveries"))
+    pid = (request.form.get("pending_id") or "").strip()
+    return_observation = (request.form.get("return_observation") or "").strip()
+
+    if not pid.isdigit():
+        flash("Pendiente invalido.", "error")
+        return back
+    p = PendingReturn.query.get(int(pid))
+    if not p:
+        flash("Pendiente no encontrado.", "error")
+        return back
+    if p.returned:
+        flash("Ese pendiente ya estaba marcado como devuelto.", "ok")
+        return back
+    if p.cancelled_at:
+        flash("Ese pendiente está anulado: no se puede cerrar.", "error")
+        return back
+
+    return_action = request.form.get("return_action", "return")
+    scrap_reason = request.form.get("scrap_reason", "").strip()
+    if return_action == "scrap" and not scrap_reason:
+        flash("Motivo de descarte obligatorio.", "error")
+        return back
+
+    returned_by_id, rb_err = _resolve_returned_by(
+        p.location_id, p.responsible_to_id, request.form.get("returned_by_user_id")
+    )
+    if rb_err:
+        flash(rb_err, "error")
+        return back
+
+    # Sin entrega, el caso típico es el repuesto SACADO DEL EQUIPO: nunca estuvo
+    # en la camioneta, así que el default es "recuperado del equipo" (no
+    # descuenta). Si lo que vuelve sí está en su stock, se elige "stock".
+    return_origin = (request.form.get("return_origin") or "").strip()
+    if return_origin not in ("stock", "campo"):
+        return_origin = "campo"
+
+    try:
+        m = _close_pending_stock(
+            ref=f"pendiente sin entrega #{p.id}",
+            item_id=p.item_id,
+            qty=pending_return_units(p),
+            holder_location_id=p.location_id,
+            return_to_location_id=None,   # "Devolver" entra a la Jaula
+            is_swap=False,
+            return_action=return_action,
+            scrap_reason=scrap_reason,
+            return_origin=return_origin,
+            return_observation=return_observation,
+            form=request.form,
+            repair_pending_id=None,       # repairs.pending_id apunta a pending_deliveries
+        )
+        p.returned = True
+        p.returned_at = now_ar()
+        p.returned_by_user_id = returned_by_id
+        p.return_movement = m
+        db.session.commit()
+        accion = {"scrap": "Scrap", "repair": "Reparación"}.get(return_action, "Devuelto")
+        flash(f"Pendiente cerrado ({m.number}). Acción: {accion}.", "ok")
+    except PendingCloseError as e:
+        db.session.rollback()
+        flash(str(e), "error")
+    except Exception as e:
+        db.session.rollback()
+        flash(f"No se pudo cerrar el pendiente: {e}", "error")
+    return back
+
+
 @app.route("/pending-deliveries", methods=["GET", "POST"])
 @login_required
 @role_required("ADMIN", "SUPERVISOR", "TECNICO")
@@ -6938,6 +7395,22 @@ def pending_deliveries():
         if current_user.role == "TECNICO":
             flash("No tenés permisos para cerrar pendientes.", "error")
             return redirect(url_for("pending_deliveries"))
+
+        # Qué se pide y sobre qué tabla. Sin 'action' es un cierre, que es lo
+        # que siempre mandaron estos formularios (compatibilidad). 'pending_kind'
+        # distingue los pendientes con entrega de los que no la tuvieron.
+        action = (request.form.get("action") or "close").strip()
+        kind = (request.form.get("pending_kind") or "delivery").strip()
+        if action == "create_return":
+            return _pending_return_create()
+        if action == "cancel":
+            return _pending_cancel(kind)
+        if action != "close" or kind not in ("delivery", "return"):
+            flash("Acción inválida.", "error")
+            return redirect(url_for("pending_deliveries"))
+        if kind == "return":
+            return _pending_return_close()
+
         pid = request.form.get("pending_id", "").strip()
         return_observation = request.form.get("return_observation", "").strip()
 
@@ -6954,6 +7427,10 @@ def pending_deliveries():
             flash("Ese pendiente ya estaba marcado como devuelto.", "ok")
             return redirect(url_for("pending_deliveries"))
 
+        if p.cancelled_at:
+            flash("Ese pendiente está anulado: no se puede cerrar.", "error")
+            return redirect(url_for("pending_deliveries"))
+
         original_movement = p.movement
         if not original_movement:
             flash("El pendiente no tiene movimiento origen asociado.", "error")
@@ -6968,25 +7445,15 @@ def pending_deliveries():
             flash("Motivo de descarte obligatorio.", "error")
             return redirect(url_for("pending_deliveries"))
 
-        # Quién trae la devolución. Por defecto, la persona a la que se le
-        # entregó; se puede elegir otro responsable de la misma ubicación (dos
-        # técnicos en la misma camioneta). Solo se registra: no cambia stock.
-        returned_by_candidates = location_responsible_users(
-            original_movement.to_location_id if original_movement else None
+        # Quién trae la devolución: el responsable del pendiente o un
+        # responsable de la ubicación donde quedó la mercadería.
+        returned_by_id, rb_err = _resolve_returned_by(
+            original_movement.to_location_id, p.responsible_to_id,
+            request.form.get("returned_by_user_id"),
         )
-        candidate_ids = {u.id for u in returned_by_candidates}
-        candidate_ids.add(p.responsible_to_id)
-        rb_raw = (request.form.get("returned_by_user_id") or "").strip()
-        if rb_raw.isdigit() and int(rb_raw) in candidate_ids:
-            returned_by_id = int(rb_raw)
-        elif rb_raw.isdigit():
-            flash(
-                "Quien devuelve tiene que ser el responsable del pendiente o un "
-                "responsable de la ubicación donde estaba la mercadería.", "error",
-            )
+        if rb_err:
+            flash(rb_err, "error")
             return redirect(url_for("pending_deliveries"))
-        else:
-            returned_by_id = p.responsible_to_id
 
         try:
             # Cantidad e item que efectivamente vuelven (defaults = lo entregado).
@@ -7000,8 +7467,6 @@ def pending_deliveries():
             # (consumiéndolo de su camioneta) y que traiga el viejo SACADO DEL
             # EQUIPO. Ese que vuelve nunca estuvo en el stock de la camioneta, y
             # descontarlo de ahí hacía fallar el cierre por "stock insuficiente".
-            #   stock -> sale de la ubicación donde quedó la mercadería (descuenta)
-            #   campo -> entra por 'Recuperado' (externa): NO descuenta
             # El default reproduce exactamente el comportamiento anterior: el swap
             # siempre entraba por Recuperado, el mismo ítem siempre salía de la
             # camioneta. Lo nuevo se activa eligiéndolo, no por sorpresa.
@@ -7010,112 +7475,21 @@ def pending_deliveries():
             if return_origin not in ("stock", "campo"):
                 return_origin = origen_default
 
-            if return_origin == "campo":
-                recuperado = Location.query.filter_by(name=LOCATION_RECUPERADO).first()
-                if not recuperado:
-                    flash("Ubicación 'Recuperado' no existe.", "error")
-                    return redirect(url_for("pending_deliveries"))
-                from_id = recuperado.id
-            else:
-                from_id = original_movement.to_location_id
-
-            if return_action == "scrap":
-                descartes_loc = Location.query.filter_by(name="Descartes").first()
-                if not descartes_loc:
-                    flash("Ubicación 'Descartes' no existe.", "error")
-                    return redirect(url_for("pending_deliveries"))
-                to_id = descartes_loc.id
-            elif return_action == "repair":
-                repair_loc = Location.query.filter_by(name=LOCATION_EN_REPARACION).first()
-                if not repair_loc:
-                    flash("Ubicación 'En reparación' no existe.", "error")
-                    return redirect(url_for("pending_deliveries"))
-                to_id = repair_loc.id
-            else:
-                # Devolver / Ingresar OK: mismo item vuelve a su origen; swap entra a Jaula.
-                if is_swap:
-                    jaula = Location.query.filter_by(name=LOCATION_JAULA_TNG).first()
-                    if not jaula:
-                        flash("Ubicación 'Jaula TNG' no existe.", "error")
-                        return redirect(url_for("pending_deliveries"))
-                    to_id = jaula.id
-                else:
-                    to_id = original_movement.from_location_id
-
-            # SERIALIZADOS. Antes esta pantalla los rechazaba de plano, y como es
-            # el único lugar que cierra un pendiente, un pendiente de ítem
-            # serializado no se podía cerrar NUNCA: quedaba abierto para siempre.
-            # Ahora se resuelve acá, con la misma regla que el resto del sistema:
-            # origen interno -> se ELIGE cuál sale; origen externo -> se CARGA el
-            # serial que entra.
-            _ret_item = Item.query.get(returns_item_id)
-            serial_units = []
-            if _ret_item and _ret_item.serialized:
-                if location_is_external(from_id):
-                    serial_units, _serr = resolve_serial_units_in(
-                        returns_item_id, request.form.getlist("unit_serial"), qty
-                    )
-                else:
-                    serial_units, _serr = resolve_serial_units_out(
-                        returns_item_id, from_id, qty, request.form
-                    )
-                if _serr:
-                    flash(_serr, "error")
-                    return redirect(url_for("pending_deliveries"))
-
-            if not location_is_external(from_id):
-                upsert_stock(returns_item_id, from_id, -qty)
-            if not location_is_external(to_id):
-                upsert_stock(returns_item_id, to_id, qty)
-
-            if return_action == "scrap":
-                obs = return_observation or f"Scrap ({scrap_reason}) de pendiente #{p.id}"
-            elif return_action == "repair":
-                obs = return_observation or f"A reparación de pendiente #{p.id}"
-            else:
-                obs = return_observation or f"Devolucion de pendiente #{p.id}"
-            if is_swap:
-                obs = f"[Devolución distinta] {obs}"
-            if return_origin == "campo" and not is_swap:
-                # Que el historial diga que no salió del stock del técnico: sin
-                # esto, un cierre que no descuenta parece un cierre normal.
-                obs = f"[Recuperado en campo] {obs}"
-            # El serial va a la observación del movimiento, igual que en el resto
-            # del sistema (no hay historial por serial: ver 03_Estado_Actual).
-            obs = serial_obs(obs, apply_serial_units_out(serial_units, to_id)) if serial_units else obs
-
-            y, seq, number = next_movement_number()
-            m = Movement(
+            m = _close_pending_stock(
+                ref=f"pendiente #{p.id}",
                 item_id=returns_item_id,
                 qty=qty,
-                from_location_id=from_id,
-                to_location_id=to_id,
-                user_id=current_user.id,
-                observation=obs,
-                year=y,
-                seq=seq,
-                number=number,
+                holder_location_id=original_movement.to_location_id,
+                # Devolver: el mismo ítem vuelve a su origen; el swap entra a la Jaula.
+                return_to_location_id=None if is_swap else original_movement.from_location_id,
+                is_swap=is_swap,
+                return_action=return_action,
+                scrap_reason=scrap_reason,
+                return_origin=return_origin,
+                return_observation=return_observation,
+                form=request.form,
+                repair_pending_id=p.id,
             )
-            db.session.add(m)
-
-            if return_action == "scrap":
-                db.session.add(Scrap(
-                    item_id=returns_item_id,
-                    location_id=from_id,
-                    quantity=qty,
-                    reason=scrap_reason,
-                    user_id=current_user.id,
-                    source="PENDIENTE",
-                ))
-            elif return_action == "repair":
-                db.session.add(Repair(
-                    item_id=returns_item_id,
-                    quantity=qty,
-                    status="EN_REPARACION",
-                    pending_id=p.id,
-                    source_location_id=from_id,
-                    created_by_user_id=current_user.id,
-                ))
 
             p.returned = True
             p.returned_at = now_ar()
@@ -7127,8 +7501,11 @@ def pending_deliveries():
                 p.return_qty = qty
             db.session.commit()
             accion = {"scrap": "Scrap", "repair": "Reparación"}.get(return_action, "Devuelto")
-            flash(f"Pendiente cerrado ({number}). Acción: {accion}.", "ok")
+            flash(f"Pendiente cerrado ({m.number}). Acción: {accion}.", "ok")
 
+        except PendingCloseError as e:
+            db.session.rollback()
+            flash(str(e), "error")
         except Exception as e:
             db.session.rollback()
             flash(f"No se pudo cerrar el pendiente: {e}", "error")
@@ -7193,9 +7570,11 @@ def pending_deliveries():
     else:
         f_to_user = ""
     if f_status == "PENDIENTE":
-        pendings_q = pendings_q.filter(PendingDelivery.returned == False)  # noqa: E712
+        pendings_q = pendings_q.filter(pending_open_filter(PendingDelivery))
     elif f_status == "DEVUELTO":
         pendings_q = pendings_q.filter(PendingDelivery.returned == True)  # noqa: E712
+    elif f_status == "ANULADO":
+        pendings_q = pendings_q.filter(PendingDelivery.cancelled_at.isnot(None))
     else:
         f_status = ""
 
@@ -7210,6 +7589,45 @@ def pending_deliveries():
     pendings_page = paginate(pendings_q.order_by(_col.desc() if sort_dir == "desc" else _col.asc()))
     pendings = pendings_page.items
 
+    # --- Pendientes SIN entrega (tabla propia). Mismo alcance del TÉCNICO
+    #     (siempre, abajo se suman los filtros) y mismos filtros de la pantalla.
+    #     Paginación aparte (?rpage=) para no pisar la del listado principal.
+    returns_q = PendingReturn.query
+    if current_user.role == "TECNICO":
+        returns_q = returns_q.filter(PendingReturn.responsible_to_id == current_user.id)
+    if f_date_from:
+        _d = _parse_date_arg(f_date_from)
+        returns_q = returns_q.filter(
+            PendingReturn.created_at >= datetime(_d.year, _d.month, _d.day)
+        )
+    if f_date_to:
+        _d = _parse_date_arg(f_date_to)
+        returns_q = returns_q.filter(
+            PendingReturn.created_at <= datetime(_d.year, _d.month, _d.day, 23, 59, 59)
+        )
+    if f_item:
+        returns_q = returns_q.filter(PendingReturn.item_id == int(f_item))
+    if f_from_user:
+        returns_q = returns_q.filter(PendingReturn.responsible_from_id == int(f_from_user))
+    if f_to_user:
+        returns_q = returns_q.filter(PendingReturn.responsible_to_id == int(f_to_user))
+    if f_status == "PENDIENTE":
+        returns_q = returns_q.filter(pending_open_filter(PendingReturn))
+    elif f_status == "DEVUELTO":
+        returns_q = returns_q.filter(PendingReturn.returned == True)  # noqa: E712
+    elif f_status == "ANULADO":
+        returns_q = returns_q.filter(PendingReturn.cancelled_at.isnot(None))
+    if sort_by == "item":
+        returns_q = returns_q.join(Item, Item.id == PendingReturn.item_id)
+        _rcol = Item.code
+    else:
+        _rcol = PendingReturn.created_at
+    returns_page = paginate(
+        returns_q.order_by(_rcol.desc() if sort_dir == "desc" else _rcol.asc()),
+        page=page_from_request("rpage"),
+    )
+    returns = returns_page.items
+
     # Opciones de los selectores. Para el TECNICO se acotan a lo que aparece en
     # SUS pendientes: no tiene por qué ver el catálogo completo ni la lista de
     # usuarios del sistema desde esta pantalla. El filtro "Recibe" directamente
@@ -7222,6 +7640,11 @@ def pending_deliveries():
             p.return_item_id for p in _scope if p.return_item_id
         }
         _user_ids = {p.responsible_from_id for p in _scope}
+        _rscope = PendingReturn.query.filter(
+            PendingReturn.responsible_to_id == current_user.id
+        ).all()
+        _item_ids |= {r.item_id for r in _rscope}
+        _user_ids |= {r.responsible_from_id for r in _rscope}
         items_list = (
             Item.query.filter(Item.id.in_(_item_ids)).order_by(Item.code).all()
             if _item_ids else []
@@ -7268,9 +7691,52 @@ def pending_deliveries():
             .all()
         ]
 
+    # Lo mismo para los pendientes sin entrega: la mercadería está (o no) en la
+    # ubicación del técnico, no en el destino de un movimiento.
+    return_returner_options = {}
+    return_units = {}
+    for _r in returns:
+        _opts = []
+        _seen = set()
+        for _u in location_responsible_users(_r.location_id):
+            _opts.append(_u)
+            _seen.add(_u.id)
+        if _r.responsible_to and _r.responsible_to.id not in _seen:
+            _opts.insert(0, _r.responsible_to)
+        return_returner_options[_r.id] = _opts
+        if pending_is_open(_r) and _r.item and _r.item.serialized:
+            return_units[_r.id] = [
+                {"id": _u.id, "serial": _u.serial}
+                for _u in units_in_stock_query(_r.item_id, _r.location_id)
+                .order_by(ItemUnit.created_at, ItemUnit.id)
+                .all()
+            ]
+
+    # Formulario "Nuevo pendiente de devolución" (solo ADMIN/SUPERVISOR). Se
+    # elige la pareja responsable + ubicación en un solo selector; el backend
+    # la vuelve a validar con resolve_pending_responsible().
+    holder_options = []
+    create_items = []
+    if current_user.role in ("ADMIN", "SUPERVISOR"):
+        for _loc in Location.query.filter_by(is_external=False).order_by(Location.name).all():
+            for _u in location_responsible_users(_loc.id):
+                holder_options.append({
+                    "value": f"{_loc.id}:{_u.id}",
+                    "label": f"{_u.full_name or _u.username} — {_loc.name}",
+                })
+        holder_options.sort(key=lambda h: h["label"].lower())
+        create_items = Item.query.filter_by(is_active=True).order_by(Item.code).all()
+
     return render_template(
         "pending_deliveries.html",
         pendings=pendings,
+        returns=returns,
+        returns_page=returns_page,
+        return_returner_options=return_returner_options,
+        return_units=return_units,
+        holder_options=holder_options,
+        create_items=create_items,
+        pending_return_max=PENDING_RETURN_MAX_QTY,
         returner_options=returner_options,
         pending_units=pending_units,
         page_obj=pendings_page,
@@ -7512,6 +7978,7 @@ def admin_clear_stock():
         return redirect(url_for("admin_panel"))
 
     try:
+        PendingReturn.query.delete()
         PendingDelivery.query.delete()
         RemitoLine.query.delete()
         Remito.query.delete()
@@ -7556,6 +8023,7 @@ def admin_clear_items():
         return redirect(url_for("admin_panel"))
 
     try:
+        PendingReturn.query.delete()
         PendingDelivery.query.delete()
         RemitoLine.query.delete()
         Remito.query.delete()
@@ -10095,7 +10563,7 @@ def _mx_snapshot():
         alertas = len(alert_items_distinct())
     except Exception:
         alertas = 0
-    pendientes = PendingDelivery.query.filter_by(returned=False).count()
+    pendientes = count_open_pendings()
     reparando = Repair.query.filter_by(status="EN_REPARACION").count()
     items_activos = Item.query.filter_by(is_active=True).count()
     return {
@@ -10509,12 +10977,8 @@ def metricas_camionetas():
     )
 
     # Pendientes abiertos por responsable (destino)
-    prows = (
-        db.session.query(User, func.count(PendingDelivery.id))
-        .join(PendingDelivery, PendingDelivery.responsible_to_id == User.id)
-        .filter(PendingDelivery.returned == False)
-        .group_by(User.id).order_by(func.count(PendingDelivery.id).desc()).limit(12).all()
-    )
+    # Suma los dos tipos de pendiente (con y sin entrega); los anulados no cuentan.
+    prows = open_pendings_by_user(limit=12)
     pend_rows = _mx_rows([((u.full_name or u.username), c) for u, c in prows], tone="warn")
 
     return render_template(
@@ -10673,8 +11137,13 @@ def metricas_reparaciones():
     prom_dias = round(sum(difs) / len(difs), 1) if difs else 0
 
     # Pendientes (foto actual)
-    pend_abiertos = PendingDelivery.query.filter_by(returned=False).count()
-    pend_total = PendingDelivery.query.count()
+    pend_abiertos = count_open_pendings()
+    # Los anulados no entran en la tasa: no fueron deuda real (ni se devolvieron
+    # ni siguen pendientes). Contarlos la movería sin que nadie haya devuelto nada.
+    pend_total = (
+        PendingDelivery.query.filter(PendingDelivery.cancelled_at.is_(None)).count()
+        + PendingReturn.query.filter(PendingReturn.cancelled_at.is_(None)).count()
+    )
     tasa_dev = round(((pend_total - pend_abiertos) / pend_total * 100), 1) if pend_total else 0
 
     cards = [
@@ -10698,12 +11167,8 @@ def metricas_reparaciones():
     by_item = _mx_rows([(f"{it.code} · {it.name}", c) for it, c in irows], tone="warn")
 
     # Pendientes abiertos por responsable
-    prows = (
-        db.session.query(User, func.count(PendingDelivery.id))
-        .join(PendingDelivery, PendingDelivery.responsible_to_id == User.id)
-        .filter(PendingDelivery.returned == False)
-        .group_by(User.id).order_by(func.count(PendingDelivery.id).desc()).limit(12).all()
-    )
+    # Suma los dos tipos de pendiente (con y sin entrega); los anulados no cuentan.
+    prows = open_pendings_by_user(limit=12)
     pend_by_user = _mx_rows([((u.full_name or u.username), c) for u, c in prows], tone="danger")
 
     estado_labels = ["Abiertas", "Reparadas", "Descartadas"]
