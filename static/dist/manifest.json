@@ -6,7 +6,7 @@
     "fuentes actuales: si alguien edita el fuente y no corre 'npm run build',",
     "el test falla. Sin eso, produccion serviria la version vieja en silencio."
   ],
-  "generado": "2026-09-10T15:09:18.351Z",
+  "generado": "2026-09-29T18:18:19.858Z",
   "fuentes": {
     "css/app.css": "b6fbe4d34a8d",
     "css/legacy.css": "b0da420aaf8a",
@@ -24,6 +24,7 @@
     "js/movements.js": "f0bc849eec27",
     "js/movements_bulk.js": "f2f9b9747397",
     "js/movements_pendiente.js": "81f9fa6ccb83",
+    "js/pending_deliveries.js": "7cc76c330011",
     "js/remitos.js": "7f66feb6b4a2",
     "js/repair_request_detail.js": "e23af98cff66",
     "js/repair_requests.js": "6658e6550b68",

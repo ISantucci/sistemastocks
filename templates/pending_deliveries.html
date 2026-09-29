@@ -3,10 +3,137 @@
 {% block title %}Pendientes · TNGStocks{% endblock %}
 {% block page_title %}Pendientes de entrega{% endblock %}
 {% block content %}
-<div class="page-header"><div><h2>Pendientes de entrega</h2><p>Entregas sin devolución confirmada.</p></div></div>
+
+{# ------------------------------------------------------------------------
+   Macros compartidos por los DOS listados (con entrega y sin entrega). El
+   cierre tiene un solo formulario igual que tiene un solo núcleo en el backend
+   (_close_pending_stock): dos copias terminan desalineándose.
+   La lógica de mostrar/ocultar vive en static/js/pending_deliveries.js y se
+   engancha por clases (.pending-action, .js-scrap-opts, .js-ser-*), no por id:
+   en esta pantalla hay dos tablas y los ids de fila se repiten entre ellas.
+   ------------------------------------------------------------------------ #}
+
+{% macro status_badge(p) -%}
+  {% if p.cancelled_at %}
+    <span class="badge badge-neutral">Anulado</span>
+  {% elif p.returned %}
+    <span class="badge badge-ok">Devuelto</span>
+  {% else %}
+    <span class="badge badge-warn">Pendiente</span>
+  {% endif %}
+{%- endmacro %}
+
+{% macro closed_by(p) -%}
+  {% if p.cancelled_at %}
+    Anulado por {{ (p.cancelled_by.full_name or p.cancelled_by.username) if p.cancelled_by else "—" }}
+    <div class="muted" style="font-size:12px;">{{ p.cancelled_at.strftime("%Y-%m-%d %H:%M") }}</div>
+    {% if p.cancel_reason %}<div class="muted" style="font-size:12px;">Motivo: {{ p.cancel_reason }}</div>{% endif %}
+  {% elif p.returned %}
+    {{ (p.returned_by.full_name or p.returned_by.username) if p.returned_by else "—" }}
+    {% if p.returned_at %}<div class="muted" style="font-size:12px;">{{ p.returned_at.strftime("%Y-%m-%d %H:%M") }}</div>{% endif %}
+  {% else %}
+    <span class="muted">—</span>
+  {% endif %}
+{%- endmacro %}
+
+{% macro close_form(p, kind, ret_item, units, returner_opts, origin_default, return_label) -%}
+{% set _n = pending_return_units(p) %}
+<form method="post" class="pending-action"
+      data-confirm-move="Confirmar devolución"
+      data-confirm-context="{{ ret_item.code }} - {{ ret_item.name }} · {{ fmt_qty(_n, ret_item) }} · a nombre de: {{ p.responsible_to.full_name or p.responsible_to.username }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  {% if kind == "return" %}<input type="hidden" name="pending_kind" value="return">{% endif %}
+  <input type="hidden" name="pending_id" value="{{ p.id }}">
+  <div class="check-inline" style="gap:14px;">
+    <label class="check-inline"><input type="radio" name="return_action" value="return" checked> {{ return_label }}</label>
+    <label class="check-inline"><input type="radio" name="return_action" value="repair"> A reparación</label>
+    <label class="check-inline"><input type="radio" name="return_action" value="scrap"> Enviar a Descartes</label>
+  </div>
+  <div class="js-scrap-opts" style="display:none; margin-top:6px;">
+    <select name="scrap_reason">
+      <option value="">Motivo...</option>
+      <option value="Irrecuperable">Irrecuperable</option>
+      <option value="Roto">Roto</option>
+      <option value="Vencido">Vencido</option>
+      <option value="Obsoleto">Obsoleto</option>
+      <option value="Otro">Otro</option>
+    </select>
+  </div>
+  {# ¿De dónde vuelve? Lo que se instala en un equipo sale del stock
+     del técnico, pero lo que se saca DEL EQUIPO nunca estuvo ahí.
+     Sin esta distinción el cierre fallaba por "stock insuficiente". #}
+  <div class="field" style="margin-top:6px;">
+    <label>¿De dónde vuelve?</label>
+    <div class="check-inline" style="gap:14px; flex-wrap:wrap;">
+      <label class="check-inline"><input type="radio" name="return_origin" value="stock" {% if origin_default == "stock" %}checked{% endif %}> Del stock del técnico</label>
+      <label class="check-inline"><input type="radio" name="return_origin" value="campo" {% if origin_default == "campo" %}checked{% endif %}> Recuperado del equipo</label>
+    </div>
+  </div>
+  {% if ret_item.serialized %}
+  <div class="field js-ser-stock" style="margin-top:6px;{% if origin_default != 'stock' %} display:none;{% endif %}">
+    <label>¿Qué serial vuelve?</label>
+    {% if units|length == 0 %}
+      <span class="muted" style="font-weight:400;">No hay seriales cargados en esa ubicación: se mueve por cantidad.</span>
+    {% elif units|length <= _n %}
+      <span class="muted" style="font-weight:400;">Se usa automáticamente: {{ units|map(attribute='serial')|join(', ') }}</span>
+    {% else %}
+      <div class="check-inline" style="gap:12px; flex-wrap:wrap;">
+        {% for u in units %}
+          <label class="check-inline"><input type="checkbox" name="unit_id" value="{{ u.id }}" data-confirm-skip> {{ u.serial }}</label>
+        {% endfor %}
+      </div>
+      <span class="muted" style="font-weight:400;">Elegí exactamente {{ _n }}.</span>
+    {% endif %}
+  </div>
+  <div class="field js-ser-campo" style="margin-top:6px;{% if origin_default != 'campo' %} display:none;{% endif %}">
+    <label>N° de serie que entra</label>
+    {% for _i in range(_n) %}
+      <input type="text" name="unit_serial" placeholder="N° de serie" style="margin-top:4px;">
+    {% endfor %}
+    <span class="muted" style="font-weight:400;">Si ese serial ya estuvo en el sistema y había salido, se reactiva la misma unidad.</span>
+  </div>
+  {% endif %}
+  {# Quién trae la devolución. Por defecto el responsable del
+     pendiente; puede ser otro responsable de la misma ubicación. #}
+  <div class="field" style="margin-top:6px;">
+    <label>¿Quién devuelve?</label>
+    <select name="returned_by_user_id">
+      {% for u in returner_opts %}
+        <option value="{{ u.id }}" {% if u.id == p.responsible_to_id %}selected{% endif %}>{{ u.full_name or u.username }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <input type="text" name="return_observation" placeholder="Observación (opcional)" style="margin-top:6px;">
+  <div style="margin-top:6px;"><button class="btn btn-primary btn-sm">Confirmar</button></div>
+</form>
+{%- endmacro %}
+
+{# Anular: deja de ser deuda sin mover stock y sin borrar el registro. #}
+{% macro cancel_form(p, kind, label) -%}
+<details class="pending-cancel" style="margin-top:8px;">
+  <summary class="muted" style="cursor:pointer;">Anular pendiente</summary>
+  <form method="post" style="margin-top:6px;"
+        data-confirm-move="Confirmar anulación" data-confirm-danger
+        data-confirm-context="{{ label }} · a nombre de: {{ p.responsible_to.full_name or p.responsible_to.username }} · no mueve stock">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="action" value="cancel">
+    <input type="hidden" name="pending_kind" value="{{ kind }}">
+    <input type="hidden" name="pending_id" value="{{ p.id }}">
+    <div class="field">
+      <label>Motivo de la anulación</label>
+      <input type="text" name="cancel_reason" required maxlength="500" placeholder="Ej: cargado por error">
+    </div>
+    <span class="muted" style="font-weight:400;">No mueve stock. Queda en el historial como Anulado.</span>
+    <div style="margin-top:6px;"><button class="btn btn-danger btn-sm">Anular</button></div>
+  </form>
+</details>
+{%- endmacro %}
+
+<div class="page-header"><div><h2>Pendientes de entrega</h2><p>Entregas sin devolución confirmada y devoluciones pedidas sin entrega.</p></div></div>
 
 {# Filtros: mismo patrón que Movimientos / Descartes (colapsables en mobile,
-   siempre visibles en desktop). El estilo vive en app.css. #}
+   siempre visibles en desktop). El estilo vive en app.css. Aplican a los dos
+   listados de la pantalla. #}
 <details class="filters-collapse" id="pendFilters">
 <summary class="filters-toggle">
   <span class="nav-icon">&#9776;</span> Filtros
@@ -57,6 +184,7 @@
         <option value="">Todos</option>
         <option value="PENDIENTE" {% if status_filter == "PENDIENTE" %}selected{% endif %}>Pendiente</option>
         <option value="DEVUELTO" {% if status_filter == "DEVUELTO" %}selected{% endif %}>Devuelto</option>
+        <option value="ANULADO" {% if status_filter == "ANULADO" %}selected{% endif %}>Anulado</option>
       </select>
     </div>
     <input type="hidden" name="sort_by" value="{{ selected_sort_by or 'date' }}">
@@ -69,9 +197,98 @@
 </div>
 </details>
 
+{# Pendiente SIN entrega: el técnico ya tenía en su camioneta lo que usó y
+   tiene que traer algo (típico: el repuesto que sacó del equipo). Solo
+   ADMIN/SUPERVISOR; el backend lo vuelve a validar. NO mueve stock. #}
+{% if me.role in ("ADMIN", "SUPERVISOR") %}
+<details class="card" id="pendNewReturn" style="margin-bottom:14px;">
+  <summary style="cursor:pointer;"><strong>+ Nuevo pendiente de devolución</strong>
+    <span class="muted" style="font-weight:400;">— sin entrega: no se le da nada, solo queda lo que tiene que traer</span></summary>
+  <form method="post" style="margin-top:12px; max-width:560px;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="action" value="create_return">
+    <div class="field">
+      <label for="new_return_holder">¿Quién tiene que devolver?</label>
+      <select name="holder" id="new_return_holder" class="js-buscar" required>
+        <option value="">Elegí técnico y ubicación...</option>
+        {% for h in holder_options %}
+          <option value="{{ h.value }}">{{ h.label }}</option>
+        {% endfor %}
+      </select>
+      {% if not holder_options %}
+        <span class="muted" style="font-weight:400;">No hay ubicaciones con responsable asignado.</span>
+      {% endif %}
+    </div>
+    <div class="field">
+      <label for="new_return_item">¿Qué tiene que devolver?</label>
+      <select name="item_id" id="new_return_item" class="js-buscar" required>
+        <option value="">Elegí el ítem...</option>
+        {% for it in create_items %}
+          <option value="{{ it.id }}">{{ it.code }} - {{ it.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="new_return_qty">Cantidad <span class="muted" style="font-weight:400;" data-unit-hint="item_id"></span></label>
+      <input type="number" name="qty" id="new_return_qty" min="1" max="{{ pending_return_max }}" value="1" required>
+      <span class="muted" style="font-weight:400;">Se genera un pendiente por unidad, para cerrar cada una por separado.</span>
+    </div>
+    <div class="field">
+      <label for="new_return_comment">Motivo</label>
+      <textarea name="comment" id="new_return_comment" rows="2" required placeholder="Ej: reparó el equipo del cliente X con la placa de su camioneta; tiene que traer la placa en falla"></textarea>
+    </div>
+    <div style="margin-top:8px;"><button type="submit" class="btn btn-primary">Generar pendiente</button></div>
+  </form>
+</details>
+{% endif %}
+
 {% set _args = {'from_date': from_date, 'to_date': to_date, 'item_id': item_filter,
                 'from_user_id': from_user_filter, 'to_user_id': to_user_filter,
                 'status': status_filter} %}
+
+{# Pendientes SIN entrega. Se muestra solo si hay alguno con los filtros vigentes. #}
+{% if returns_page.total %}
+<h3 style="margin:6px 0 4px;">Devoluciones pedidas sin entrega</h3>
+<p class="muted" style="margin:0 0 8px;">No se entregó nada: el técnico tiene que traer lo que figura acá.</p>
+<div class="table-card" style="margin-bottom:18px;">
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Fecha</th><th>Generó</th><th>A nombre de</th><th>Ubicación</th>
+          <th>Debe devolver</th><th class="num">Cant.</th>
+          <th>Motivo</th><th>Estado</th><th>Devuelto / anulado por</th><th>Acción</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in returns %}
+        {% set _open = not r.returned and not r.cancelled_at %}
+        <tr>
+          <td>{{ r.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+          <td>{{ r.responsible_from.full_name or r.responsible_from.username }}</td>
+          <td>{{ r.responsible_to.full_name or r.responsible_to.username }}</td>
+          <td>{{ r.location.name }}</td>
+          <td>{{ r.item.code }} — {{ r.item.name }}</td>
+          <td class="num">{{ fmt_qty(pending_return_units(r), r.item) }}</td>
+          <td>{{ r.comment }}</td>
+          <td>{{ status_badge(r) }}</td>
+          <td>{{ closed_by(r) }}</td>
+          <td class="actions-cell">
+            {% if me.role == "TECNICO" %}
+              {% if _open %}<span class="muted">Solo lectura</span>{% endif %}
+            {% elif _open %}
+              {{ close_form(r, "return", r.item, return_units.get(r.id, []), return_returner_options.get(r.id, []), "campo", "Ingresar OK (Jaula)") }}
+              {{ cancel_form(r, "return", r.item.code ~ " - " ~ r.item.name) }}
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {{ pagination(returns_page, "devolución pedida", "devoluciones pedidas", param="rpage") }}
+</div>
+{% endif %}
 
 <div class="table-card">
   <div class="table-scroll">
@@ -89,6 +306,7 @@
         {% for p in pendings %}
         {% set swap = p.return_item_id and p.return_item_id != p.item_id %}
         {% set ret_item = p.return_item if swap else p.item %}
+        {% set _open = not p.returned and not p.cancelled_at %}
         <tr>
           <td>{{ p.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
           <td>{{ p.responsible_from.full_name or p.responsible_from.username }}</td>
@@ -106,117 +324,16 @@
           </td>
           <td class="num">{{ fmt_qty(pending_return_units(p), ret_item) }}</td>
           <td>{{ p.comment or "" }}</td>
-          <td>
-            {% if p.returned %}
-              <span class="badge badge-ok">Devuelto</span>
-            {% else %}
-              <span class="badge badge-warn">Pendiente</span>
-            {% endif %}
-          </td>
-          <td>
-            {% if p.returned %}
-              {{ (p.returned_by.full_name or p.returned_by.username) if p.returned_by else "—" }}
-              {% if p.returned_at %}<div class="muted" style="font-size:12px;">{{ p.returned_at.strftime("%Y-%m-%d %H:%M") }}</div>{% endif %}
-            {% else %}
-              <span class="muted">—</span>
-            {% endif %}
-          </td>
+          <td>{{ status_badge(p) }}</td>
+          <td>{{ closed_by(p) }}</td>
           <td class="actions-cell">
             {% if me.role == "TECNICO" %}
-            {% if not p.returned %}<span class="muted">Solo lectura</span>{% endif %}
-            {% elif not p.returned %}
-            <form method="post" class="pending-action"
-                  data-confirm-move="Confirmar devolución"
-                  data-confirm-context="{{ ret_item.code }} - {{ ret_item.name }} · {{ fmt_qty(pending_return_units(p), ret_item) }} · a nombre de: {{ p.responsible_to.full_name or p.responsible_to.username }}">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-              <input type="hidden" name="pending_id" value="{{ p.id }}">
-              <div class="check-inline" style="gap:14px;">
-                <label class="check-inline"><input type="radio" name="return_action" value="return" checked> {{ "Ingresar OK (Jaula)" if swap else "Devolver" }}</label>
-                <label class="check-inline"><input type="radio" name="return_action" value="repair"> A reparación</label>
-                <label class="check-inline"><input type="radio" name="return_action" value="scrap" id="scrap_radio_{{ p.id }}"> Enviar a Descartes</label>
-              </div>
-              <div id="scrap_opts_{{ p.id }}" style="display:none; margin-top:6px;">
-                <select name="scrap_reason">
-                  <option value="">Motivo...</option>
-                  <option value="Irrecuperable">Irrecuperable</option>
-                  <option value="Roto">Roto</option>
-                  <option value="Vencido">Vencido</option>
-                  <option value="Obsoleto">Obsoleto</option>
-                  <option value="Otro">Otro</option>
-                </select>
-              </div>
-              {# ¿De dónde vuelve? Lo que se instala en un equipo sale del stock
-                 del técnico, pero lo que se saca DEL EQUIPO nunca estuvo ahí.
-                 Sin esta distinción el cierre fallaba por "stock insuficiente".
-                 El default es el comportamiento de siempre. #}
-              <div class="field" style="margin-top:6px;">
-                <label>¿De dónde vuelve?</label>
-                <div class="check-inline" style="gap:14px; flex-wrap:wrap;">
-                  <label class="check-inline"><input type="radio" name="return_origin" value="stock" {% if not swap %}checked{% endif %}> Del stock del técnico</label>
-                  <label class="check-inline"><input type="radio" name="return_origin" value="campo" {% if swap %}checked{% endif %}> Recuperado del equipo</label>
-                </div>
-              </div>
-              {% if ret_item.serialized %}
-              {% set _uns = pending_units.get(p.id, []) %}
-              {% set _n = pending_return_units(p) %}
-              <div class="field" id="ser_stock_{{ p.id }}" style="margin-top:6px;{% if swap %} display:none;{% endif %}">
-                <label>¿Qué serial vuelve?</label>
-                {% if _uns|length == 0 %}
-                  <span class="muted" style="font-weight:400;">No hay seriales cargados en esa ubicación: se mueve por cantidad.</span>
-                {% elif _uns|length <= _n %}
-                  <span class="muted" style="font-weight:400;">Se usa automáticamente: {{ _uns|map(attribute='serial')|join(', ') }}</span>
-                {% else %}
-                  <div class="check-inline" style="gap:12px; flex-wrap:wrap;">
-                    {% for u in _uns %}
-                      <label class="check-inline"><input type="checkbox" name="unit_id" value="{{ u.id }}" data-confirm-skip> {{ u.serial }}</label>
-                    {% endfor %}
-                  </div>
-                  <span class="muted" style="font-weight:400;">Elegí exactamente {{ _n }}.</span>
-                {% endif %}
-              </div>
-              <div class="field" id="ser_campo_{{ p.id }}" style="margin-top:6px;{% if not swap %} display:none;{% endif %}">
-                <label>N° de serie que entra</label>
-                {% for _i in range(_n) %}
-                  <input type="text" name="unit_serial" placeholder="N° de serie" style="margin-top:4px;">
-                {% endfor %}
-                <span class="muted" style="font-weight:400;">Si ese serial ya estuvo en el sistema y había salido, se reactiva la misma unidad.</span>
-              </div>
-              {% endif %}
-              {# Quién trae la devolución. Por defecto el responsable del
-                 pendiente; puede ser otro responsable de la misma ubicación. #}
-              <div class="field" style="margin-top:6px;">
-                <label>¿Quién devuelve?</label>
-                <select name="returned_by_user_id">
-                  {% for u in returner_options.get(p.id, []) %}
-                    <option value="{{ u.id }}" {% if u.id == p.responsible_to_id %}selected{% endif %}>{{ u.full_name or u.username }}</option>
-                  {% endfor %}
-                </select>
-              </div>
-              <input type="text" name="return_observation" placeholder="Observación (opcional)" style="margin-top:6px;">
-              <div style="margin-top:6px;"><button class="btn btn-primary btn-sm">Confirmar</button></div>
-              <script>
-              (function(){
-                var radio = document.getElementById("scrap_radio_{{ p.id }}");
-                var opts  = document.getElementById("scrap_opts_{{ p.id }}");
-                var form  = radio.closest("form");
-                form.querySelectorAll("input[name=return_action]").forEach(function(r){
-                  r.addEventListener("change", function(){ opts.style.display = radio.checked ? "block" : "none"; });
-                });
-                // Origen de la devolución: se muestra el selector de serial que
-                // corresponde. Elegir de la camioneta y cargar un serial nuevo
-                // son cosas distintas; que se vean las dos a la vez confunde.
-                var st = document.getElementById("ser_stock_{{ p.id }}");
-                var cp = document.getElementById("ser_campo_{{ p.id }}");
-                form.querySelectorAll("input[name=return_origin]").forEach(function(r){
-                  r.addEventListener("change", function(){
-                    var v = form.querySelector("input[name=return_origin]:checked").value;
-                    if (st) st.style.display = (v === "stock") ? "" : "none";
-                    if (cp) cp.style.display = (v === "campo") ? "" : "none";
-                  });
-                });
-              })();
-              </script>
-            </form>
+              {% if _open %}<span class="muted">Solo lectura</span>{% endif %}
+            {% elif _open %}
+              {# Default de siempre: el swap entra por Recuperado, el mismo ítem
+                 sale de la camioneta. #}
+              {{ close_form(p, "delivery", ret_item, pending_units.get(p.id, []), returner_options.get(p.id, []), "campo" if swap else "stock", "Ingresar OK (Jaula)" if swap else "Devolver") }}
+              {{ cancel_form(p, "delivery", ret_item.code ~ " - " ~ ret_item.name) }}
             {% endif %}
           </td>
         </tr>
@@ -228,4 +345,5 @@
   </div>
   {{ pagination(page_obj, "pendiente", "pendientes") }}
 </div>
+<script src="{{ url_for('static', filename='js/pending_deliveries.js') }}"></script>
 {% endblock %}
