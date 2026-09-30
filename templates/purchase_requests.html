@@ -6,7 +6,7 @@
 <div class="page-header">
   <div>
     <h2>Solicitudes de Compra</h2>
-    <p>Pedidos de compra de ítems que entraron en alerta de stock.</p>
+    <p>Pedidos de compra: los ítems en alerta de stock y cualquier otro que haga falta.</p>
   </div>
   {% if me and me.role in ["ADMIN","SUPERVISOR"] %}
     <button type="button" class="btn btn-primary" onclick="openModal('modal-sc-new')">+ Nueva solicitud</button>
@@ -58,7 +58,7 @@
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <div class="modal-body">
         {% if alert_items %}
-          <p class="muted">Aparecen solo los ítems que hoy están en alerta. Marcá los que querés pedir y poné la cantidad.</p>
+          <p class="muted">Ítems que hoy están en alerta. Marcá los que querés pedir y poné la cantidad.</p>
           <div class="table-scroll" style="max-height:50vh;">
             <table class="data-table">
               <thead>
@@ -86,6 +86,48 @@
               </tbody>
             </table>
           </div>
+        {% else %}
+          <p class="muted">No hay ítems en alerta en este momento.</p>
+        {% endif %}
+
+        {# Otros ítems (2026-09-30): cualquier ítem activo, esté o no en alerta.
+           Se ofrecen los que no están en la tabla de arriba, así un ítem no queda
+           cargado dos veces (el backend igual lo rechaza). Una fila sin ítem se
+           ignora. Van en <tr> para que el aviso "(en metros)" (unit_hint.js)
+           lea el ítem de SU fila. La lógica está en static/js/purchase_requests.js. #}
+        <div class="field" style="margin-top:12px;">
+          <label>Otros ítems</label>
+          <p class="muted" style="margin:2px 0 8px;">Cualquier otro ítem del catálogo que haga falta comprar, aunque no esté en alerta.</p>
+          {% if other_items %}
+          <table class="data-table">
+            <thead><tr><th>Ítem</th><th class="num" style="width:1%;">Cantidad</th><th style="width:48px;"></th></tr></thead>
+            <tbody id="pr-extra-lines"></tbody>
+          </table>
+          <div style="margin-top:8px;">
+            <button type="button" id="pr-add-line-btn" class="btn btn-secondary btn-sm">+ Agregar ítem</button>
+          </div>
+          <template id="pr-extra-line-template">
+            <tr class="pr-line">
+              <td style="min-width:140px;">
+                <select name="extra_item_id[]" class="pr-extra-item">
+                  <option value="">Elegí un ítem...</option>
+                  {% for it in other_items %}
+                    <option value="{{ it.id }}">{{ it.code }} - {{ it.name }}</option>
+                  {% endfor %}
+                </select>
+              </td>
+              <td class="num" style="white-space:nowrap;">
+                <input type="number" name="extra_qty[]" min="1" value="1" style="width:90px;">
+                <span class="muted" style="font-weight:400;" data-unit-hint="extra_item_id[]"></span>
+              </td>
+              <td><button type="button" class="pr-remove-line-btn btn btn-danger btn-sm" title="Quitar">X</button></td>
+            </tr>
+          </template>
+          {% else %}
+            <p class="muted">No hay otros ítems activos en el catálogo.</p>
+          {% endif %}
+        </div>
+
           <div class="field" style="margin-top:12px;">
             <label>Destinatarios del mail</label>
             {% if recipient_users %}
@@ -109,18 +151,28 @@
             <label>Observación (opcional)</label>
             <input name="observation" maxlength="255">
           </div>
-        {% else %}
-          <p class="muted">No hay ítems en alerta en este momento.</p>
-        {% endif %}
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" onclick="closeModal('modal-sc-new')">Cancelar</button>
-        {% if alert_items %}
+        {% if alert_items or other_items %}
         <button type="submit" class="btn btn-primary">Guardar solicitud</button>
         {% endif %}
       </div>
     </form>
   </div>
 </div>
+{% if other_items %}
+<script>
+  /* Solo DATOS (dependen de la base). La logica vive en
+     static/js/purchase_requests.js. */
+  window.PR_DATA = {
+    otherItems: [
+      {% for it in other_items %}{ value: "{{ it.id }}", text: "{{ (it.code ~ ' - ' ~ it.name)|e }}" },
+      {% endfor %}
+    ]
+  };
+</script>
+<script src="{{ url_for('static', filename='js/purchase_requests.js') }}"></script>
+{% endif %}
 {% endif %}
 {% endblock %}

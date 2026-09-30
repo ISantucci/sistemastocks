@@ -9122,11 +9122,23 @@ def purchase_requests():
     reqs_page = paginate(PurchaseRequest.query.order_by(PurchaseRequest.created_at.desc()))
     reqs = reqs_page.items
     alert_items = alert_items_distinct()
+    # "Otros ítems" (2026-09-30): además de los que están en alerta se puede
+    # pedir cualquier ítem activo. Se ofrecen los que NO están en la tabla de
+    # alertas, para que un mismo ítem no pueda quedar cargado dos veces (el
+    # backend igual lo rechaza). Solo para quien crea (ADMIN/SUPERVISOR).
+    other_items = []
+    if current_user.role in ("ADMIN", "SUPERVISOR"):
+        alert_ids = {e["item"].id for e in alert_items}
+        other_items = [
+            it for it in Item.query.filter(Item.is_active == True).order_by(Item.code).all()
+            if it.id not in alert_ids
+        ]
     return render_template(
         "purchase_requests.html",
         requests=reqs,
         page_obj=reqs_page,
         alert_items=alert_items,
+        other_items=other_items,
         recipient_users=selectable_recipient_users(),
     )
 
@@ -9135,7 +9147,8 @@ def purchase_requests():
 @login_required
 @role_required("ADMIN", "SUPERVISOR")
 def purchase_request_new():
-    # Ítems válidos = los que hoy están en alerta (no se puede pedir otra cosa).
+    # Tabla de alertas: solo ítems que hoy están en alerta (igual que siempre).
+    # Cualquier otro ítem entra por "Otros ítems", más abajo.
     valid_ids = {e["item"].id for e in alert_items_distinct()}
 
     selected = request.form.getlist("item_id")
@@ -9154,6 +9167,43 @@ def purchase_request_new():
         if qty <= 0:
             continue
         lines_to_create.append((iid, qty))
+
+    # "Otros ítems" (2026-09-30): cualquier ítem ACTIVO, esté o no en alerta.
+    # A diferencia de la tabla de alertas (que saltea en silencio lo que no
+    # sirve), acá cada fila se valida y un error frena todo: son filas que la
+    # persona cargó a mano y tiene que saber por qué no entraron.
+    # Una fila sin ítem es una fila que no existe (misma regla que el resto).
+    ya_cargados = {iid for iid, _ in lines_to_create}
+    extra_ids = request.form.getlist("extra_item_id[]")
+    extra_qtys = request.form.getlist("extra_qty[]")
+    for idx, raw in enumerate(extra_ids):
+        raw = (raw or "").strip()
+        if not raw:
+            continue
+        n = idx + 1
+        if not raw.isdigit():
+            flash(f"Otros ítems, fila {n}: ítem inválido.", "error")
+            return redirect(url_for("purchase_requests"))
+        it = Item.query.get(int(raw))
+        if not it or not it.is_active:
+            flash(f"Otros ítems, fila {n}: el ítem no existe o está dado de baja.", "error")
+            return redirect(url_for("purchase_requests"))
+        qty_raw = (extra_qtys[idx] if idx < len(extra_qtys) else "") or ""
+        try:
+            qty = int(qty_raw.strip())
+        except (TypeError, ValueError):
+            qty = 0
+        if qty <= 0:
+            flash(f"Otros ítems, fila {n}: la cantidad tiene que ser mayor a 0.", "error")
+            return redirect(url_for("purchase_requests"))
+        if it.id in ya_cargados:
+            flash(
+                f"«{it.code} - {it.name}» está cargado dos veces. "
+                "Dejalo en una sola línea con la cantidad total.", "error",
+            )
+            return redirect(url_for("purchase_requests"))
+        ya_cargados.add(it.id)
+        lines_to_create.append((it.id, qty))
 
     if not lines_to_create:
         flash("Seleccioná al menos un ítem con cantidad mayor a 0.", "error")
