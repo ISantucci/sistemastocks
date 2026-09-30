@@ -459,3 +459,225 @@ def ticket_consumos(ticket_id):
         for ic, mv, item, loc in rows
     ]
     return _ok(data)
+
+
+# ------------------ consumos en lote (guardar ticket) ------------------
+#
+# TNGTickets registra los consumos de insumos recien cuando el tecnico
+# GUARDA el ticket (antes se registraban al apretar "Registrar consumo").
+# Todas las lineas pendientes de ese guardado llegan juntas aca y se aplican
+# TODO O NADA: si una sola falla, no se aplica ninguna y se devuelven los
+# errores de todas las que fallaron, para que TNGTickets no guarde el ticket.
+#
+# Dos fases, mismo endpoint:
+#   - validar_solo=true  -> aplica todo dentro de la transaccion y hace
+#     rollback al final: valida exactamente lo mismo que la aplicacion real
+#     (stock, seriales, varias lineas del mismo item) sin dejar nada.
+#     TNGTickets lo llama en la validacion del formulario del ticket.
+#   - validar_solo=false -> aplica y commitea. TNGTickets lo llama al final
+#     del guardado del ticket (si falla, TNGTickets deshace el guardado).
+#
+# create_consumo() (consumo individual) queda intacto por compatibilidad.
+
+
+class _LineaError(Exception):
+    def __init__(self, status: int, code: str, detail: str):
+        super().__init__(detail)
+        self.status = status
+        self.code = code
+        self.detail = detail
+
+
+def _aplicar_linea_consumo(linea: dict, ticket_id, tecnico_legajo, tecnico_nombre,
+                           system_user, utilizado_loc) -> dict:
+    """Aplica UNA linea dentro de la transaccion abierta (sin commit).
+
+    Las validaciones van antes de cualquier modificacion: si levanta
+    _LineaError, la sesion no quedo tocada por esta linea. Mismas reglas
+    que create_consumo().
+    """
+    idempotency_key = (linea.get("idempotency_key") or "").strip()
+    location_id = linea.get("location_id")
+    item_code = (linea.get("item_code") or "").strip()
+
+    loc = _find_truck_location_by_id(location_id)
+    if not loc:
+        raise _LineaError(404, "location_not_found",
+                          f"No existe una camioneta con id '{location_id}' en el sistema de stock")
+
+    item = _find_consumable_item(item_code)
+    if not item:
+        raise _LineaError(404, "item_not_found", f"No existe un item activo con codigo '{item_code}'")
+
+    unit = None
+    if item.serialized:
+        try:
+            unit_id = int(linea.get("unit_id"))
+        except (TypeError, ValueError):
+            raise _LineaError(400, "serial_requerido",
+                              f"{item.name}: es serializado, falta indicar el numero de serie.")
+        unit = (
+            ItemUnit.query
+            .filter_by(id=unit_id, item_id=item.id, status=UNIT_EN_STOCK, location_id=loc.id)
+            .first()
+        )
+        if not unit:
+            raise _LineaError(409, "serial_invalido",
+                              f"{item.name}: el numero de serie elegido ya no esta disponible en esta camioneta.")
+        cantidad = 1
+    else:
+        try:
+            cantidad = float(linea.get("cantidad"))
+        except (TypeError, ValueError):
+            raise _LineaError(400, "cantidad_invalida", f"{item.name}: la cantidad debe ser numerica.")
+        if cantidad <= 0 or cantidad != int(cantidad):
+            raise _LineaError(400, "cantidad_invalida", f"{item.name}: la cantidad debe ser un entero mayor a 0.")
+        cantidad = int(cantidad)
+
+    # Reintento: esta linea ya se aplico en un guardado anterior.
+    existing = IntegrationConsumo.query.filter_by(idempotency_key=idempotency_key).first()
+    if existing:
+        payload = _consumo_payload(existing, fallback_item=item, fallback_loc=loc, fallback_cantidad=cantidad)
+        payload["idempotency_key"] = idempotency_key
+        payload["ya_registrado"] = True
+        return payload
+
+    stock_query = Stock.query.filter_by(item_id=item.id, location_id=loc.id)
+    if db.engine.dialect.name in ("postgresql", "mysql"):
+        stock_query = stock_query.with_for_update()
+    stock_row = stock_query.first()
+    disponible = stock_row.quantity if stock_row else 0
+    # Varias lineas del mismo item en el mismo lote: stock_row es el mismo
+    # objeto de la sesion que upsert_stock() ya desconto en las lineas
+    # anteriores, asi que `disponible` ya refleja lo restante.
+    if disponible < cantidad:
+        raise _LineaError(409, "stock_insuficiente",
+                          f"{item.name}: stock insuficiente en {loc.name} (disponible: {disponible}, pedido: {cantidad}).")
+
+    try:
+        upsert_stock(item.id, loc.id, -cantidad)
+    except ValueError as e:
+        raise _LineaError(409, "stock_insuficiente", f"{item.name}: {e}")
+
+    y, seq, number = next_movement_number()
+    observacion = f"Consumo desde ticket #{ticket_id} (TNGTickets) - tecnico: {tecnico_nombre or 's/d'}"
+    if unit is not None:
+        observacion = serial_obs(observacion, [unit.serial])
+    movement = Movement(
+        item_id=item.id,
+        qty=cantidad,
+        from_location_id=loc.id,
+        to_location_id=utilizado_loc.id,
+        user_id=system_user.id,
+        observation=observacion,
+        year=y,
+        seq=seq,
+        number=number,
+    )
+    db.session.add(movement)
+    db.session.flush()
+
+    if unit is not None:
+        apply_serial_units_out([unit], utilizado_loc.id)
+
+    db.session.add(IntegrationConsumo(
+        movement_id=movement.id,
+        idempotency_key=idempotency_key,
+        ticket_id=str(ticket_id),
+        tecnico_legajo=(str(tecnico_legajo) if tecnico_legajo is not None else None),
+        tecnico_nombre=(str(tecnico_nombre) if tecnico_nombre is not None else None),
+    ))
+    db.session.flush()
+
+    return {
+        "idempotency_key": idempotency_key,
+        "movement_id": movement.id,
+        "item_code": item.code,
+        "cantidad": cantidad,
+        "location_name": loc.name,
+        "unit_serial": (unit.serial if unit is not None else None),
+        "ya_registrado": False,
+    }
+
+
+@bp.route("/consumos/lote", methods=["POST"])
+@require_api_key()
+def create_consumos_lote():
+    body = request.get_json(silent=True)
+    if body is None:
+        return _err(400, "body_invalido", "Body invalido o no es JSON")
+
+    ticket_id = body.get("ticket_id")
+    tecnico_legajo = body.get("tecnico_legajo")
+    tecnico_nombre = body.get("tecnico_nombre")
+    tecnico_username = (body.get("tecnico_username") or "").strip()
+    validar_solo = bool(body.get("validar_solo"))
+    lineas = body.get("lineas")
+
+    if ticket_id is None or str(ticket_id).strip() == "":
+        return _err(400, "ticket_id_requerido", "Falta ticket_id")
+    if not isinstance(lineas, list) or not lineas:
+        return _err(400, "lineas_requeridas", "Falta la lista de lineas a consumir")
+
+    keys = [(l.get("idempotency_key") or "").strip() if isinstance(l, dict) else "" for l in lineas]
+    if any(not k for k in keys):
+        return _err(400, "idempotency_key_requerida", "Cada linea necesita su idempotency_key")
+    if len(set(keys)) != len(keys):
+        return _err(400, "idempotency_key_duplicada", "Hay lineas repetidas en el lote")
+
+    utilizado_loc = Location.query.filter_by(name="Utilizado").first()
+    if not utilizado_loc:
+        return _err(500, "config_invalida", "Ubicacion 'Utilizado' no existe en el sistema de stock")
+
+    if not tecnico_username:
+        return _err(400, "tecnico_username_requerido", "Falta tecnico_username")
+    system_user = _resolve_tecnico_user(tecnico_username)
+    if not system_user:
+        return _err(
+            404,
+            "tecnico_no_encontrado",
+            f"No existe en el sistema de stock un usuario con username '{tecnico_username}'. "
+            "Sincroniza los usernames entre los dos sistemas para poder registrar el consumo.",
+        )
+
+    resultados = []
+    errores = []
+    try:
+        for indice, linea in enumerate(lineas):
+            try:
+                resultados.append(_aplicar_linea_consumo(
+                    linea, ticket_id, tecnico_legajo, tecnico_nombre, system_user, utilizado_loc,
+                ))
+            except _LineaError as e:
+                errores.append({
+                    "indice": indice,
+                    "idempotency_key": keys[indice],
+                    "error": e.code,
+                    "detail": e.detail,
+                })
+
+        if errores or validar_solo:
+            db.session.rollback()
+        else:
+            db.session.commit()
+
+    except IntegrityError:
+        # Otro request aplico alguna de estas keys al mismo tiempo: no se
+        # aplica nada de este lote; TNGTickets puede reintentar (las keys ya
+        # aplicadas vuelven como ya_registrado).
+        db.session.rollback()
+        return _err(409, "conflicto_concurrente",
+                    "Otro guardado registro consumos al mismo tiempo. Volve a intentar.")
+    except Exception as e:
+        db.session.rollback()
+        return _err(500, "error_interno", str(e))
+
+    if errores:
+        return jsonify({
+            "ok": False,
+            "error": "lote_invalido",
+            "detail": "No se registro ningun consumo: " + " | ".join(e["detail"] for e in errores),
+            "errores": errores,
+        }), 409
+
+    return _ok({"validado_solo": validar_solo, "lineas": resultados})
