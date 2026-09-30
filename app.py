@@ -1547,6 +1547,41 @@ class PendingReturn(db.Model):
     returned_by = db.relationship("User", foreign_keys=[returned_by_user_id])
     cancelled_by = db.relationship("User", foreign_keys=[cancelled_by_user_id])
 
+
+class TransferNotice(db.Model):
+    """Aviso de transferencia entre camionetas (2026-09-30).
+
+    Cuando un TÉCNICO mueve algo de su camioneta a la de otro, los responsables
+    de la camioneta que recibe ven un badge en "Stock" y, al entrar, un popup
+    con lo que les transfirieron. Pedido de los técnicos tras la capacitación.
+
+    Es UN aviso por movimiento, compartido por la camioneta (decisión de
+    Ignacio): si la camioneta tiene dos responsables, lo ven los dos, y cuando
+    CUALQUIERA toca "Entendido" desaparece para ambos. Queda quién y cuándo.
+
+    Es solo un aviso: no es una aceptación. El stock ya se movió al cargar el
+    movimiento, y ese movimiento no cambia.
+
+    Tabla NUEVA: no modifica ninguna existente, la crea db.create_all() al
+    arrancar. Se escribe en la MISMA transacción que el movimiento (o se
+    guardan los dos o ninguno).
+    """
+    __tablename__ = "transfer_notices"
+
+    id = db.Column(db.Integer, primary_key=True)
+    created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
+    movement_id = db.Column(db.Integer, db.ForeignKey("movements.id"), nullable=False, unique=True)
+    # Camioneta que recibe. El aviso es de la camioneta, no de una persona: lo
+    # ven sus responsables actuales (LocationResponsible).
+    location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), nullable=False)
+    # NULL = todavía no lo vio nadie.
+    seen_at = db.Column(db.DateTime, nullable=True)
+    seen_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+
+    movement = db.relationship("Movement")
+    location = db.relationship("Location")
+    seen_by = db.relationship("User")
+
 # ------------------ REMITOS ------------------
 
 class Remito(db.Model):
@@ -4923,6 +4958,11 @@ def stock():
 
     items_list, items_remote = item_picker_options(q_text, value_field="code")
 
+    # Popup de transferencias recibidas (solo TECNICO). Ver TransferNotice.
+    transfer_groups, transfer_notice_ids = (
+        transfer_notice_groups(current_user) if is_tecnico else ([], [])
+    )
+
     return render_template(
         "stock.html",
         stock_rows=rows,
@@ -4936,7 +4976,96 @@ def stock():
         selected_trackable=trackable,
         selected_q=q_text,
         is_tecnico=is_tecnico,
+        transfer_groups=transfer_groups,
+        transfer_notice_ids=transfer_notice_ids,
     )
+
+
+# ------------------ AVISOS DE TRANSFERENCIA (ver TransferNotice) ------------------
+
+def open_transfer_notices_query(user):
+    """Avisos sin ver de las camionetas de las que `user` es responsable.
+
+    None si no es responsable de ninguna ubicación (no hay nada que mostrarle).
+    Deja afuera:
+    - los que ya vio alguien (el aviso es compartido por la camioneta);
+    - los de movimientos revertidos (el stock volvió: no hay nada que avisar);
+    - los movimientos que cargó él mismo (si comparte la camioneta destino).
+    Única fuente de verdad: la usan el badge, el popup y el "Entendido".
+    """
+    loc_ids = tech_location_ids_for(user)
+    if not loc_ids:
+        return None
+    return (
+        TransferNotice.query
+        .join(Movement, Movement.id == TransferNotice.movement_id)
+        .filter(
+            TransferNotice.location_id.in_(loc_ids),
+            TransferNotice.seen_at.is_(None),
+            Movement.reverted_at.is_(None),
+            Movement.user_id != user.id,
+        )
+    )
+
+
+def transfer_notice_groups(user):
+    """Avisos sin ver agrupados por quién transfirió, para el popup de /stock.
+
+    Devuelve ([{sender, lines: [{item, qty}]}], [ids de los avisos mostrados]).
+    Si el mismo técnico transfirió el mismo ítem en dos movimientos, se suma en
+    una sola línea. Los ids viajan en el form del popup: "Entendido" marca
+    EXACTAMENTE lo que se mostró, no algo que haya llegado después.
+    """
+    q = open_transfer_notices_query(user)
+    if q is None:
+        return [], []
+    notices = q.order_by(TransferNotice.created_at, TransferNotice.id).all()
+
+    groups: dict[int, dict] = {}
+    for n in notices:
+        m = n.movement
+        g = groups.setdefault(m.user_id, {"sender": m.user, "lines": {}})
+        line = g["lines"].setdefault(m.item_id, {"item": m.item, "qty": 0})
+        line["qty"] += m.qty
+
+    out = []
+    for g in groups.values():   # dict conserva el orden: primero el más antiguo
+        out.append({
+            "sender": g["sender"],
+            "lines": sorted(g["lines"].values(), key=lambda l: (l["item"].code or "").lower()),
+        })
+    return out, [n.id for n in notices]
+
+
+@app.route("/stock/avisos-transferencia/visto", methods=["POST"])
+@login_required
+@role_required("TECNICO")
+def transfer_notices_ack():
+    """"Entendido" del popup: marca como vistos los avisos que se mostraron.
+
+    Solo los de SUS camionetas y solo los que siguen sin ver: los ids que
+    llegan por el form se cruzan contra open_transfer_notices_query(), así que
+    mandar a mano el id de un aviso ajeno no hace nada.
+    El UPDATE lleva `seen_at IS NULL`: si los dos responsables tocan
+    "Entendido" a la vez, queda registrado el primero y el segundo no lo pisa.
+    """
+    ids = {int(x) for x in request.form.getlist("notice_id") if x.isdigit()}
+    q = open_transfer_notices_query(current_user)
+    if ids and q is not None:
+        valid_ids = [n.id for n in q.filter(TransferNotice.id.in_(ids)).all()]
+        if valid_ids:
+            try:
+                (TransferNotice.query
+                 .filter(TransferNotice.id.in_(valid_ids), TransferNotice.seen_at.is_(None))
+                 .update({
+                     TransferNotice.seen_at: now_ar(),
+                     TransferNotice.seen_by_user_id: current_user.id,
+                 }, synchronize_session=False))
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+                flash("No se pudo marcar el aviso como visto. Probá de nuevo.", "error")
+    return redirect(url_for("stock"))
 
 
 @app.route("/stock/export.csv", methods=["GET"])
@@ -5256,6 +5385,23 @@ def movements():
                             location_id=(None if to_ext else to_id),
                         ))
                 apply_serial_units_out(serial_units_to_apply, to_id)
+
+            # Aviso de transferencia (2026-09-30): un TÉCNICO que mueve de una
+            # camioneta a otra deja un aviso para los responsables de la que
+            # recibe. Va en esta misma transacción: si el movimiento falla no
+            # queda un aviso suelto, y si el aviso falla no queda un movimiento
+            # sin aviso. Solo si del otro lado hay alguien más que él (mover
+            # entre sus propias camionetas no le avisa a nadie).
+            if (
+                is_tecnico
+                and _from_loc is not None and _from_loc.is_truck
+                and to_location is not None and to_location.is_truck
+                and LocationResponsible.query.filter(
+                    LocationResponsible.location_id == to_id,
+                    LocationResponsible.user_id != current_user.id,
+                ).first() is not None
+            ):
+                db.session.add(TransferNotice(movement_id=m.id, location_id=to_id))
 
             if generate_pending:
                 # Un pendiente por unidad que debe volver (cada uno qty 1), asi
@@ -6941,6 +7087,24 @@ def inject_stock_count_badge():
         count = 0
     return {"stock_count_badge_count": count}
 
+
+@app.context_processor
+def inject_transfer_badge():
+    """Badge de 'Stock' para el TECNICO: transferencias recibidas sin ver.
+
+    Persistente (tabla transfer_notices), no de sesión: el técnico tiene que
+    verlo aunque entre al otro día desde otro dispositivo. Desaparece cuando él
+    o el otro responsable de la camioneta tocan "Entendido" en el popup.
+    """
+    count = 0
+    try:
+        if current_user.is_authenticated and current_user.role == "TECNICO":
+            q = open_transfer_notices_query(current_user)
+            count = q.count() if q is not None else 0
+    except Exception:
+        count = 0
+    return {"transfer_badge_count": count}
+
 # ------------------ ADMIN: EDICIÓN (solo ADMIN) ------------------
 
 @app.route("/locations/<int:loc_id>/edit", methods=["GET", "POST"])
@@ -7978,6 +8142,9 @@ def admin_clear_stock():
         return redirect(url_for("admin_panel"))
 
     try:
+        # Los avisos cuelgan de movimientos: si quedaran, los ids de movimiento
+        # se reusan y un aviso viejo aparecería pegado a un movimiento nuevo.
+        TransferNotice.query.delete()
         PendingReturn.query.delete()
         PendingDelivery.query.delete()
         RemitoLine.query.delete()
@@ -8023,6 +8190,9 @@ def admin_clear_items():
         return redirect(url_for("admin_panel"))
 
     try:
+        # Los avisos cuelgan de movimientos: si quedaran, los ids de movimiento
+        # se reusan y un aviso viejo aparecería pegado a un movimiento nuevo.
+        TransferNotice.query.delete()
         PendingReturn.query.delete()
         PendingDelivery.query.delete()
         RemitoLine.query.delete()
@@ -8735,6 +8905,11 @@ def stock_alerts():
 
     rows = q.order_by(Item.code).all()
 
+    # Repuestos que pidieron los técnicos y la Jaula no cubre (recordatorio de
+    # compra). Va aparte de las alertas por mínimo: no depende de stock_min ni
+    # de los filtros de arriba, y no suma al puntito de novedades.
+    repuestos_sin_stock = repair_request_shortages()
+
     # Ítems ya solicitados: derivado de solicitudes de compra REALIZADAS.
     requested_map = requested_numbers_map()
 
@@ -8777,6 +8952,7 @@ def stock_alerts():
     return render_template(
         "stock_alerts.html",
         alerts=alerts,
+        repuestos_sin_stock=repuestos_sin_stock,
         locations=locations_list,
         items=items_list,
         categories=categories_list,
@@ -8946,11 +9122,23 @@ def purchase_requests():
     reqs_page = paginate(PurchaseRequest.query.order_by(PurchaseRequest.created_at.desc()))
     reqs = reqs_page.items
     alert_items = alert_items_distinct()
+    # "Otros ítems" (2026-09-30): además de los que están en alerta se puede
+    # pedir cualquier ítem activo. Se ofrecen los que NO están en la tabla de
+    # alertas, para que un mismo ítem no pueda quedar cargado dos veces (el
+    # backend igual lo rechaza). Solo para quien crea (ADMIN/SUPERVISOR).
+    other_items = []
+    if current_user.role in ("ADMIN", "SUPERVISOR"):
+        alert_ids = {e["item"].id for e in alert_items}
+        other_items = [
+            it for it in Item.query.filter(Item.is_active == True).order_by(Item.code).all()
+            if it.id not in alert_ids
+        ]
     return render_template(
         "purchase_requests.html",
         requests=reqs,
         page_obj=reqs_page,
         alert_items=alert_items,
+        other_items=other_items,
         recipient_users=selectable_recipient_users(),
     )
 
@@ -8959,7 +9147,8 @@ def purchase_requests():
 @login_required
 @role_required("ADMIN", "SUPERVISOR")
 def purchase_request_new():
-    # Ítems válidos = los que hoy están en alerta (no se puede pedir otra cosa).
+    # Tabla de alertas: solo ítems que hoy están en alerta (igual que siempre).
+    # Cualquier otro ítem entra por "Otros ítems", más abajo.
     valid_ids = {e["item"].id for e in alert_items_distinct()}
 
     selected = request.form.getlist("item_id")
@@ -8978,6 +9167,43 @@ def purchase_request_new():
         if qty <= 0:
             continue
         lines_to_create.append((iid, qty))
+
+    # "Otros ítems" (2026-09-30): cualquier ítem ACTIVO, esté o no en alerta.
+    # A diferencia de la tabla de alertas (que saltea en silencio lo que no
+    # sirve), acá cada fila se valida y un error frena todo: son filas que la
+    # persona cargó a mano y tiene que saber por qué no entraron.
+    # Una fila sin ítem es una fila que no existe (misma regla que el resto).
+    ya_cargados = {iid for iid, _ in lines_to_create}
+    extra_ids = request.form.getlist("extra_item_id[]")
+    extra_qtys = request.form.getlist("extra_qty[]")
+    for idx, raw in enumerate(extra_ids):
+        raw = (raw or "").strip()
+        if not raw:
+            continue
+        n = idx + 1
+        if not raw.isdigit():
+            flash(f"Otros ítems, fila {n}: ítem inválido.", "error")
+            return redirect(url_for("purchase_requests"))
+        it = Item.query.get(int(raw))
+        if not it or not it.is_active:
+            flash(f"Otros ítems, fila {n}: el ítem no existe o está dado de baja.", "error")
+            return redirect(url_for("purchase_requests"))
+        qty_raw = (extra_qtys[idx] if idx < len(extra_qtys) else "") or ""
+        try:
+            qty = int(qty_raw.strip())
+        except (TypeError, ValueError):
+            qty = 0
+        if qty <= 0:
+            flash(f"Otros ítems, fila {n}: la cantidad tiene que ser mayor a 0.", "error")
+            return redirect(url_for("purchase_requests"))
+        if it.id in ya_cargados:
+            flash(
+                f"«{it.code} - {it.name}» está cargado dos veces. "
+                "Dejalo en una sola línea con la cantidad total.", "error",
+            )
+            return redirect(url_for("purchase_requests"))
+        ya_cargados.add(it.id)
+        lines_to_create.append((it.id, qty))
 
     if not lines_to_create:
         flash("Seleccioná al menos un ítem con cantidad mayor a 0.", "error")
@@ -9060,8 +9286,9 @@ def purchase_request_mark_done(pr_id: int):
 
 # ================================================================
 #  SOLICITUD DE REPUESTOS
-#  Aditivo. El técnico pide repuestos (ítems con stock en Jaula). Queda
-#  PENDIENTE con alerta para admin/supervisor. Al cerrar, admin/supervisor
+#  Aditivo. El técnico pide repuestos (cualquier ítem activo; lo que no hay en
+#  la Jaula queda como recordatorio de compra, ver repair_request_shortages).
+#  Queda PENDIENTE con alerta para admin/supervisor. Al cerrar, admin/supervisor
 #  eligen los seriales (si aplica) y se generan los movimientos Jaula ->
 #  camioneta del técnico. Permite cierre parcial (entrega lo que haya).
 # ================================================================
@@ -9086,6 +9313,49 @@ def _jaula_stock_map():
     return out
 
 
+def repair_request_shortages():
+    """Repuestos pedidos por los técnicos que la Jaula no alcanza a cubrir.
+
+    Es el recordatorio de compra. Desde 2026-09-30 el técnico puede pedir algo
+    que no hay en la Jaula (pedido de los técnicos tras la capacitación), y
+    alguien tiene que ver qué falta comprar.
+
+    Se DERIVA de las solicitudes PENDIENTE contra el stock actual de la Jaula:
+    no se guarda nada. En cuanto la solicitud se cierra, se rechaza o se
+    cancela, o entra la compra a la Jaula, el ítem deja de figurar solo.
+
+    Lo pedido se suma por ítem entre TODAS las pendientes: dos pedidos de 3
+    contra 4 en la Jaula son 2 a comprar, aunque cada uno por separado entre.
+
+    Devuelve [{item, pedido, en_jaula, faltante, requests}] ordenado por código.
+    Solo lectura.
+    """
+    jaula_stock = _jaula_stock_map()
+    rows = (
+        db.session.query(RepairRequestLine, RepairRequest)
+        .join(RepairRequest, RepairRequest.id == RepairRequestLine.repair_request_id)
+        .filter(RepairRequest.status == "PENDIENTE")
+        .order_by(RepairRequest.created_at, RepairRequest.id)
+        .all()
+    )
+    by_item: dict[int, dict] = {}
+    for ln, rr in rows:
+        e = by_item.setdefault(ln.item_id, {"item": ln.item, "pedido": 0, "requests": []})
+        e["pedido"] += ln.qty
+        if rr not in e["requests"]:
+            e["requests"].append(rr)
+
+    out = []
+    for item_id, e in by_item.items():
+        en_jaula = jaula_stock.get(item_id, 0)
+        if e["pedido"] > en_jaula:
+            e["en_jaula"] = en_jaula
+            e["faltante"] = e["pedido"] - en_jaula
+            out.append(e)
+    out.sort(key=lambda e: (e["item"].code or "").lower())
+    return out
+
+
 @app.route("/solicitudes-repuestos", methods=["GET"])
 @login_required
 @role_required("ADMIN", "SUPERVISOR", "TECNICO")
@@ -9097,20 +9367,33 @@ def repair_requests():
     reqs = reqs_page.items
 
     # Datos para el form de nueva solicitud (solo técnicos crean).
-    trucks = _tech_trucks(current_user.id) if current_user.role == "TECNICO" else []
+    is_tecnico = current_user.role == "TECNICO"
+    trucks = _tech_trucks(current_user.id) if is_tecnico else []
     jaula_stock = _jaula_stock_map()
-    items_jaula = (
-        Item.query.filter(Item.is_active == True, Item.id.in_(list(jaula_stock.keys())))
-        .order_by(Item.code).all()
-    ) if jaula_stock else []
+    # El técnico puede pedir CUALQUIER ítem activo, haya o no en la Jaula
+    # (2026-09-30). Antes solo se le listaban los que tenían stock ahí. Lo que
+    # no hay queda marcado "sin stock en Jaula" y la solicitud espera la compra.
+    # Ve solo código y nombre: el template no le muestra cantidades de la Jaula.
+    items_catalogo = (
+        Item.query.filter(Item.is_active == True).order_by(Item.code).all()
+    ) if is_tecnico else []
+
+    # Solicitudes PENDIENTE con algo que la Jaula no cubre ("A comprar").
+    # Solo para quien compra/entrega: el técnico no recibe esa marca.
+    a_comprar_ids = set()
+    if current_user.role in ("ADMIN", "SUPERVISOR"):
+        a_comprar_ids = {
+            rr.id for e in repair_request_shortages() for rr in e["requests"]
+        }
 
     return render_template(
         "repair_requests.html",
         requests=reqs,
         page_obj=reqs_page,
         trucks=trucks,
-        items=items_jaula,
+        items=items_catalogo,
         jaula_stock=jaula_stock,
+        a_comprar_ids=a_comprar_ids,
     )
 
 
@@ -9145,6 +9428,9 @@ def repair_request_new():
     qtys = request.form.getlist("qty[]")
 
     parsed = []
+    # Ítems pedidos que hoy no tienen NADA en la Jaula: no frenan la solicitud,
+    # solo se le avisa al técnico que van a esperar la compra.
+    sin_stock = []
     # Un repuesto = una sola línea (ver nota en movements_bulk).
     seen_items = {}
     for idx in range(len(item_ids)):
@@ -9172,9 +9458,12 @@ def repair_request_new():
         if not item or not item.is_active:
             flash(f"Línea {n}: el ítem no existe o está dado de baja.", "error")
             return redirect(url_for("repair_requests"))
+        # Sin stock en la Jaula YA NO frena el pedido (2026-09-30): la solicitud
+        # queda PENDIENTE y sirve de recordatorio de compra (ver
+        # repair_request_shortages). Entregar sigue exigiendo stock real: eso lo
+        # valida repair_request_close(), que no cambió.
         if jaula_stock.get(item.id, 0) <= 0:
-            flash(f"«{item.code} - {item.name}» no tiene stock en la Jaula, no se puede solicitar.", "error")
-            return redirect(url_for("repair_requests"))
+            sin_stock.append(f"«{item.code} - {item.name}»")
         if item.id in seen_items:
             flash(
                 f"Línea {n}: «{item.code} - {item.name}» ya está cargado en la "
@@ -9203,7 +9492,15 @@ def repair_request_new():
         for iid, qty in parsed:
             db.session.add(RepairRequestLine(repair_request_id=pr.id, item_id=iid, qty=qty))
         db.session.commit()
-        flash(f"Solicitud de repuestos creada: {number}", "ok")
+        msg = f"Solicitud de repuestos creada: {number}"
+        if sin_stock:
+            # Un solo mensaje "ok": la solicitud SÍ se creó. base.html pinta en
+            # rojo todo lo que no sea "ok", y esto no es un error.
+            msg += (
+                f". Sin stock en la Jaula: {', '.join(sin_stock)}. "
+                "Queda pendiente hasta que se compre."
+            )
+        flash(msg, "ok")
         return redirect(url_for("repair_request_detail", rr_id=pr.id))
     except Exception as e:
         db.session.rollback()

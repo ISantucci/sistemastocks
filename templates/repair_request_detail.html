@@ -38,7 +38,7 @@
   <div class="table-scroll">
     <table class="data-table">
       <thead>
-        <tr><th>Código</th><th>Repuesto</th><th class="num">Pedido</th><th class="num">Entregado</th></tr>
+        <tr><th>Código</th><th>Repuesto</th><th class="num">Pedido</th><th class="num">Entregado</th>{% if can_close %}<th class="num">En Jaula</th>{% endif %}</tr>
       </thead>
       <tbody>
         {% for ln in rr.lines %}
@@ -47,6 +47,16 @@
           <td>{{ ln.item.name }}{% if ln.item.serialized %} <span class="badge badge-neutral">serial</span>{% endif %}</td>
           <td class="num">{{ fmt_qty(ln.qty, ln.item) }}</td>
           <td class="num">{% if rr.status in ("PENDIENTE", "CANCELADA", "RECHAZADA") %}<span class="muted">—</span>{% else %}{{ fmt_qty(ln.qty_entregada, ln.item) }}{% endif %}</td>
+          {% if can_close %}
+            {# Solo para quien entrega, y solo mientras está PENDIENTE: el técnico
+               puede pedir lo que no hay, y esto dice cuánto falta comprar para
+               esta línea. Contra el stock ACTUAL de la Jaula. #}
+            {% set en_j = jaula_stock.get(ln.item.id, 0) %}
+            <td class="num">
+              {{ fmt_qty(en_j, ln.item) }}
+              {% if ln.qty > en_j %}<span class="badge badge-warn" title="La Jaula no cubre lo pedido">faltan {{ fmt_qty(ln.qty - en_j, ln.item) }}</span>{% endif %}
+            </td>
+          {% endif %}
         </tr>
         {% endfor %}
       </tbody>

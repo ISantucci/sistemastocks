@@ -9,6 +9,7 @@
     <p>
       {% if me and me.role == "TECNICO" %}
         Pedí los repuestos que necesitás. Un supervisor o admin cierra la entrega y te llegan a tu camioneta.
+        Si algo no hay en la Jaula lo podés pedir igual: queda pendiente hasta que se compre.
       {% else %}
         Pedidos de repuestos de los técnicos. Al cerrarlos elegís los seriales (si aplica) y se genera el movimiento Jaula → camioneta.
       {% endif %}
@@ -22,7 +23,7 @@
   {% if not trucks %}
     <p class="muted">No tenés una camioneta asignada. Pedile a un supervisor que te asigne una para poder solicitar repuestos.</p>
   {% elif not items %}
-    <p class="muted">No hay repuestos con stock en la Jaula en este momento.</p>
+    <p class="muted">No hay ítems activos en el catálogo.</p>
   {% else %}
   <form method="post" action="{{ url_for('repair_request_new') }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -62,8 +63,11 @@
         <label>Repuesto</label>
         <select name="item_id[]" class="js-buscar" required>
           <option value="" selected disabled>Seleccionar repuesto...</option>
+          {# Se ofrece todo el catálogo activo. Lo que no hay en la Jaula se
+             puede pedir igual (queda esperando la compra): solo se avisa.
+             Al técnico no se le muestra cuánto hay, solo si no hay nada. #}
           {% for it in items %}
-            <option value="{{ it.id }}">{{ it.code }} - {{ it.name }}</option>
+            <option value="{{ it.id }}">{{ it.code }} - {{ it.name }}{% if not jaula_stock.get(it.id) %} (sin stock en Jaula){% endif %}</option>
           {% endfor %}
         </select>
       </div>
@@ -106,6 +110,7 @@
               <span class="badge badge-danger">RECHAZADA</span>
             {% else %}
               <span class="badge badge-neutral">PENDIENTE</span>
+              {% if r.id in a_comprar_ids %}<span class="badge badge-warn" title="Hay repuestos que la Jaula no cubre: ver Alertas de Stock">A comprar</span>{% endif %}
             {% endif %}
           </td>
           <td>{{ r.dest_location.name if r.dest_location else "-" }}</td>
@@ -128,7 +133,7 @@
      static/js/repair_requests.js. */
   window.RR_DATA = {
     allItems: [
-      {% for it in items %}{ value: "{{ it.id }}", text: "{{ (it.code ~ ' - ' ~ it.name)|e }}" },
+      {% for it in items %}{ value: "{{ it.id }}", text: "{{ (it.code ~ ' - ' ~ it.name ~ ('' if jaula_stock.get(it.id) else ' (sin stock en Jaula)'))|e }}" },
       {% endfor %}
     ]
   };
