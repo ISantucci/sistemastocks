@@ -4,6 +4,48 @@
 {% block content %}
 <div class="page-header"><div><h2>Alertas de Stock</h2><p>Ítems en nivel crítico o preventivo según el semáforo de stock.</p></div></div>
 
+{# Recordatorio de compra: repuestos que pidieron los técnicos y la Jaula no
+   cubre. Sale de las solicitudes de repuestos PENDIENTE contra el stock actual
+   de la Jaula (repair_request_shortages): no se guarda nada, y cuando la
+   solicitud se cierra/rechaza/cancela o entra la compra, desaparece solo.
+   Si no hay nada que comprar, la pantalla queda exactamente como antes. #}
+{% if repuestos_sin_stock %}
+<div class="table-card" style="margin-bottom:16px;">
+  <div class="card-header" style="padding:12px 16px 0;">
+    <span class="card-title">Repuestos pedidos sin stock en la Jaula</span>
+  </div>
+  <p class="muted" style="margin:4px 16px 8px;">Lo piden los técnicos en solicitudes de repuestos pendientes y la Jaula no alcanza a cubrirlo.</p>
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Código</th>
+          <th>Nombre</th>
+          <th class="num">Pedido</th>
+          <th class="num">En Jaula</th>
+          <th class="num">A comprar</th>
+          <th>Solicitudes</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in repuestos_sin_stock %}
+        <tr>
+          <td>{{ r.item.code }}</td>
+          <td>{{ r.item.name }}</td>
+          <td class="num">{{ fmt_qty(r.pedido, r.item) }}</td>
+          <td class="num">{{ fmt_qty(r.en_jaula, r.item) }}</td>
+          <td class="num stock-red">{{ fmt_qty(r.faltante, r.item) }}</td>
+          <td>
+            {% for rr in r.requests %}<a href="{{ url_for('repair_request_detail', rr_id=rr.id) }}">{{ rr.number }}</a>{% if not loop.last %}, {% endif %}{% endfor %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
 <div class="card">
   <form method="get" class="filters-grid">
     <div class="field">

@@ -8735,6 +8735,11 @@ def stock_alerts():
 
     rows = q.order_by(Item.code).all()
 
+    # Repuestos que pidieron los técnicos y la Jaula no cubre (recordatorio de
+    # compra). Va aparte de las alertas por mínimo: no depende de stock_min ni
+    # de los filtros de arriba, y no suma al puntito de novedades.
+    repuestos_sin_stock = repair_request_shortages()
+
     # Ítems ya solicitados: derivado de solicitudes de compra REALIZADAS.
     requested_map = requested_numbers_map()
 
@@ -8777,6 +8782,7 @@ def stock_alerts():
     return render_template(
         "stock_alerts.html",
         alerts=alerts,
+        repuestos_sin_stock=repuestos_sin_stock,
         locations=locations_list,
         items=items_list,
         categories=categories_list,
@@ -9060,8 +9066,9 @@ def purchase_request_mark_done(pr_id: int):
 
 # ================================================================
 #  SOLICITUD DE REPUESTOS
-#  Aditivo. El técnico pide repuestos (ítems con stock en Jaula). Queda
-#  PENDIENTE con alerta para admin/supervisor. Al cerrar, admin/supervisor
+#  Aditivo. El técnico pide repuestos (cualquier ítem activo; lo que no hay en
+#  la Jaula queda como recordatorio de compra, ver repair_request_shortages).
+#  Queda PENDIENTE con alerta para admin/supervisor. Al cerrar, admin/supervisor
 #  eligen los seriales (si aplica) y se generan los movimientos Jaula ->
 #  camioneta del técnico. Permite cierre parcial (entrega lo que haya).
 # ================================================================
@@ -9086,6 +9093,49 @@ def _jaula_stock_map():
     return out
 
 
+def repair_request_shortages():
+    """Repuestos pedidos por los técnicos que la Jaula no alcanza a cubrir.
+
+    Es el recordatorio de compra. Desde 2026-09-30 el técnico puede pedir algo
+    que no hay en la Jaula (pedido de los técnicos tras la capacitación), y
+    alguien tiene que ver qué falta comprar.
+
+    Se DERIVA de las solicitudes PENDIENTE contra el stock actual de la Jaula:
+    no se guarda nada. En cuanto la solicitud se cierra, se rechaza o se
+    cancela, o entra la compra a la Jaula, el ítem deja de figurar solo.
+
+    Lo pedido se suma por ítem entre TODAS las pendientes: dos pedidos de 3
+    contra 4 en la Jaula son 2 a comprar, aunque cada uno por separado entre.
+
+    Devuelve [{item, pedido, en_jaula, faltante, requests}] ordenado por código.
+    Solo lectura.
+    """
+    jaula_stock = _jaula_stock_map()
+    rows = (
+        db.session.query(RepairRequestLine, RepairRequest)
+        .join(RepairRequest, RepairRequest.id == RepairRequestLine.repair_request_id)
+        .filter(RepairRequest.status == "PENDIENTE")
+        .order_by(RepairRequest.created_at, RepairRequest.id)
+        .all()
+    )
+    by_item: dict[int, dict] = {}
+    for ln, rr in rows:
+        e = by_item.setdefault(ln.item_id, {"item": ln.item, "pedido": 0, "requests": []})
+        e["pedido"] += ln.qty
+        if rr not in e["requests"]:
+            e["requests"].append(rr)
+
+    out = []
+    for item_id, e in by_item.items():
+        en_jaula = jaula_stock.get(item_id, 0)
+        if e["pedido"] > en_jaula:
+            e["en_jaula"] = en_jaula
+            e["faltante"] = e["pedido"] - en_jaula
+            out.append(e)
+    out.sort(key=lambda e: (e["item"].code or "").lower())
+    return out
+
+
 @app.route("/solicitudes-repuestos", methods=["GET"])
 @login_required
 @role_required("ADMIN", "SUPERVISOR", "TECNICO")
@@ -9097,20 +9147,33 @@ def repair_requests():
     reqs = reqs_page.items
 
     # Datos para el form de nueva solicitud (solo técnicos crean).
-    trucks = _tech_trucks(current_user.id) if current_user.role == "TECNICO" else []
+    is_tecnico = current_user.role == "TECNICO"
+    trucks = _tech_trucks(current_user.id) if is_tecnico else []
     jaula_stock = _jaula_stock_map()
-    items_jaula = (
-        Item.query.filter(Item.is_active == True, Item.id.in_(list(jaula_stock.keys())))
-        .order_by(Item.code).all()
-    ) if jaula_stock else []
+    # El técnico puede pedir CUALQUIER ítem activo, haya o no en la Jaula
+    # (2026-09-30). Antes solo se le listaban los que tenían stock ahí. Lo que
+    # no hay queda marcado "sin stock en Jaula" y la solicitud espera la compra.
+    # Ve solo código y nombre: el template no le muestra cantidades de la Jaula.
+    items_catalogo = (
+        Item.query.filter(Item.is_active == True).order_by(Item.code).all()
+    ) if is_tecnico else []
+
+    # Solicitudes PENDIENTE con algo que la Jaula no cubre ("A comprar").
+    # Solo para quien compra/entrega: el técnico no recibe esa marca.
+    a_comprar_ids = set()
+    if current_user.role in ("ADMIN", "SUPERVISOR"):
+        a_comprar_ids = {
+            rr.id for e in repair_request_shortages() for rr in e["requests"]
+        }
 
     return render_template(
         "repair_requests.html",
         requests=reqs,
         page_obj=reqs_page,
         trucks=trucks,
-        items=items_jaula,
+        items=items_catalogo,
         jaula_stock=jaula_stock,
+        a_comprar_ids=a_comprar_ids,
     )
 
 
@@ -9145,6 +9208,9 @@ def repair_request_new():
     qtys = request.form.getlist("qty[]")
 
     parsed = []
+    # Ítems pedidos que hoy no tienen NADA en la Jaula: no frenan la solicitud,
+    # solo se le avisa al técnico que van a esperar la compra.
+    sin_stock = []
     # Un repuesto = una sola línea (ver nota en movements_bulk).
     seen_items = {}
     for idx in range(len(item_ids)):
@@ -9172,9 +9238,12 @@ def repair_request_new():
         if not item or not item.is_active:
             flash(f"Línea {n}: el ítem no existe o está dado de baja.", "error")
             return redirect(url_for("repair_requests"))
+        # Sin stock en la Jaula YA NO frena el pedido (2026-09-30): la solicitud
+        # queda PENDIENTE y sirve de recordatorio de compra (ver
+        # repair_request_shortages). Entregar sigue exigiendo stock real: eso lo
+        # valida repair_request_close(), que no cambió.
         if jaula_stock.get(item.id, 0) <= 0:
-            flash(f"«{item.code} - {item.name}» no tiene stock en la Jaula, no se puede solicitar.", "error")
-            return redirect(url_for("repair_requests"))
+            sin_stock.append(f"«{item.code} - {item.name}»")
         if item.id in seen_items:
             flash(
                 f"Línea {n}: «{item.code} - {item.name}» ya está cargado en la "
@@ -9203,7 +9272,15 @@ def repair_request_new():
         for iid, qty in parsed:
             db.session.add(RepairRequestLine(repair_request_id=pr.id, item_id=iid, qty=qty))
         db.session.commit()
-        flash(f"Solicitud de repuestos creada: {number}", "ok")
+        msg = f"Solicitud de repuestos creada: {number}"
+        if sin_stock:
+            # Un solo mensaje "ok": la solicitud SÍ se creó. base.html pinta en
+            # rojo todo lo que no sea "ok", y esto no es un error.
+            msg += (
+                f". Sin stock en la Jaula: {', '.join(sin_stock)}. "
+                "Queda pendiente hasta que se compre."
+            )
+        flash(msg, "ok")
         return redirect(url_for("repair_request_detail", rr_id=pr.id))
     except Exception as e:
         db.session.rollback()
