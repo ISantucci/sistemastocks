@@ -137,4 +137,46 @@
   </div>
   {{ pagination(page_obj, "fila de stock", "filas de stock") }}
 </div>
+
+{#- Popup de transferencias recibidas (solo TECNICO, ver TransferNotice).
+    Se pinta ya abierto desde el servidor: no hace falta JS propio. La X, Esc o
+    tocar afuera lo cierran SIN marcarlo como visto (vuelve a aparecer la
+    próxima vez); solo "Entendido" lo marca, y para toda la camioneta.
+    Los notice_id son exactamente los avisos mostrados: lo que llegue mientras
+    tanto no se da por visto. -#}
+{% if transfer_groups %}
+<div class="modal-overlay open" id="modal-transfer-notice" role="dialog" aria-modal="true" aria-labelledby="transfer-notice-title">
+  <div class="modal" style="max-width:520px;">
+    <div class="modal-header">
+      <span class="modal-title" id="transfer-notice-title">Transferencia recibida</span>
+      <button type="button" class="modal-close" aria-label="Cerrar" onclick="closeModal('modal-transfer-notice')">&times;</button>
+    </div>
+    <div class="modal-body">
+      {% for g in transfer_groups %}
+      <div class="transfer-notice-group">
+        <p style="margin:0 0 8px;">
+          <strong>{{ g.sender.full_name or g.sender.username }}</strong>
+          te ha transferido {{ "el siguiente ítem" if g.lines|length == 1 else "los siguientes ítems" }}:
+        </p>
+        <table class="data-table">
+          <tbody>
+            {% for l in g.lines %}
+            <tr>
+              <td>{{ l.item.code }} - {{ l.item.name }}</td>
+              <td class="num" style="white-space:nowrap;">{{ fmt_qty(l.qty, l.item) }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% endfor %}
+    </div>
+    <form method="post" action="{{ url_for('transfer_notices_ack') }}" class="modal-footer" style="margin:0;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      {% for nid in transfer_notice_ids %}<input type="hidden" name="notice_id" value="{{ nid }}">{% endfor %}
+      <button type="submit" class="btn btn-primary">Entendido</button>
+    </form>
+  </div>
+</div>
+{% endif %}
 {% endblock %}

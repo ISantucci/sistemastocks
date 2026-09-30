@@ -1547,6 +1547,41 @@ class PendingReturn(db.Model):
     returned_by = db.relationship("User", foreign_keys=[returned_by_user_id])
     cancelled_by = db.relationship("User", foreign_keys=[cancelled_by_user_id])
 
+
+class TransferNotice(db.Model):
+    """Aviso de transferencia entre camionetas (2026-09-30).
+
+    Cuando un TÉCNICO mueve algo de su camioneta a la de otro, los responsables
+    de la camioneta que recibe ven un badge en "Stock" y, al entrar, un popup
+    con lo que les transfirieron. Pedido de los técnicos tras la capacitación.
+
+    Es UN aviso por movimiento, compartido por la camioneta (decisión de
+    Ignacio): si la camioneta tiene dos responsables, lo ven los dos, y cuando
+    CUALQUIERA toca "Entendido" desaparece para ambos. Queda quién y cuándo.
+
+    Es solo un aviso: no es una aceptación. El stock ya se movió al cargar el
+    movimiento, y ese movimiento no cambia.
+
+    Tabla NUEVA: no modifica ninguna existente, la crea db.create_all() al
+    arrancar. Se escribe en la MISMA transacción que el movimiento (o se
+    guardan los dos o ninguno).
+    """
+    __tablename__ = "transfer_notices"
+
+    id = db.Column(db.Integer, primary_key=True)
+    created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
+    movement_id = db.Column(db.Integer, db.ForeignKey("movements.id"), nullable=False, unique=True)
+    # Camioneta que recibe. El aviso es de la camioneta, no de una persona: lo
+    # ven sus responsables actuales (LocationResponsible).
+    location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), nullable=False)
+    # NULL = todavía no lo vio nadie.
+    seen_at = db.Column(db.DateTime, nullable=True)
+    seen_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+
+    movement = db.relationship("Movement")
+    location = db.relationship("Location")
+    seen_by = db.relationship("User")
+
 # ------------------ REMITOS ------------------
 
 class Remito(db.Model):
@@ -4923,6 +4958,11 @@ def stock():
 
     items_list, items_remote = item_picker_options(q_text, value_field="code")
 
+    # Popup de transferencias recibidas (solo TECNICO). Ver TransferNotice.
+    transfer_groups, transfer_notice_ids = (
+        transfer_notice_groups(current_user) if is_tecnico else ([], [])
+    )
+
     return render_template(
         "stock.html",
         stock_rows=rows,
@@ -4936,7 +4976,96 @@ def stock():
         selected_trackable=trackable,
         selected_q=q_text,
         is_tecnico=is_tecnico,
+        transfer_groups=transfer_groups,
+        transfer_notice_ids=transfer_notice_ids,
     )
+
+
+# ------------------ AVISOS DE TRANSFERENCIA (ver TransferNotice) ------------------
+
+def open_transfer_notices_query(user):
+    """Avisos sin ver de las camionetas de las que `user` es responsable.
+
+    None si no es responsable de ninguna ubicación (no hay nada que mostrarle).
+    Deja afuera:
+    - los que ya vio alguien (el aviso es compartido por la camioneta);
+    - los de movimientos revertidos (el stock volvió: no hay nada que avisar);
+    - los movimientos que cargó él mismo (si comparte la camioneta destino).
+    Única fuente de verdad: la usan el badge, el popup y el "Entendido".
+    """
+    loc_ids = tech_location_ids_for(user)
+    if not loc_ids:
+        return None
+    return (
+        TransferNotice.query
+        .join(Movement, Movement.id == TransferNotice.movement_id)
+        .filter(
+            TransferNotice.location_id.in_(loc_ids),
+            TransferNotice.seen_at.is_(None),
+            Movement.reverted_at.is_(None),
+            Movement.user_id != user.id,
+        )
+    )
+
+
+def transfer_notice_groups(user):
+    """Avisos sin ver agrupados por quién transfirió, para el popup de /stock.
+
+    Devuelve ([{sender, lines: [{item, qty}]}], [ids de los avisos mostrados]).
+    Si el mismo técnico transfirió el mismo ítem en dos movimientos, se suma en
+    una sola línea. Los ids viajan en el form del popup: "Entendido" marca
+    EXACTAMENTE lo que se mostró, no algo que haya llegado después.
+    """
+    q = open_transfer_notices_query(user)
+    if q is None:
+        return [], []
+    notices = q.order_by(TransferNotice.created_at, TransferNotice.id).all()
+
+    groups: dict[int, dict] = {}
+    for n in notices:
+        m = n.movement
+        g = groups.setdefault(m.user_id, {"sender": m.user, "lines": {}})
+        line = g["lines"].setdefault(m.item_id, {"item": m.item, "qty": 0})
+        line["qty"] += m.qty
+
+    out = []
+    for g in groups.values():   # dict conserva el orden: primero el más antiguo
+        out.append({
+            "sender": g["sender"],
+            "lines": sorted(g["lines"].values(), key=lambda l: (l["item"].code or "").lower()),
+        })
+    return out, [n.id for n in notices]
+
+
+@app.route("/stock/avisos-transferencia/visto", methods=["POST"])
+@login_required
+@role_required("TECNICO")
+def transfer_notices_ack():
+    """"Entendido" del popup: marca como vistos los avisos que se mostraron.
+
+    Solo los de SUS camionetas y solo los que siguen sin ver: los ids que
+    llegan por el form se cruzan contra open_transfer_notices_query(), así que
+    mandar a mano el id de un aviso ajeno no hace nada.
+    El UPDATE lleva `seen_at IS NULL`: si los dos responsables tocan
+    "Entendido" a la vez, queda registrado el primero y el segundo no lo pisa.
+    """
+    ids = {int(x) for x in request.form.getlist("notice_id") if x.isdigit()}
+    q = open_transfer_notices_query(current_user)
+    if ids and q is not None:
+        valid_ids = [n.id for n in q.filter(TransferNotice.id.in_(ids)).all()]
+        if valid_ids:
+            try:
+                (TransferNotice.query
+                 .filter(TransferNotice.id.in_(valid_ids), TransferNotice.seen_at.is_(None))
+                 .update({
+                     TransferNotice.seen_at: now_ar(),
+                     TransferNotice.seen_by_user_id: current_user.id,
+                 }, synchronize_session=False))
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+                flash("No se pudo marcar el aviso como visto. Probá de nuevo.", "error")
+    return redirect(url_for("stock"))
 
 
 @app.route("/stock/export.csv", methods=["GET"])
@@ -5256,6 +5385,23 @@ def movements():
                             location_id=(None if to_ext else to_id),
                         ))
                 apply_serial_units_out(serial_units_to_apply, to_id)
+
+            # Aviso de transferencia (2026-09-30): un TÉCNICO que mueve de una
+            # camioneta a otra deja un aviso para los responsables de la que
+            # recibe. Va en esta misma transacción: si el movimiento falla no
+            # queda un aviso suelto, y si el aviso falla no queda un movimiento
+            # sin aviso. Solo si del otro lado hay alguien más que él (mover
+            # entre sus propias camionetas no le avisa a nadie).
+            if (
+                is_tecnico
+                and _from_loc is not None and _from_loc.is_truck
+                and to_location is not None and to_location.is_truck
+                and LocationResponsible.query.filter(
+                    LocationResponsible.location_id == to_id,
+                    LocationResponsible.user_id != current_user.id,
+                ).first() is not None
+            ):
+                db.session.add(TransferNotice(movement_id=m.id, location_id=to_id))
 
             if generate_pending:
                 # Un pendiente por unidad que debe volver (cada uno qty 1), asi
@@ -6941,6 +7087,24 @@ def inject_stock_count_badge():
         count = 0
     return {"stock_count_badge_count": count}
 
+
+@app.context_processor
+def inject_transfer_badge():
+    """Badge de 'Stock' para el TECNICO: transferencias recibidas sin ver.
+
+    Persistente (tabla transfer_notices), no de sesión: el técnico tiene que
+    verlo aunque entre al otro día desde otro dispositivo. Desaparece cuando él
+    o el otro responsable de la camioneta tocan "Entendido" en el popup.
+    """
+    count = 0
+    try:
+        if current_user.is_authenticated and current_user.role == "TECNICO":
+            q = open_transfer_notices_query(current_user)
+            count = q.count() if q is not None else 0
+    except Exception:
+        count = 0
+    return {"transfer_badge_count": count}
+
 # ------------------ ADMIN: EDICIÓN (solo ADMIN) ------------------
 
 @app.route("/locations/<int:loc_id>/edit", methods=["GET", "POST"])
@@ -7978,6 +8142,9 @@ def admin_clear_stock():
         return redirect(url_for("admin_panel"))
 
     try:
+        # Los avisos cuelgan de movimientos: si quedaran, los ids de movimiento
+        # se reusan y un aviso viejo aparecería pegado a un movimiento nuevo.
+        TransferNotice.query.delete()
         PendingReturn.query.delete()
         PendingDelivery.query.delete()
         RemitoLine.query.delete()
@@ -8023,6 +8190,9 @@ def admin_clear_items():
         return redirect(url_for("admin_panel"))
 
     try:
+        # Los avisos cuelgan de movimientos: si quedaran, los ids de movimiento
+        # se reusan y un aviso viejo aparecería pegado a un movimiento nuevo.
+        TransferNotice.query.delete()
         PendingReturn.query.delete()
         PendingDelivery.query.delete()
         RemitoLine.query.delete()

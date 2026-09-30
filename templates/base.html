@@ -60,6 +60,9 @@
         </a>
         <a href="{{ url_for('stock') }}" class="nav-link {% if request.endpoint == 'stock' %}active{% endif %}">
           <span class="nav-icon">&#9636;</span><span class="nav-label">Stock</span>
+          {#- Solo TECNICO: transferencias de otro técnico a su camioneta que
+              todavía no vio nadie de esa camioneta (ver TransferNotice). -#}
+          {% if transfer_badge_count and transfer_badge_count > 0 %}<span class="nav-badge" title="{{ transfer_badge_count }} transferencia(s) recibida(s) sin ver">{{ transfer_badge_count }}</span>{% endif %}
         </a>
       </div>
       {% if me and me.role in ["ADMIN", "SUPERVISOR", "TECNICO", "LECTOR"] %}
