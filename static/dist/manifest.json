@@ -6,7 +6,7 @@
     "fuentes actuales: si alguien edita el fuente y no corre 'npm run build',",
     "el test falla. Sin eso, produccion serviria la version vieja en silencio."
   ],
-  "generado": "2026-09-30T18:02:40.677Z",
+  "generado": "2026-10-01T17:19:46.527Z",
   "fuentes": {
     "css/app.css": "b6fbe4d34a8d",
     "css/legacy.css": "b0da420aaf8a",
@@ -29,6 +29,7 @@
     "js/remitos.js": "a2bab3db534a",
     "js/repair_request_detail.js": "e2013ca42079",
     "js/repair_requests.js": "239ae5056e5d",
+    "js/reparaciones.js": "f9a6270b5b3f",
     "js/scrap_report.js": "4a31623bbab8",
     "js/serial_picker.js": "3efcaf7e1dbe",
     "js/serial_scan.js": "16eee1970d15",
