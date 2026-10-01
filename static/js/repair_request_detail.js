@@ -21,8 +21,10 @@ document.addEventListener("DOMContentLoaded", function () {
       var n = parseInt(qty.value, 10);
       return isNaN(n) || n < 0 ? 0 : n;
     }
+    // Serializados: los seriales elegidos en el popup «Elegir S/N» quedan como
+    // inputs ocultos .sn-hidden de esa línea (static/js/serial_picker.js).
     return document.querySelectorAll(
-      'input[type="checkbox"][data-line="' + line + '"]:not(.rr-pending-flag):checked'
+      'input.sn-hidden[data-line="' + line + '"]'
     ).length;
   }
 
@@ -49,14 +51,12 @@ document.addEventListener("DOMContentLoaded", function () {
     }
   }
 
-  document.querySelectorAll('input[type="checkbox"][data-line]:not(.rr-pending-flag)').forEach(function (cb) {
-    cb.addEventListener("change", function () {
-      var line = cb.getAttribute("data-line");
-      var max = parseInt(cb.getAttribute("data-max"), 10) || 0;
-      var checked = document.querySelectorAll('input[data-line="' + line + '"]:not(.rr-pending-flag):checked');
-      if (checked.length > max) { cb.checked = false; }
-      syncReturnMax(line);
-    });
+  // El tope "hasta N" lo aplica el popup; acá solo se recalcula lo que se
+  // entrega en la línea cada vez que se confirma una selección.
+  document.addEventListener("sn:change", function (e) {
+    var box = e.target;
+    var line = box && box.getAttribute && box.getAttribute("data-line");
+    if (line) syncReturnMax(line);
   });
 
   document.querySelectorAll(".rr-qty").forEach(function (q) {

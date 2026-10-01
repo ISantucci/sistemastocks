@@ -483,6 +483,12 @@ table.data-table{ width: 100%; border-collapse: collapse; font-size: 13px; }
 }
 body.modal-open{ overflow: hidden; }
 
+/* ---------- Popup «Elegir S/N» (static/js/serial_picker.js) ----------
+   Mismo aspecto que el de Egresos, que es la referencia (2026-10-01). */
+.sn-row{ display: flex; gap: 8px; align-items: center; margin-bottom: 6px; cursor: pointer; }
+.sn-row input{ margin: 0; }
+.sn-open-btn{ margin-top: 4px; }
+
 /* ---------- Responsive ---------- */
 @media (max-width: 1024px){
   .app-shell{ grid-template-columns: var(--sidebar-w-collapsed) 1fr; }

@@ -36,7 +36,7 @@
   {% endif %}
 {%- endmacro %}
 
-{% macro close_form(p, kind, ret_item, units, returner_opts, origin_default, return_label) -%}
+{% macro close_form(p, kind, ret_item, units, returner_opts, origin_default, return_label, holder_name="") -%}
 {% set _n = pending_return_units(p) %}
 <form method="post" class="pending-action"
       data-confirm-move="Confirmar devolución"
@@ -70,21 +70,26 @@
     </div>
   </div>
   {% if ret_item.serialized %}
+  {#- Mismo selector que Egresos (popup «Elegir S/N», static/js/serial_picker.js).
+      Lo elegido viaja como "unit_id", igual que las casillas de antes. -#}
+  {% if units|length == 0 %}
   <div class="field js-ser-stock" style="margin-top:6px;{% if origin_default != 'stock' %} display:none;{% endif %}">
     <label>¿Qué serial vuelve?</label>
-    {% if units|length == 0 %}
-      <span class="muted" style="font-weight:400;">No hay seriales cargados en esa ubicación: se mueve por cantidad.</span>
-    {% elif units|length <= _n %}
-      <span class="muted" style="font-weight:400;">Se usa automáticamente: {{ units|map(attribute='serial')|join(', ') }}</span>
-    {% else %}
-      <div class="check-inline" style="gap:12px; flex-wrap:wrap;">
-        {% for u in units %}
-          <label class="check-inline"><input type="checkbox" name="unit_id" value="{{ u.id }}" data-confirm-skip> {{ u.serial }}</label>
-        {% endfor %}
-      </div>
-      <span class="muted" style="font-weight:400;">Elegí exactamente {{ _n }}.</span>
-    {% endif %}
+    <span class="muted" style="font-weight:400;">No hay seriales cargados en esa ubicación: se mueve por cantidad.</span>
   </div>
+  {% else %}
+  {% set _pairs = [] %}{% for u in units %}{% set _ = _pairs.append([u.id, u.serial]) %}{% endfor %}
+  <div class="field js-ser-stock js-sn-picker" style="margin-top:6px;{% if origin_default != 'stock' %} display:none;{% endif %}"
+       data-units='{{ _pairs|tojson }}'
+       data-qty="{{ _n }}" data-mode="exact" data-name="unit_id"
+       data-origin="{{ holder_name or 'la ubicación del técnico' }}">
+    <label>¿Qué serial vuelve?</label>
+    <div class="serial-pick-list"></div>
+    <span class="muted serial-pick-status" style="font-weight:400; font-size:13px;"></span>
+    <input type="text" class="serial-summary" name="serials_txt" readonly tabindex="-1"
+           style="border:0; background:transparent; padding:0; height:auto; font-size:13px; color:var(--text-secondary,#666);">
+  </div>
+  {% endif %}
   <div class="field js-ser-campo" style="margin-top:6px;{% if origin_default != 'campo' %} display:none;{% endif %}">
     <label>N° de serie que entra</label>
     {% for _i in range(_n) %}
@@ -277,7 +282,7 @@
             {% if me.role == "TECNICO" %}
               {% if _open %}<span class="muted">Solo lectura</span>{% endif %}
             {% elif _open %}
-              {{ close_form(r, "return", r.item, return_units.get(r.id, []), return_returner_options.get(r.id, []), "campo", "Ingresar OK (Jaula)") }}
+              {{ close_form(r, "return", r.item, return_units.get(r.id, []), return_returner_options.get(r.id, []), "campo", "Ingresar OK (Jaula)", r.location.name if r.location else "") }}
               {{ cancel_form(r, "return", r.item.code ~ " - " ~ r.item.name) }}
             {% endif %}
           </td>
@@ -332,7 +337,7 @@
             {% elif _open %}
               {# Default de siempre: el swap entra por Recuperado, el mismo ítem
                  sale de la camioneta. #}
-              {{ close_form(p, "delivery", ret_item, pending_units.get(p.id, []), returner_options.get(p.id, []), "campo" if swap else "stock", "Ingresar OK (Jaula)" if swap else "Devolver") }}
+              {{ close_form(p, "delivery", ret_item, pending_units.get(p.id, []), returner_options.get(p.id, []), "campo" if swap else "stock", "Ingresar OK (Jaula)" if swap else "Devolver", p.movement.to_location.name if p.movement and p.movement.to_location else "") }}
               {{ cancel_form(p, "delivery", ret_item.code ~ " - " ~ ret_item.name) }}
             {% endif %}
           </td>

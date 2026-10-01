@@ -164,14 +164,18 @@
       {% if ln.item.serialized %}
         {% set units = jaula_units.get(ln.item.id, []) %}
         {% if units %}
-          <p class="muted" style="margin:8px 0 4px;">Seriales disponibles en Jaula (elegí hasta {{ ln.qty }}):</p>
-          <div class="serial-pick-list" style="display:flex; flex-wrap:wrap; gap:8px;">
-            {% for u in units %}
-              <label style="display:inline-flex; align-items:center; gap:6px; border:1px solid var(--border,#d0d5dd); border-radius:8px; padding:6px 10px; font-size:14px; cursor:pointer;">
-                <input type="checkbox" name="unit_ids_{{ ln.id }}" value="{{ u[0] }}" data-line="{{ ln.id }}" data-max="{{ ln.qty }}">
-                {{ u[1] }}
-              </label>
-            {% endfor %}
+          {#- Mismo selector que Egresos (popup «Elegir S/N»,
+              static/js/serial_picker.js). Acá es "hasta N": se puede entregar
+              menos de lo pedido. Lo elegido viaja como unit_ids_<línea>, igual
+              que las casillas de antes. -#}
+          <div class="field js-sn-picker" style="margin-top:8px;"
+               data-units='{{ units|tojson }}' data-qty="{{ ln.qty }}" data-mode="max"
+               data-name="unit_ids_{{ ln.id }}" data-line="{{ ln.id }}" data-origin="Jaula">
+            <label>Seriales a entregar</label>
+            <div class="serial-pick-list"></div>
+    <span class="muted serial-pick-status" style="font-weight:400; font-size:13px;"></span>
+            <input type="text" class="serial-summary" name="serials_txt_{{ ln.id }}" readonly tabindex="-1"
+                   style="border:0; background:transparent; padding:0; height:auto; font-size:13px; color:var(--text-secondary,#666);">
           </div>
         {% else %}
           <p class="muted" style="margin:8px 0 0;">No hay seriales disponibles en la Jaula: de este ítem se entrega 0. Si no hay nada para entregar en toda la solicitud, rechazala en vez de cerrarla.</p>

@@ -19,7 +19,7 @@
         <label>Desde</label>
         {% if is_tecnico and locations|length == 1 %}
           <input type="text" value="{{ locations[0].name }}" readonly disabled />
-          <input type="hidden" name="from_location_id" id="from_location_id" value="{{ locations[0].id }}" />
+          <input type="hidden" name="from_location_id" id="from_location_id" value="{{ locations[0].id }}" data-label="{{ locations[0].name }}" />
         {% else %}
           <select name="from_location_id" id="from_location_id" required>
             <option value="" selected disabled>Seleccionar ubicación...</option>

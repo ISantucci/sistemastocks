@@ -85,28 +85,33 @@
               {% if r.item.serialized %}
               {% set _rs = repair_serials.get(r.id, {}) %}
               {% set _uns = repair_units.get(r.id, []) %}
+              {% if _rs.get("en_mesa") %}
               <div class="field" style="margin-top:6px;">
                 <label>¿Qué serial?</label>
-                {% if _rs.get("en_mesa") %}
-                  <span class="muted" style="font-weight:400;">Sale el de esta reparación: {{ _rs.orig|join(', ') }}</span>
-                {% else %}
+                <span class="muted" style="font-weight:400;">Sale el de esta reparación: {{ _rs.orig|join(', ') }}</span>
+              </div>
+              {% elif _uns|length == 0 %}
+              <div class="field" style="margin-top:6px;">
+                <label>¿Qué serial?</label>
+                <span class="muted" style="font-weight:400;">No hay seriales de este ítem en la mesa: se mueve por cantidad.</span>
+              </div>
+              {% else %}
+              {#- Mismo selector que Egresos (popup «Elegir S/N»,
+                  static/js/serial_picker.js). Viaja como "unit_id". -#}
+              {% set _pairs = [] %}{% for u in _uns %}{% set _ = _pairs.append([u.id, u.serial]) %}{% endfor %}
+              <div class="field js-sn-picker" style="margin-top:6px;"
+                   data-units='{{ _pairs|tojson }}' data-qty="{{ r.quantity }}"
+                   data-mode="exact" data-name="unit_id" data-origin="la mesa de reparación">
+                <label>¿Qué serial?</label>
                 {% if _rs.get("orig") %}
                   <span class="muted" style="font-weight:400; display:block;">El serial de esta reparación ({{ _rs.orig|join(', ') }}) ya no está en la mesa: elegí cuál sale.</span>
                 {% endif %}
-                {% if _uns|length == 0 %}
-                  <span class="muted" style="font-weight:400;">No hay seriales de este ítem en la mesa: se mueve por cantidad.</span>
-                {% elif _uns|length <= r.quantity %}
-                  <span class="muted" style="font-weight:400;">Se usa automáticamente: {{ _uns|map(attribute='serial')|join(', ') }}</span>
-                {% else %}
-                  <div class="check-inline" style="gap:12px; flex-wrap:wrap;">
-                    {% for u in _uns %}
-                      <label class="check-inline"><input type="checkbox" name="unit_id" value="{{ u.id }}" data-confirm-skip> {{ u.serial }}</label>
-                    {% endfor %}
-                  </div>
-                  <span class="muted" style="font-weight:400;">Elegí exactamente {{ r.quantity }}.</span>
-                {% endif %}
-                {% endif %}
+                <div class="serial-pick-list"></div>
+    <span class="muted serial-pick-status" style="font-weight:400; font-size:13px;"></span>
+                <input type="text" class="serial-summary" name="serials_txt" readonly tabindex="-1"
+                       style="border:0; background:transparent; padding:0; height:auto; font-size:13px; color:var(--text-secondary,#666);">
               </div>
+              {% endif %}
               {% endif %}
               <input type="text" name="observation" placeholder="Observación (opcional)" style="margin-top:6px;">
               <div style="margin-top:6px;"><button class="btn btn-primary btn-sm">Confirmar</button></div>

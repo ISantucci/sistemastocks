@@ -21,7 +21,7 @@
         {% if is_tecnico %}
           {% if tech_locations|length == 1 %}
             <input type="text" value="{{ tech_locations[0].name }}" readonly disabled />
-            <input type="hidden" name="from_location_id" id="from_location_id" value="{{ tech_locations[0].id }}" />
+            <input type="hidden" name="from_location_id" id="from_location_id" value="{{ tech_locations[0].id }}" data-label="{{ tech_locations[0].name }}" />
           {% else %}
             <select name="from_location_id" id="from_location_id" required>
               <option value="" selected disabled>Seleccionar ubicación...</option>

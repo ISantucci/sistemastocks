@@ -162,15 +162,35 @@
     if(!needSn){ line.querySelector('.io-serials').value = ''; }
     line.querySelector('.io-qty').readOnly = false;
     clampQty(line);
+    autoSn(line);
     updateSnBtn(line);
     refreshPriceFields(line);
     refreshTotal();
+  }
+
+  // Automático (2026-10-01, misma regla que el resto del sistema): si en la
+  // Jaula hay exactamente tantos seriales como la cantidad del egreso, salen
+  // todos, así que se dejan elegidos sin abrir el popup. Se pueden ver igual
+  // con el botón, que los muestra tildados.
+  function autoSn(line){
+    var itemId = line.querySelector('.io-item').value;
+    if(!(isSerial(itemId) && currentTipo() === 'EGRESO')){ line._snAuto = false; return; }
+    var units = IO_JAULA_UNITS[itemId] || [];
+    var declared = parseInt(line.querySelector('.io-qty').value, 10) || 0;
+    var field = line.querySelector('.io-serials');
+    if(units.length > 0 && units.length === declared){
+      if(!field.value){ field.value = units.map(function(u){ return u[1]; }).join('\n'); }
+      line._snAuto = serialsOf(line).length === declared;
+    } else {
+      line._snAuto = false;
+    }
   }
 
   function updateSnBtn(line){
     var btn = line.querySelector('.io-sn-btn');
     if(!btn) return;
     var n = serialsOf(line).length;
+    if(n > 0 && line._snAuto){ btn.textContent = 'S/N: ' + n + ' (automático)'; return; }
     btn.textContent = n > 0 ? ('S/N: ' + n + ' elegido' + (n>1?'s':'')) : 'Elegir S/N';
   }
 
@@ -230,6 +250,8 @@
       return;
     }
     snCurrentLine.querySelector('.io-serials').value = vals.join('\n');
+    // Elegidos a mano: aunque coincidan con los automáticos, ya no se rotulan así.
+    snCurrentLine._snAuto = false;
     updateSnBtn(snCurrentLine);
     closeModal('modal-sn');
   }
@@ -248,6 +270,7 @@
     line.querySelector('.io-qty').addEventListener('input', function(){
       line.querySelector('.io-serials').value = '';
       clampQty(line);
+      autoSn(line);
       updateSnBtn(line);
       refreshLineTotal(line);
       refreshTotal();
