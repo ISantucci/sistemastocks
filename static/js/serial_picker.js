@@ -361,6 +361,27 @@ function initSerialPicker(opts) {
       return state.selected.length === state.qty ? null : SN_FALTA;
     });
   }
+
+  /* Para form_draft.js: leer y reponer lo elegido cuando el servidor rechaza
+     el envío y la pantalla vuelve con lo que se venía cargando. Un serial que
+     ya no está disponible en el origen simplemente no se repone (el usuario lo
+     ve: el contador dice cuántos faltan y el envío se frena igual que siempre). */
+  var hookBox = pickBox || qtyInput;
+  if (hookBox) {
+    hookBox.setAttribute("data-sn-hook", "");
+    hookBox._snGet = function () {
+      return state.mode === "exact" ? state.selected.slice() : [];
+    };
+    hookBox._snRestore = function (ids) {
+      refresh();
+      if (state.mode !== "exact" || !ids || !ids.length) return;
+      var valid = {};
+      state.units.forEach(function (p) { valid[String(p[0])] = true; });
+      state.selected = ids.map(String).filter(function (id) { return valid[id]; })
+                          .slice(0, state.qty);
+      publicar();
+    };
+  }
   return refresh;
 }
 
@@ -448,6 +469,17 @@ function initStaticSerialPickers(root) {
         return selected.length === qty ? null : SN_FALTA;
       });
     }
+
+    // Para form_draft.js (ver el mismo gancho en initSerialPicker).
+    box.setAttribute("data-sn-hook", "");
+    box._snGet = function () { return mode === "auto" ? [] : selected.slice(); };
+    box._snRestore = function (ids) {
+      if (mode === "auto" || !ids || !ids.length) return;
+      var valid = {};
+      units.forEach(function (p) { valid[String(p[0])] = true; });
+      selected = ids.map(String).filter(function (id) { return valid[id]; }).slice(0, qty);
+      publicar();
+    };
     publicar();
   });
 }

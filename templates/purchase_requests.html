@@ -54,7 +54,8 @@
       <span class="modal-title">Nueva solicitud de compra</span>
       <button type="button" class="modal-close" onclick="closeModal('modal-sc-new')">&times;</button>
     </div>
-    <form method="post" action="{{ url_for('purchase_request_new') }}">
+    <form method="post" action="{{ url_for('purchase_request_new') }}"
+          data-draft="solicitud-compra" data-draft-add="#pr-add-line-btn">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <div class="modal-body">
         {% if alert_items %}
@@ -107,7 +108,7 @@
             <button type="button" id="pr-add-line-btn" class="btn btn-secondary btn-sm">+ Agregar ítem</button>
           </div>
           <template id="pr-extra-line-template">
-            <tr class="pr-line">
+            <tr class="pr-line" data-draft-row>
               <td style="min-width:140px;">
                 <select name="extra_item_id[]" class="pr-extra-item">
                   <option value="">Elegí un ítem...</option>

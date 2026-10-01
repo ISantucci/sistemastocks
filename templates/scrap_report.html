@@ -7,7 +7,8 @@
 
 <div class="card">
   <div class="card-header"><span class="card-title">Registrar descarte</span></div>
-  <form method="post" data-confirm-move="Confirmar descarte" data-confirm-danger>
+  <form method="post" data-confirm-move="Confirmar descarte" data-confirm-danger
+        data-draft="descartes" data-draft-add="#add-line-btn">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="form-grid">
       <div class="field">

@@ -13,7 +13,7 @@
 {% if me.role != "LECTOR" %}
 <div class="card">
   <div class="card-header"><span class="card-title">Registrar movimiento</span></div>
-  <form method="post" data-confirm-move="Confirmar movimiento">
+  <form method="post" data-confirm-move="Confirmar movimiento" data-draft="movimiento">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="form-grid">
       <div class="field">

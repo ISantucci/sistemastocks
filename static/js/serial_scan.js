@@ -292,6 +292,16 @@ function initSerialScan(opts) {
     });
   }
   if (locEl) locEl.addEventListener("change", render);
+  // form_draft.js: si el servidor rechazó la tanda, la pantalla vuelve y
+  // repone este textarea oculto. Se rearma la lista con las mismas reglas que
+  // al cargar a mano, así se ve marcado lo que hay que corregir (por ejemplo
+  // "ya está cargado en este ítem"). render() no dispara "change": no hay bucle.
+  hidden.addEventListener("change", function () {
+    var lines = (hidden.value || "").split("\n");
+    items = [];
+    for (var i = 0; i < lines.length; i++) add(lines[i], false);
+    render();
+  });
   if (forceEl) {
     forceEl.addEventListener("change", function () {
       // Revalidar lo ya cargado con el filtro prendido o apagado.

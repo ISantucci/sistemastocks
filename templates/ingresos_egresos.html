@@ -23,7 +23,8 @@
 
 {% if can_edit %}
 <div class="card">
-  <form method="post" id="io-form" action="{{ url_for('in_out') }}" data-confirm-move="Confirmar ingreso / egreso">
+  <form method="post" id="io-form" action="{{ url_for('in_out') }}" data-confirm-move="Confirmar ingreso / egreso"
+        data-draft="ingresos-egresos" data-draft-add="#io-add-line">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="form-grid">
       <div class="field">
@@ -105,7 +106,7 @@
     <div class="io-sn-btn-wrap field">
       <label>Seriales</label>
       <button type="button" class="io-sn-btn btn btn-secondary">Elegir S/N</button>
-      <input type="hidden" name="line_serials[]" class="io-serials" value="">
+      <input type="hidden" name="line_serials[]" class="io-serials" value="" data-draft-keep>
     </div>
   </div>
 </template>

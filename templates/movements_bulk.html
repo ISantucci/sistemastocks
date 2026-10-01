@@ -14,7 +14,8 @@
 <div class="page-header"><div><h2>Carga múltiple</h2><p>Cargá varios ítems en un mismo movimiento.</p></div></div>
 
 <div class="card">
-  <form method="post" id="bulk-form" data-confirm-move="Confirmar carga múltiple">
+  <form method="post" id="bulk-form" data-confirm-move="Confirmar carga múltiple"
+        data-draft="carga-multiple" data-draft-add="#add-line-btn">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="form-grid">
       <div class="field">
@@ -35,14 +36,6 @@
           {% endfor %}
         </select>
       </div>
-      {# A nombre de quién quedan los pendientes de esta carga. Aparece solo si
-         alguna línea genera pendiente. Si el destino tiene un solo responsable
-         se completa solo; con varios hay que elegir. #}
-      <div class="field" id="bulk_pending_resp_box" style="display:none;">
-        <label>Pendientes a nombre de</label>
-        <select name="pending_responsible_id" id="bulk_pending_responsible_id"></select>
-        <span class="muted" id="bulk_pending_resp_hint" style="font-weight:400;"></span>
-      </div>
       <div class="field" style="grid-column:1 / -1; max-width:700px;">
         <label>Observación</label>
         <input type="text" name="observation" style="width:100%;">
@@ -54,6 +47,17 @@
 
     <div style="margin-top:12px; margin-bottom:20px;">
       <button type="button" id="add-line-btn" class="btn btn-secondary">+ Agregar item</button>
+    </div>
+
+    {# A nombre de quién quedan los pendientes de esta carga. Aparece solo si
+       alguna línea genera pendiente. Con un solo responsable se completa solo;
+       con varios arranca en el primero por orden alfabético y se puede cambiar.
+       Va ACÁ, al pie, y no arriba junto a Desde/Hacia: aparece cuando una fila
+       de abajo pasa a "Pendiente: Sí", y arriba nadie lo veía (2026-10-01). #}
+    <div class="field" id="bulk_pending_resp_box" style="display:none; max-width:420px; margin-bottom:16px;">
+      <label>Pendientes a nombre de</label>
+      <select name="pending_responsible_id" id="bulk_pending_responsible_id"></select>
+      <span class="muted" id="bulk_pending_resp_hint" style="font-weight:400;"></span>
     </div>
 
     <button type="submit" class="btn btn-primary">Guardar carga múltiple</button>

@@ -3044,6 +3044,46 @@ def _log_destructive(op: str, username: str, result: str, detail: str = "") -> N
     except Exception as exc:  # log best-effort, nunca debe romper el handler
         print(f"[WARN] No se pudo escribir destructive_ops.log: {exc}")
 
+
+def flash_error_inesperado(accion: str, exc: Exception) -> None:
+    """Avisa por pantalla que una operación falló y deja el detalle en el log.
+
+    Antes cada pantalla hacía flash(f"No se pudo ...: {e}"). Si el error era
+    técnico (base ocupada, un conflicto de integridad) el usuario leía el texto
+    crudo de Python sin entender qué pasó, y el error no quedaba registrado en
+    ningún lado: después no había forma de averiguarlo (2026-10-01).
+
+    - Error de negocio (ValueError / PendingCloseError con mensaje, por ejemplo
+      "Stock insuficiente en la ubicacion de origen"): se muestra tal cual,
+      como antes. Ese texto es para el usuario.
+    - Cualquier otro: mensaje claro con un código corto, y el detalle completo
+      (con el traceback) va a logs/errores.log bajo ese mismo código.
+
+    Se llama DESPUÉS del rollback y no toca la base. Nunca levanta excepción.
+    """
+    if isinstance(exc, (ValueError, PendingCloseError)) and str(exc).strip():
+        flash(f"No se pudo {accion}: {exc}", "error")
+        return
+    ref = datetime.now().strftime("%H%M") + "-" + secrets.token_hex(2).upper()
+    try:
+        import traceback
+        usuario = getattr(current_user, "username", None) or "-"
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        with open(LOG_DIR / "errores.log", "a", encoding="utf-8") as f:
+            f.write(f"{ts}\tref={ref}\tusuario={usuario}\t"
+                    f"{request.method} {request.path}\t{accion}\n")
+            f.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+            f.write("\n")
+    except Exception as log_exc:  # el log es best-effort: el aviso sale igual
+        print(f"[WARN] No se pudo escribir errores.log: {log_exc}")
+    flash(
+        f"No se pudo {accion} por un error del sistema. No se guardó nada de "
+        f"esta operación. Probá de nuevo; si vuelve a pasar, avisale al "
+        f"administrador con este código: {ref}.",
+        "error",
+    )
+
 # ------------------ BACKUP DIARIO AUTOMATICO ------------------
 # Hasta ahora el unico backup era el boton manual del panel de admin: si nadie
 # se acordaba, no habia copia. Con el sistema en uso diario por los tecnicos eso
@@ -3708,7 +3748,11 @@ def conteo():
                     )
             except Exception as e:
                 db.session.rollback()
-                flash(f"No se pudo aplicar el conteo: {e}", "error")
+                flash_error_inesperado("aplicar el conteo", e)
+                # Vuelve a la MISMA ubicación: ahí está el formulario del conteo
+                # y form_draft.js repone lo contado (antes volvía a /conteo sin
+                # ubicación y había que contar todo de nuevo).
+                return redirect(url_for("conteo", location_id=location.id))
             return redirect(url_for("conteo"))
 
         flash("Acción inválida.", "error")
@@ -4479,7 +4523,7 @@ def item_edit(item_id: int):
             flash("Item actualizado", "ok")
         except Exception as e:
             db.session.rollback()
-            flash(f"No se pudo actualizar: {e}", "error")
+            flash_error_inesperado("actualizar el ítem", e)
 
         return redirect(url_for("items"))
 
@@ -4525,7 +4569,7 @@ def item_delete(item_id: int):
         flash(f"Ítem {code} eliminado correctamente.", "ok")
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo eliminar: {e}", "error")
+        flash_error_inesperado("eliminar el ítem", e)
 
     return redirect(url_for("items"))
 
@@ -4683,7 +4727,7 @@ def item_unit_new(item_id: int):
         flash(f"Serial «{serial}» registrado en {loc.name}.", "ok")
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo registrar el serial: {e}", "error")
+        flash_error_inesperado("registrar el serial", e)
     return _units_redirect(it.id)
 
 
@@ -4847,7 +4891,7 @@ def item_unit_bulk(item_id: int):
         flash(f"{len(serials)} serial(es) registrado(s) en {loc.name}.", "ok")
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo registrar la tanda (no se guardó ninguno): {e}", "error")
+        flash_error_inesperado("registrar la tanda de seriales", e)
     return _units_redirect(it.id)
 
 
@@ -4880,7 +4924,7 @@ def item_unit_edit(unit_id: int):
         flash("Serial actualizado.", "ok")
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo actualizar: {e}", "error")
+        flash_error_inesperado("actualizar el serial", e)
     return _units_redirect(u.item_id)
 
 
@@ -4904,7 +4948,7 @@ def item_unit_delete(unit_id: int):
         flash(f"Serial «{serial}» quitado.", "ok")
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo quitar el serial: {e}", "error")
+        flash_error_inesperado("quitar el serial", e)
     return _units_redirect(item_id)
 
 
@@ -5475,7 +5519,8 @@ def movements():
                 return redirect(url_for("movements"))
 
             pending_responsible_id, resp_err = resolve_pending_responsible(
-                to_id, request.form.get("pending_responsible_id")
+                to_id, request.form.get("pending_responsible_id"),
+                default_first=True,
             )
             if resp_err:
                 flash(resp_err, "error")
@@ -5615,7 +5660,7 @@ def movements():
 
         except Exception as e:
             db.session.rollback()
-            flash(f"No se pudo registrar: {e}", "error")
+            flash_error_inesperado("registrar el movimiento", e)
 
         return redirect(url_for("movements"))
 
@@ -5843,7 +5888,7 @@ def movement_revert(movement_id: int):
         flash(f"Movimiento {m.number or m.id} revertido con {number}.", "ok")
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo revertir: {e}", "error")
+        flash_error_inesperado("revertir el movimiento", e)
 
     return redirect(url_for("movements", **movements_view_args()))
 
@@ -5928,7 +5973,8 @@ def movements_bulk():
                 return redirect(url_for("movements_bulk"))
 
             pending_responsible_id, resp_err = resolve_pending_responsible(
-                to_id, request.form.get("pending_responsible_id")
+                to_id, request.form.get("pending_responsible_id"),
+                default_first=True,
             )
             if resp_err:
                 flash(resp_err, "error")
@@ -6125,7 +6171,7 @@ def movements_bulk():
 
         except Exception as e:
             db.session.rollback()
-            flash(f"No se pudo registrar la carga multiple: {e}", "error")
+            flash_error_inesperado("registrar la carga múltiple", e)
 
         return redirect(url_for("movements_bulk"))
 
@@ -6401,7 +6447,7 @@ def item_usage():
             return redirect(url_for("item_usage"))
         except Exception as e:
             db.session.rollback()
-            flash(f"Error: {e}", "error")
+            flash_error_inesperado("registrar los utilizados", e)
             return redirect(url_for("item_usage"))
 
     if is_tecnico:
@@ -6570,14 +6616,13 @@ def _parse_date_arg(raw: str):
 
 
 def location_responsibles(location_id: int):
-    """Usuarios a cargo de una ubicación (ordenados por nombre)."""
-    return (
-        User.query
-        .join(LocationResponsible, LocationResponsible.user_id == User.id)
-        .filter(LocationResponsible.location_id == location_id)
-        .order_by(User.full_name)
-        .all()
-    )
+    """Usuarios a cargo de una ubicación, en orden alfabético.
+
+    Delega en location_responsible_users para que el remito y los pendientes
+    usen EL MISMO orden: el primero de la lista es el que queda por defecto en
+    los dos lados.
+    """
+    return location_responsible_users(location_id)
 
 
 @app.route("/remitos", methods=["GET"])
@@ -6727,7 +6772,14 @@ def remito_new():
             return None, None  # (valor, error)
         raw = request.form.get(field_name, "").strip()
         if not raw.isdigit():
-            return None, f"Elegí el responsable de {label}."
+            # Sin elegir -> el primero por orden alfabético, mismo criterio que
+            # los pendientes (2026-10-01). Antes era un error que recargaba la
+            # pantalla y se perdían los movimientos tildados del remito.
+            people = location_responsibles(loc_id)
+            if not people:
+                return None, (f"La ubicación de {label} no tiene responsables "
+                              "cargados. Asignale uno antes de armar el remito.")
+            return people[0].id, None
         rid = int(raw)
         valid_ids = {u.id for u in location_responsibles(loc_id)}
         if rid not in valid_ids:
@@ -6769,7 +6821,7 @@ def remito_new():
         return redirect(url_for("remito_detail", remito_id=r.id))
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo crear el remito: {e}", "error")
+        flash_error_inesperado("crear el remito", e)
         return redirect(url_for("remitos"))
 
 
@@ -7023,17 +7075,32 @@ def weighted_avg_price_map(item_ids=None) -> dict:
     return out
 
 
+def _clave_alfabetica(u):
+    """Orden alfabético como lo lee una persona: por el nombre que se muestra
+    (nombre completo, o el usuario si no tiene), sin distinguir mayúsculas ni
+    acentos. El ORDER BY de SQLite compara bytes: "Ángel" quedaba después de
+    "Zoe", "ana" después de "Beto" y un usuario sin nombre completo ("")
+    primero de todos."""
+    nombre = (u.full_name or "").strip() or (u.username or "")
+    plano = unicodedata.normalize("NFKD", nombre)
+    plano = "".join(ch for ch in plano if not unicodedata.combining(ch)).casefold()
+    return (plano, (u.username or "").casefold(), u.id)
+
+
 def location_responsible_users(location_id):
-    """Usuarios responsables de una ubicación, en orden estable (por nombre).
+    """Usuarios responsables de una ubicación, en orden ALFABÉTICO estable.
 
     Antes se usaba `.first()` sin orden: con dos responsables en la misma
     camioneta, el pendiente podía quedar a nombre de cualquiera de los dos y el
-    criterio podía cambiar entre consultas. Ahora hay un orden fijo y, cuando
-    hay más de uno, la pantalla pide elegir.
+    criterio podía cambiar entre consultas. Ahora hay un orden fijo.
+
+    Desde 2026-10-01 el PRIMERO de esta lista es además el responsable por
+    defecto cuando hay varios y nadie eligió (ver resolve_pending_responsible
+    y el remito). Por eso el orden tiene que ser el que una persona espera.
     """
     if not location_id:
         return []
-    return (
+    users = (
         User.query.join(
             LocationResponsible, LocationResponsible.user_id == User.id
         )
@@ -7041,6 +7108,7 @@ def location_responsible_users(location_id):
         .order_by(User.full_name, User.username, User.id)
         .all()
     )
+    return sorted(users, key=_clave_alfabetica)
 
 
 def location_responsibles_map(locations):
@@ -7054,12 +7122,21 @@ def location_responsibles_map(locations):
     return out
 
 
-def resolve_pending_responsible(location_id, raw_value):
+def resolve_pending_responsible(location_id, raw_value, default_first=False):
     """Responsable al que queda un pendiente. Devuelve (user_id, error).
 
     - Sin responsables en la ubicación -> error (igual que antes).
     - Uno solo -> ese, se elija o no.
-    - Varios -> hay que elegir uno, y tiene que ser responsable de ESA ubicación.
+    - Se eligió uno -> ese, si es responsable de ESA ubicación (si no, error).
+    - Varios y no se eligió ninguno:
+        default_first=True  -> el PRIMERO por orden alfabético. Pedido de
+          Ignacio (2026-10-01): antes era un error, y como el error recarga la
+          pantalla, el que venía armando una carga múltiple perdía todo. Lo
+          usan las pantallas de ENTREGA (Movimientos, Carga múltiple, cierre de
+          solicitud de repuestos), donde el selector ya muestra a ese primero
+          elegido: el usuario lo ve, y lo puede cambiar, antes de confirmar.
+        default_first=False -> error, como antes. Es el caso del pendiente SIN
+          entrega: ahí el técnico ES el dato que se carga, no se adivina.
     """
     resp = location_responsible_users(location_id)
     if not resp:
@@ -7071,7 +7148,7 @@ def resolve_pending_responsible(location_id, raw_value):
         if chosen in {u.id for u in resp}:
             return chosen, None
         return None, "El responsable elegido no es responsable de la ubicación destino."
-    if len(resp) == 1:
+    if len(resp) == 1 or default_first:
         return resp[0].id, None
     return None, ("La ubicación destino tiene más de un responsable: elegí a "
                   "nombre de quién queda el pendiente.")
@@ -7610,7 +7687,7 @@ def _pending_return_create():
         db.session.commit()
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo generar el pendiente: {e}", "error")
+        flash_error_inesperado("generar el pendiente", e)
         return back
 
     u = User.query.get(responsible_id)
@@ -7942,7 +8019,7 @@ def _pending_return_close():
         flash(str(e), "error")
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo cerrar el pendiente: {e}", "error")
+        flash_error_inesperado("cerrar el pendiente", e)
     return back
 
 
@@ -8069,7 +8146,7 @@ def pending_deliveries():
             flash(str(e), "error")
         except Exception as e:
             db.session.rollback()
-            flash(f"No se pudo cerrar el pendiente: {e}", "error")
+            flash_error_inesperado("cerrar el pendiente", e)
 
         return redirect(url_for("pending_deliveries"))
 
@@ -8793,7 +8870,7 @@ def scrap_report():
             return redirect(url_for("scrap_report"))
         except Exception as e:
             db.session.rollback()
-            flash(f"Error: {e}", "error")
+            flash_error_inesperado("registrar el descarte", e)
             return redirect(url_for("scrap_report"))
 
     # Filtros del historial (desde/hasta/item/responsable/mostrar + motivo)
@@ -9054,7 +9131,7 @@ def reparaciones():
                 flash(f"Error de stock: {e}", "error")
             except Exception as e:
                 db.session.rollback()
-                flash(f"Error: {e}", "error")
+                flash_error_inesperado("registrar la reparación", e)
             return redirect(url_for("reparaciones"))
 
         # --- Marcar reparada por proveedor: ingreso Proveedor -> Jaula + remito ---
@@ -9141,7 +9218,7 @@ def reparaciones():
                 flash(f"Error de stock: {e}", "error")
             except Exception as e:
                 db.session.rollback()
-                flash(f"Error: {e}", "error")
+                flash_error_inesperado("registrar la reparación", e)
             return redirect(url_for("reparaciones"))
 
         # --- Resolución directa en la mesa (sin proveedor): reparado / descartado ---
@@ -9227,7 +9304,7 @@ def reparaciones():
             flash(f"Error de stock: {e}", "error")
         except Exception as e:
             db.session.rollback()
-            flash(f"Error: {e}", "error")
+            flash_error_inesperado("cerrar la reparación", e)
         return redirect(url_for("reparaciones"))
 
     # GET: en reparacion (pendientes) + en proveedor + historial resuelto
@@ -9763,7 +9840,7 @@ def purchase_request_new():
         return redirect(url_for("purchase_request_detail", pr_id=pr.id))
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo crear la solicitud: {e}", "error")
+        flash_error_inesperado("crear la solicitud", e)
         return redirect(url_for("purchase_requests"))
 
 
@@ -10015,7 +10092,7 @@ def repair_request_new():
         return redirect(url_for("repair_request_detail", rr_id=pr.id))
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo crear la solicitud: {e}", "error")
+        flash_error_inesperado("crear la solicitud", e)
         return redirect(url_for("repair_requests"))
 
 
@@ -10100,7 +10177,7 @@ def repair_request_cancel(rr_id: int):
         flash(f"Solicitud {rr.number} cancelada.", "ok")
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo cancelar la solicitud: {e}", "error")
+        flash_error_inesperado("cancelar la solicitud", e)
     return redirect(url_for("repair_request_detail", rr_id=rr.id))
 
 
@@ -10133,7 +10210,7 @@ def repair_request_reject(rr_id: int):
         flash(f"Solicitud {rr.number} rechazada.", "ok")
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo rechazar la solicitud: {e}", "error")
+        flash_error_inesperado("rechazar la solicitud", e)
     return redirect(url_for("repair_request_detail", rr_id=rr.id))
 
 
@@ -10237,7 +10314,8 @@ def repair_request_close(rr_id: int):
 
     if any_pending:
         pending_responsible_id, resp_err = resolve_pending_responsible(
-            dest_id, request.form.get("pending_responsible_id")
+            dest_id, request.form.get("pending_responsible_id"),
+            default_first=True,
         )
         if resp_err:
             flash(resp_err, "error")
@@ -10296,7 +10374,7 @@ def repair_request_close(rr_id: int):
         )
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo cerrar la solicitud: {e}", "error")
+        flash_error_inesperado("cerrar la solicitud", e)
     return redirect(url_for("repair_request_detail", rr_id=rr.id))
 
 
@@ -10821,7 +10899,7 @@ def stock_count_create():
         db.session.commit()
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo guardar el conteo: {e}", "error")
+        flash_error_inesperado("guardar el conteo", e)
         return redirect(volver)
 
     # `enviado=1` es lo que dispara el cartel de resultado en el detalle.
@@ -11192,7 +11270,7 @@ def stock_count_approve(sc_id: int):
             )
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo aprobar el conteo: {e}", "error")
+        flash_error_inesperado("aprobar el conteo", e)
     return redirect(url_for("stock_count_detail", sc_id=sc.id))
 
 
@@ -12362,7 +12440,7 @@ def in_out():
             flash(msg, "ok")
         except Exception as e:
             db.session.rollback()
-            flash(f"No se pudo registrar: {e}", "error")
+            flash_error_inesperado("registrar el ingreso / egreso", e)
         return redirect(url_for("in_out"))
 
     # ---- GET ----
@@ -12615,7 +12693,7 @@ def costos_precio_editar(price_id: int):
         )
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo corregir el precio: {e}", "error")
+        flash_error_inesperado("corregir el precio", e)
 
     return redirect(url_for("costos_ingresos", **request.args.to_dict()))
 
@@ -12764,7 +12842,7 @@ def costos_parametros():
             flash("Parámetros guardados.", "ok")
         except Exception as e:
             db.session.rollback()
-            flash(f"No se pudieron guardar los parámetros: {e}", "error")
+            flash_error_inesperado("guardar los parámetros", e)
         return redirect(url_for("costos_parametros"))
 
     return render_template(

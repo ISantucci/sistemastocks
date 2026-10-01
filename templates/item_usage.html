@@ -12,7 +12,8 @@
 
 <div class="card">
   <div class="card-header"><span class="card-title">Marcar como utilizado</span></div>
-  <form method="post" data-confirm-move="Confirmar ítems utilizados">
+  <form method="post" data-confirm-move="Confirmar ítems utilizados"
+        data-draft="utilizados" data-draft-add="#add-line-btn">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="form-grid">
       <div class="field">

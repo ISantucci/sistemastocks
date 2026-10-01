@@ -288,6 +288,9 @@
 <script src="{{ url_for('static', filename='js/line_dedupe.js') }}"></script>
 <script src="{{ url_for('static', filename='js/form_errors.js') }}"></script>
 <script src="{{ url_for('static', filename='js/confirm_move.js') }}"></script>
+{#- Despues de form_errors.js: mira los errores del servidor ANTES de que ese
+    script los pase a su popup. Ver static/js/form_draft.js. -#}
+<script src="{{ url_for('static', filename='js/form_draft.js') }}"></script>
 {% endif %}
 {% if current_user.is_authenticated and not embed %}
 <script>

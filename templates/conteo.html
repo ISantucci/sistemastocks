@@ -32,7 +32,9 @@
     <span class="card-title">2) Conteo físico — {{ location.name }}</span>
     <a href="{{ url_for('conteo') }}" class="btn btn-secondary btn-sm">Cambiar ubicación</a>
   </div>
-  <form method="post" action="{{ url_for('conteo') }}">
+  {#- Los dos formularios comparten el borrador "conteo": si al confirmar los
+      ajustes el servidor rechaza, se vuelve a esta pantalla con lo contado. -#}
+  <form method="post" action="{{ url_for('conteo') }}" data-draft="conteo">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="location_id" value="{{ location.id }}">
     <input type="hidden" name="action" value="preview">
@@ -89,13 +91,13 @@
       </tbody>
     </table>
   </div>
-  <form method="post" action="{{ url_for('conteo') }}" style="margin-top:12px;" onsubmit="return confirm('Se registrarán los ajustes de conteo. ¿Confirmar?');">
+  <form method="post" action="{{ url_for('conteo') }}" style="margin-top:12px;" data-draft="conteo" onsubmit="return confirm('Se registrarán los ajustes de conteo. ¿Confirmar?');">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="location_id" value="{{ location.id }}">
-    <input type="hidden" name="motivo" value="{{ motivo }}">
+    <input type="hidden" name="motivo" value="{{ motivo }}" data-draft-keep>
     <input type="hidden" name="action" value="apply">
     {% for d in diffs %}
-    <input type="hidden" name="contado_{{ d.item.id }}" value="{{ d.contado }}">
+    <input type="hidden" name="contado_{{ d.item.id }}" value="{{ d.contado }}" data-draft-keep>
     {% endfor %}
     <button type="submit" class="btn btn-primary">Confirmar y registrar ajustes</button>
     <a href="{{ url_for('conteo', location_id=location.id) }}" class="btn btn-secondary">Volver a contar</a>

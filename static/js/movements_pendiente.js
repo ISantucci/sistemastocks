@@ -40,19 +40,18 @@
                 return;
             }
             respSel.disabled = false;
-            if (list.length > 1) {
-                var ph = document.createElement("option");
-                ph.value = ""; ph.textContent = "Elegí el responsable...";
-                respSel.appendChild(ph);
-            }
+            // Sin opción vacía: con varios responsables arranca en el PRIMERO
+            // por orden alfabético y se puede cambiar. Antes arrancaba vacío y
+            // el backend rechazaba el movimiento (2026-10-01).
             list.forEach(function (u) {
                 var op = document.createElement("option");
                 op.value = String(u.id); op.textContent = u.name;
                 respSel.appendChild(op);
             });
             if (prev && respSel.querySelector('option[value="' + prev + '"]')) respSel.value = prev;
+            else respSel.value = String(list[0].id);
             respHint.textContent = list.length > 1
-                ? "Esta ubicación tiene más de un responsable: elegí a quién se le entrega."
+                ? "Esta ubicación tiene " + list.length + " responsables: queda el primero por orden alfabético. Cambialo si corresponde."
                 : "";
         }
         if (toSel) toSel.addEventListener("change", refreshResponsibles);

@@ -60,7 +60,9 @@
     <span class="muted" id="bulk-count"></span>
   </div>
 
-  <form method="post" action="{{ url_for('item_unit_bulk', item_id=it.id) }}">
+  {#- data-draft: si el servidor rechaza la tanda (por ejemplo un serial que
+      ya estaba cargado), la lista vuelve armada en vez de perderse. -#}
+  <form method="post" action="{{ url_for('item_unit_bulk', item_id=it.id) }}" data-draft="tanda-seriales">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     {% if embed %}<input type="hidden" name="embed" value="1">{% endif %}
     {% if focus_loc %}<input type="hidden" name="loc" value="{{ focus_loc.id }}">{% endif %}

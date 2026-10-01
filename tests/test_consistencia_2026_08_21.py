@@ -144,19 +144,23 @@ def test_un_solo_responsable_no_hace_falta_elegir(A, esc):
     assert {p.responsible_to_id for p in pend} == {esc["r1"].id}
 
 
-def test_con_dos_responsables_hay_que_elegir(A, esc):
-    _resp(A, esc, esc["r1"], esc["r2"])
+def test_con_dos_responsables_sin_elegir_queda_el_primero_alfabetico(A, esc):
+    """Cambió el 2026-10-01 (pedido de Ignacio). Antes con dos responsables
+    había que elegir y, si no, se rechazaba TODO el movimiento; como el rechazo
+    recarga la pantalla, en Carga múltiple se perdía la carga entera. Ahora
+    queda el primero por orden alfabético (Ana antes que Beto)."""
+    _resp(A, esc, esc["r2"], esc["r1"])   # cargados al revés a propósito
     c = _admin(A)
-    html = c.post("/movements", data={
+    c.post("/movements", data={
         "item_id": str(esc["item"].id), "qty": "1",
         "from_location_id": str(esc["jaula"].id),
         "to_location_id": str(esc["truck"].id),
         "generate_pending": "1",
-    }, follow_redirects=True).get_data(as_text=True)
+    }, follow_redirects=True)
 
-    assert "más de un responsable" in html
-    assert A.PendingDelivery.query.count() == 0
-    assert A.Movement.query.count() == 0  # todo o nada: tampoco se movió stock
+    pend = A.PendingDelivery.query.one()
+    assert pend.responsible_to_id == esc["r1"].id
+    assert A.Movement.query.count() == 1
 
 
 def test_el_responsable_elegido_es_el_que_queda(A, esc):

@@ -25,7 +25,8 @@
   {% elif not items %}
     <p class="muted">No hay ítems activos en el catálogo.</p>
   {% else %}
-  <form method="post" action="{{ url_for('repair_request_new') }}">
+  <form method="post" action="{{ url_for('repair_request_new') }}"
+        data-draft="solicitud-repuestos" data-draft-add="#add-line-btn">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="form-grid">
       <div class="field">

@@ -280,6 +280,11 @@
       refreshTotal();
     });
     line.querySelector('.io-sn-btn').addEventListener('click', function(){ openSn(line); });
+    // form_draft.js repone los seriales elegidos en el oculto: actualizar el botón.
+    line.querySelector('.io-serials').addEventListener('change', function(){
+      autoSn(line);
+      updateSnBtn(line);
+    });
     // Al borrar la fila, su item vuelve a estar disponible en las demas.
     line.querySelector('.io-remove').addEventListener('click', function(){
       line.remove();

@@ -104,6 +104,7 @@ JS_GLOBALES = {
     "js/line_dedupe.js",
     "js/form_errors.js",
     "js/confirm_move.js",
+    "js/form_draft.js",
     "js/detail_modal.js",
 }
 

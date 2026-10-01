@@ -223,7 +223,7 @@
 <details class="card" id="pendNewReturn" style="margin-bottom:14px;">
   <summary style="cursor:pointer;"><strong>+ Nuevo pendiente de devolución</strong>
     <span class="muted" style="font-weight:400;">— sin entrega: no se le da nada, solo queda lo que tiene que traer</span></summary>
-  <form method="post" style="margin-top:12px; max-width:560px;">
+  <form method="post" style="margin-top:12px; max-width:560px;" data-draft="pendiente-sin-entrega">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="action" value="create_return">
     <div class="field">
