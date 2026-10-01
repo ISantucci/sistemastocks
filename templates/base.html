@@ -121,6 +121,9 @@
         <a href="{{ url_for('pending_deliveries') }}" class="nav-link {% if request.endpoint == 'pending_deliveries' %}active{% endif %}">
           <span class="nav-icon">&#9719;</span><span class="nav-label">Pendientes</span>
           {% if pending_badge_count and pending_badge_count > 0 %}<span class="nav-badge" title="{{ pending_badge_count }} pendiente(s) que debés devolver">{{ pending_badge_count }}</span>{% endif %}
+          {#- Pendientes que le transfirieron y todavía no vio (PendingTransfer).
+              Va aparte del total para que se note que hay algo NUEVO. -#}
+          {% if pending_transfer_badge_count and pending_transfer_badge_count > 0 %}<span class="nav-badge nav-badge-new" title="{{ pending_transfer_badge_count }} pendiente(s) transferido(s) sin ver">+{{ pending_transfer_badge_count }}</span>{% endif %}
         </a>
         {% endif %}
         {% if me.role in ["ADMIN", "SUPERVISOR", "LECTOR"] %}

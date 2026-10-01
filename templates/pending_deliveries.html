@@ -113,6 +113,20 @@
 </form>
 {%- endmacro %}
 
+{#- Transferencia (ver PendingTransfer en app.py). La casilla vive en la fila
+    pero pertenece al formulario de arriba (atributo form=): las filas ya
+    tienen sus propios formularios de cierre y no se pueden anidar. -#}
+{% macro pick_cell(kind, p, label) -%}
+  {% if transferable %}<td class="pick-cell">{% if (kind ~ ':' ~ p.id) in transferable %}<input type="checkbox" name="pending_ref" value="{{ kind }}:{{ p.id }}" form="pending-transfer-form" class="js-transfer-pick" data-label="{{ label }}" aria-label="Marcar para transferir">{% endif %}</td>{% endif %}
+{%- endmacro %}
+
+{#- Última transferencia del pendiente: el responsable se pisa al transferir,
+    así que esta línea es lo que dice de quién venía. -#}
+{% macro transfer_note(kind, p) -%}
+  {% set t = last_transfers.get((kind, p.id)) %}
+  {% if t %}<div class="muted" style="font-size:12px;" title="Transferido el {{ t.created_at.strftime('%Y-%m-%d %H:%M') }}">&#8618; de {{ t.from_user.full_name or t.from_user.username }}{% if t.created_by_user_id != t.from_user_id %} (por {{ t.created_by.full_name or t.created_by.username }}){% endif %} · {{ t.created_at.strftime("%d/%m %H:%M") }}</div>{% endif %}
+{%- endmacro %}
+
 {# Anular: deja de ser deuda sin mover stock y sin borrar el registro. #}
 {% macro cancel_form(p, kind, label) -%}
 <details class="pending-cancel" style="margin-top:8px;">
@@ -247,6 +261,35 @@
 </details>
 {% endif %}
 
+{# Transferir pendientes a otra persona. Solo cambia a nombre de quién están:
+   no mueve stock ni cambia la ubicación. Técnico: los suyos; admin/supervisor:
+   cualquiera abierto. El backend lo vuelve a validar todo. #}
+{% if transferable %}
+<form method="post" id="pending-transfer-form" action="{{ url_for('pending_transfer') }}"
+      class="card" style="margin-bottom:14px;"
+      data-confirm-move="Confirmar transferencia de pendientes" data-confirm-context="">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <div style="font-weight:600; margin-bottom:4px;">Transferir pendientes</div>
+  <p class="muted" style="margin:0 0 10px;">
+    Marcá en la tabla los pendientes {% if me.role == "TECNICO" %}tuyos {% endif %}que pasás y elegí a quién.
+    Solo cambia a nombre de quién quedan: no se mueve stock. A quien los recibe le aparece un aviso.
+  </p>
+  <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end;">
+    <div class="field" style="flex:1; min-width:220px; max-width:360px; margin:0;">
+      <label for="pt_to_user">Transferir a</label>
+      <select name="to_user_id" id="pt_to_user" required>
+        <option value="">Elegí el técnico...</option>
+        {% for u in transfer_targets %}
+          <option value="{{ u.id }}">{{ u.full_name or u.username }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <button type="submit" class="btn btn-primary js-transfer-submit" disabled>Transferir</button>
+    <span class="muted js-transfer-count" style="font-size:13px;">Ningún pendiente marcado.</span>
+  </div>
+</form>
+{% endif %}
+
 {% set _args = {'from_date': from_date, 'to_date': to_date, 'item_id': item_filter,
                 'from_user_id': from_user_filter, 'to_user_id': to_user_filter,
                 'status': status_filter} %}
@@ -260,6 +303,7 @@
     <table class="data-table">
       <thead>
         <tr>
+          {% if transferable %}<th title="Marcar para transferir">Pasar</th>{% endif %}
           <th>Fecha</th><th>Generó</th><th>A nombre de</th><th>Ubicación</th>
           <th>Debe devolver</th><th class="num">Cant.</th>
           <th>Motivo</th><th>Estado</th><th>Devuelto / anulado por</th><th>Acción</th>
@@ -269,9 +313,10 @@
         {% for r in returns %}
         {% set _open = not r.returned and not r.cancelled_at %}
         <tr>
+          {{ pick_cell("return", r, r.item.code ~ " - " ~ r.item.name) }}
           <td>{{ r.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
           <td>{{ r.responsible_from.full_name or r.responsible_from.username }}</td>
-          <td>{{ r.responsible_to.full_name or r.responsible_to.username }}</td>
+          <td>{{ r.responsible_to.full_name or r.responsible_to.username }}{{ transfer_note("return", r) }}</td>
           <td>{{ r.location.name }}</td>
           <td>{{ r.item.code }} — {{ r.item.name }}</td>
           <td class="num">{{ fmt_qty(pending_return_units(r), r.item) }}</td>
@@ -300,6 +345,7 @@
     <table class="data-table">
       <thead>
         <tr>
+          {% if transferable %}<th title="Marcar para transferir">Pasar</th>{% endif %}
           <th><a href="{{ url_for('pending_deliveries', sort_by='date', sort_dir='asc' if selected_sort_by == 'date' and selected_sort_dir == 'desc' else 'desc', **_args) }}">Fecha{% if selected_sort_by == 'date' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
           <th>Entrega</th><th>Recibe</th>
           <th><a href="{{ url_for('pending_deliveries', sort_by='item', sort_dir='desc' if selected_sort_by == 'item' and selected_sort_dir == 'asc' else 'asc', **_args) }}">Entregado{% if selected_sort_by == 'item' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
@@ -313,9 +359,10 @@
         {% set ret_item = p.return_item if swap else p.item %}
         {% set _open = not p.returned and not p.cancelled_at %}
         <tr>
+          {{ pick_cell("delivery", p, ret_item.code ~ " - " ~ ret_item.name) }}
           <td>{{ p.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
           <td>{{ p.responsible_from.full_name or p.responsible_from.username }}</td>
-          <td>{{ p.responsible_to.full_name or p.responsible_to.username }}</td>
+          <td>{{ p.responsible_to.full_name or p.responsible_to.username }}{{ transfer_note("delivery", p) }}</td>
           {# Ítem ENTREGADO: código y nombre. #}
           <td>{{ p.item.code }} — {{ p.item.name }}</td>
           {# Ítem que DEBE VOLVER: si es distinto se muestra su código Y su
@@ -343,12 +390,55 @@
           </td>
         </tr>
         {% else %}
-        <tr><td colspan="10" class="muted">Sin pendientes con esos filtros.</td></tr>
+        <tr><td colspan="{{ 11 if transferable else 10 }}" class="muted">Sin pendientes con esos filtros.</td></tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
   {{ pagination(page_obj, "pendiente", "pendientes") }}
 </div>
+{#- Popup de pendientes transferidos (solo a quien los recibe, ver
+    PendingTransfer). Igual que el aviso de transferencia de Stock: se pinta ya
+    abierto desde el servidor; la X, Esc o tocar afuera lo cierran SIN marcarlo
+    (vuelve a aparecer); solo "Entendido" lo marca. Los notice_id son
+    exactamente los avisos mostrados. -#}
+{% if ptransfer_groups %}
+<div class="modal-overlay open" id="modal-pending-transfer" role="dialog" aria-modal="true" aria-labelledby="pending-transfer-title">
+  <div class="modal" style="max-width:520px;">
+    <div class="modal-header">
+      <span class="modal-title" id="pending-transfer-title">Pendientes transferidos</span>
+      <button type="button" class="modal-close" aria-label="Cerrar" onclick="closeModal('modal-pending-transfer')">&times;</button>
+    </div>
+    <div class="modal-body">
+      {% for g in ptransfer_groups %}
+      {% set _n = g.lines|map(attribute='qty')|sum %}
+      <div class="transfer-notice-group">
+        <p style="margin:0 0 8px;">
+          <strong>{{ g.sender.full_name or g.sender.username }}</strong>
+          te ha transferido {{ "el siguiente pendiente" if _n == 1 else "los siguientes pendientes" }}{% if g.previous %}
+          (estaba{{ "" if _n == 1 else "n" }} a nombre de {{ g.previous.full_name or g.previous.username }}){% endif %}:
+        </p>
+        <table class="data-table">
+          <tbody>
+            {% for l in g.lines %}
+            <tr>
+              <td>{{ l.item.code }} - {{ l.item.name }}</td>
+              <td class="num" style="white-space:nowrap;">{{ fmt_qty(l.qty, l.item) }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% endfor %}
+      <p class="muted" style="margin:0;">Ahora figuran a tu nombre: sos quien los tiene que devolver.</p>
+    </div>
+    <form method="post" action="{{ url_for('pending_transfer_notices_ack') }}" class="modal-footer" style="margin:0;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      {% for nid in ptransfer_notice_ids %}<input type="hidden" name="notice_id" value="{{ nid }}">{% endfor %}
+      <button type="submit" class="btn btn-primary">Entendido</button>
+    </form>
+  </div>
+</div>
+{% endif %}
 <script src="{{ url_for('static', filename='js/pending_deliveries.js') }}"></script>
 {% endblock %}

@@ -181,6 +181,10 @@ table{ font-variant-numeric: tabular-nums; }
   box-shadow: 0 0 0 2px var(--surface);
 }
 .app-shell.sidebar-collapsed .nav-badge{ top: 2px; right: 2px; }
+/* Segundo badge (ej. "+2" pendientes transferidos sin ver): al lado del total
+   y de otro color, para que se distinga "hay algo nuevo" de "cuántos debo". */
+.nav-badge.nav-badge-new{ right: 30px; background: var(--accent, #2563eb); }
+.app-shell.sidebar-collapsed .nav-badge.nav-badge-new{ top: auto; bottom: 2px; right: 2px; }
 .nav-link:hover{ background: var(--surface-2); color: var(--text); text-decoration: none; }
 .nav-link.active{ background: var(--accent-soft); color: var(--accent-soft-text); }
 .nav-icon{ width: 18px; text-align: center; flex-shrink: 0; color: inherit; opacity: .85; }

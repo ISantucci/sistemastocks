@@ -1582,6 +1582,50 @@ class TransferNotice(db.Model):
     location = db.relationship("Location")
     seen_by = db.relationship("User")
 
+
+class PendingTransfer(db.Model):
+    """Transferencia de un pendiente de una persona a otra (2026-10-01).
+
+    Pedido tras la capacitación: que los técnicos se puedan pasar pendientes
+    "de la misma manera que se transfieren los ítems", con aviso. Decisiones de
+    Ignacio:
+    - SOLO se mueve el pendiente: cambia a nombre de quién está
+      (responsible_to_id). No mueve stock ni cambia la ubicación del pendiente.
+    - Se transfiere a una PERSONA, no a una ubicación.
+    - Lo pueden hacer todos: el técnico con los suyos, admin/supervisor con
+      cualquiera.
+
+    Esta fila es a la vez el HISTORIAL (de quién a quién, quién lo hizo, cuándo:
+    responsible_to_id se pisa y sin esto se perdería) y el AVISO para quien
+    recibe (seen_at / seen_by, igual que TransferNotice). A diferencia del aviso
+    de ítems, es de la persona y no de la camioneta: el pendiente es de alguien.
+
+    pending_kind + pending_id apuntan a pending_deliveries ('delivery') o a
+    pending_returns ('return'); por eso no hay FK. Tabla NUEVA: ninguna
+    existente cambia de estructura y la crea db.create_all() al arrancar.
+    """
+    __tablename__ = "pending_transfers"
+
+    id = db.Column(db.Integer, primary_key=True)
+    created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
+    pending_kind = db.Column(db.String(16), nullable=False)
+    pending_id = db.Column(db.Integer, nullable=False)
+    from_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    to_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    # NULL = quien recibe todavía no tocó "Entendido".
+    seen_at = db.Column(db.DateTime, nullable=True)
+    seen_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+
+    from_user = db.relationship("User", foreign_keys=[from_user_id])
+    to_user = db.relationship("User", foreign_keys=[to_user_id])
+    created_by = db.relationship("User", foreign_keys=[created_by_user_id])
+    seen_by = db.relationship("User", foreign_keys=[seen_by_user_id])
+
+    __table_args__ = (
+        db.Index("ix_pending_transfers_ref", "pending_kind", "pending_id"),
+    )
+
 # ------------------ REMITOS ------------------
 
 class Remito(db.Model):
@@ -5735,6 +5779,9 @@ def movement_revert(movement_id: int):
             .all()
         )
         for p in pendientes:
+            # Su historial de transferencias se va con él: si quedara, al
+            # reusarse el id aparecería pegado a otro pendiente.
+            PendingTransfer.query.filter_by(pending_kind="delivery", pending_id=p.id).delete()
             db.session.delete(p)
         if pendientes:
             detalle.append(f"{len(pendientes)} pendiente(s) anulado(s)")
@@ -7213,6 +7260,21 @@ def inject_stock_count_badge():
 
 
 @app.context_processor
+def inject_pending_transfer_badge():
+    """Badge "+N" en 'Pendientes' para el TECNICO: pendientes que le
+    transfirieron y todavía no vio (ver PendingTransfer). Persistente: lo ve
+    aunque entre al otro día o desde otro dispositivo. Desaparece con
+    "Entendido" en el popup de Pendientes."""
+    count = 0
+    try:
+        if current_user.is_authenticated and current_user.role == "TECNICO":
+            count = len(open_pending_transfer_notices(current_user))
+    except Exception:
+        count = 0
+    return {"pending_transfer_badge_count": count}
+
+
+@app.context_processor
 def inject_transfer_badge():
     """Badge de 'Stock' para el TECNICO: transferencias recibidas sin ver.
 
@@ -7598,6 +7660,219 @@ def _pending_cancel(kind):
     db.session.commit()
     flash("Pendiente anulado. No se movió stock.", "ok")
     return back
+
+
+# ------------------ TRANSFERENCIA DE PENDIENTES (ver PendingTransfer) ------------------
+
+PENDING_KINDS = {"delivery": PendingDelivery, "return": PendingReturn}
+
+# Tope de una transferencia: protege de un POST armado con miles de ids.
+PENDING_TRANSFER_MAX = 200
+
+
+def pending_transfer_targets(exclude_user_id=None):
+    """A quién se le puede transferir un pendiente: a los TÉCNICOS.
+
+    Son los que cargan pendientes (el badge, la lista "a mi nombre" y el aviso
+    son del rol TECNICO). Se ofrecen todos, no solo los de una camioneta: la
+    transferencia es a una persona (decisión de Ignacio).
+    """
+    q = User.query.filter(User.role == "TECNICO")
+    if exclude_user_id is not None:
+        q = q.filter(User.id != exclude_user_id)
+    return sorted(q.all(), key=lambda u: (u.full_name or u.username or "").lower())
+
+
+def open_pending_transfer_notices(user):
+    """[(PendingTransfer, pendiente)] sin ver por `user`.
+
+    Única fuente de verdad: la usan el badge, el popup y el "Entendido". Deja
+    afuera los avisos de pendientes que ya no son de él (los volvió a pasar, o
+    se los reasignaron) y los que ya no están abiertos (devueltos, anulados o
+    borrados por la reversión de la entrega): no hay nada que avisar.
+    """
+    out = []
+    for kind, model in PENDING_KINDS.items():
+        rows = (
+            db.session.query(PendingTransfer, model)
+            .join(model, db.and_(PendingTransfer.pending_kind == kind,
+                                 PendingTransfer.pending_id == model.id))
+            .filter(
+                PendingTransfer.to_user_id == user.id,
+                PendingTransfer.seen_at.is_(None),
+                model.responsible_to_id == user.id,
+                pending_open_filter(model),
+            )
+            .all()
+        )
+        out.extend(rows)
+    out.sort(key=lambda t: (t[0].created_at, t[0].id))
+    return out
+
+
+def pending_return_item(kind, p):
+    """El ítem que tiene que volver (el swap de una entrega, o el de siempre)."""
+    if kind == "delivery" and p.return_item_id:
+        return p.return_item
+    return p.item
+
+
+def pending_transfer_groups(user):
+    """Avisos sin ver agrupados para el popup de Pendientes.
+
+    Devuelve ([{sender, previous, lines: [{item, qty}]}], [ids mostrados]).
+    sender = quién hizo la transferencia; previous = a nombre de quién estaba,
+    si no es el mismo (admin/supervisor que pasa el pendiente de un técnico a
+    otro). Se suma por ítem que hay que devolver, como el aviso de Stock.
+    """
+    notices = open_pending_transfer_notices(user)
+    groups: dict[tuple, dict] = {}
+    for t, p in notices:
+        g = groups.setdefault((t.created_by_user_id, t.from_user_id), {
+            "sender": t.created_by,
+            "previous": t.from_user if t.from_user_id != t.created_by_user_id else None,
+            "lines": {},
+        })
+        it = pending_return_item(t.pending_kind, p)
+        line = g["lines"].setdefault(it.id, {"item": it, "qty": 0})
+        line["qty"] += pending_return_units(p)
+    out = []
+    for g in groups.values():
+        out.append({
+            "sender": g["sender"],
+            "previous": g["previous"],
+            "lines": sorted(g["lines"].values(), key=lambda l: (l["item"].code or "").lower()),
+        })
+    return out, [t.id for t, _ in notices]
+
+
+def last_pending_transfers(refs):
+    """{(kind, id): PendingTransfer más reciente} para los pendientes dados."""
+    out = {}
+    for kind in PENDING_KINDS:
+        ids = [pid for k, pid in refs if k == kind]
+        if not ids:
+            continue
+        for t in (PendingTransfer.query
+                  .filter(PendingTransfer.pending_kind == kind,
+                          PendingTransfer.pending_id.in_(ids))
+                  .order_by(PendingTransfer.created_at, PendingTransfer.id).all()):
+            out[(kind, t.pending_id)] = t   # queda el último
+    return out
+
+
+@app.route("/pending-deliveries/transferir", methods=["POST"])
+@login_required
+@role_required("ADMIN", "SUPERVISOR", "TECNICO")
+def pending_transfer():
+    """Pasa uno o varios pendientes abiertos a nombre de otro técnico.
+
+    Solo cambia responsible_to_id y deja el registro (PendingTransfer), que es
+    también el aviso para quien recibe. No mueve stock ni cambia la ubicación.
+
+    Permisos (en el backend, no en la pantalla):
+    - TECNICO: solo pendientes que están a SU nombre. Uno ajeno en el POST
+      frena todo, aunque haya llegado armado a mano.
+    - ADMIN/SUPERVISOR: cualquier pendiente abierto.
+    Todo o nada: si un pendiente no se puede, no se transfiere ninguno.
+    """
+    back = redirect(url_for("pending_deliveries"))
+
+    to_raw = (request.form.get("to_user_id") or "").strip()
+    dest = User.query.get(int(to_raw)) if to_raw.isdigit() else None
+    if not dest or dest.role != "TECNICO":
+        flash("Elegí a qué técnico le pasás los pendientes.", "error")
+        return back
+
+    refs = []
+    for raw in request.form.getlist("pending_ref"):
+        kind, _, pid = (raw or "").strip().partition(":")
+        if kind in PENDING_KINDS and pid.isdigit() and (kind, int(pid)) not in refs:
+            refs.append((kind, int(pid)))
+    if not refs:
+        flash("Marcá al menos un pendiente para transferir.", "error")
+        return back
+    if len(refs) > PENDING_TRANSFER_MAX:
+        flash(f"Se pueden transferir hasta {PENDING_TRANSFER_MAX} pendientes por vez.", "error")
+        return back
+
+    es_tecnico = current_user.role == "TECNICO"
+    plan = []
+    for kind, pid in refs:
+        p = PENDING_KINDS[kind].query.get(pid)
+        if not p:
+            flash("Uno de los pendientes no existe. No se transfirió nada.", "error")
+            return back
+        if es_tecnico and p.responsible_to_id != current_user.id:
+            flash("Solo podés transferir pendientes que están a tu nombre. "
+                  "No se transfirió nada.", "error")
+            return back
+        if not pending_is_open(p):
+            flash(f"El pendiente #{p.id} ya no está abierto (devuelto o anulado). "
+                  "No se transfirió nada.", "error")
+            return back
+        if p.responsible_to_id == dest.id:
+            flash(f"El pendiente #{p.id} ya está a nombre de "
+                  f"{dest.full_name or dest.username}. No se transfirió nada.", "error")
+            return back
+        plan.append((kind, p, p.responsible_to_id))
+
+    try:
+        for kind, p, anterior in plan:
+            model = PENDING_KINDS[kind]
+            # UPDATE condicionado: si entre que se armó la pantalla y ahora
+            # alguien lo cerró, lo anuló o lo pasó a otro, no se pisa.
+            n = (model.query
+                 .filter(model.id == p.id, model.responsible_to_id == anterior,
+                         pending_open_filter(model))
+                 .update({model.responsible_to_id: dest.id}, synchronize_session=False))
+            if n != 1:
+                raise ValueError("cambio concurrente")
+            db.session.add(PendingTransfer(
+                pending_kind=kind, pending_id=p.id,
+                from_user_id=anterior, to_user_id=dest.id,
+                created_by_user_id=current_user.id,
+            ))
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        flash("Uno de los pendientes cambió mientras lo transferías. "
+              "No se transfirió nada: revisá la lista y probá de nuevo.", "error")
+        return back
+
+    n = len(plan)
+    flash(f"{'Transferiste' if es_tecnico else 'Se transfirieron'} {n} "
+          f"pendiente{'s' if n != 1 else ''} a {dest.full_name or dest.username}. "
+          "Le va a aparecer el aviso.", "ok")
+    return back
+
+
+@app.route("/pending-deliveries/avisos-transferencia/visto", methods=["POST"])
+@login_required
+@role_required("TECNICO")
+def pending_transfer_notices_ack():
+    """"Entendido" del popup de pendientes transferidos.
+
+    Marca solo los avisos que se mostraron y que siguen siendo de él: los ids
+    del form se cruzan contra open_pending_transfer_notices(), así que mandar a
+    mano el id de un aviso ajeno no hace nada.
+    """
+    ids = {int(x) for x in request.form.getlist("notice_id") if x.isdigit()}
+    if ids:
+        valid = [t.id for t, _ in open_pending_transfer_notices(current_user) if t.id in ids]
+        if valid:
+            try:
+                (PendingTransfer.query
+                 .filter(PendingTransfer.id.in_(valid), PendingTransfer.seen_at.is_(None))
+                 .update({
+                     PendingTransfer.seen_at: now_ar(),
+                     PendingTransfer.seen_by_user_id: current_user.id,
+                 }, synchronize_session=False))
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+                flash("No se pudo marcar el aviso como visto. Probá de nuevo.", "error")
+    return redirect(url_for("pending_deliveries"))
 
 
 def _pending_return_close():
@@ -8013,8 +8288,33 @@ def pending_deliveries():
         holder_options.sort(key=lambda h: h["label"].lower())
         create_items = Item.query.filter_by(is_active=True).order_by(Item.code).all()
 
+    # Transferencia de pendientes (ver PendingTransfer). Qué filas de esta
+    # página se pueden marcar: las abiertas, y para el TÉCNICO solo las suyas
+    # (que son las únicas que ve). El backend lo vuelve a validar.
+    _es_tec = current_user.role == "TECNICO"
+    transferable = set()
+    for _kind, _rows in (("delivery", pendings), ("return", returns)):
+        for _p in _rows:
+            if pending_is_open(_p) and (not _es_tec or _p.responsible_to_id == current_user.id):
+                transferable.add(f"{_kind}:{_p.id}")
+    transfer_targets = pending_transfer_targets(
+        exclude_user_id=current_user.id if _es_tec else None
+    )
+    last_transfers = last_pending_transfers(
+        [("delivery", _p.id) for _p in pendings] + [("return", _r.id) for _r in returns]
+    )
+    # Popup "te transfirieron estos pendientes" (solo a quien recibe).
+    ptransfer_groups, ptransfer_notice_ids = (
+        pending_transfer_groups(current_user) if _es_tec else ([], [])
+    )
+
     return render_template(
         "pending_deliveries.html",
+        transferable=transferable,
+        transfer_targets=transfer_targets,
+        last_transfers=last_transfers,
+        ptransfer_groups=ptransfer_groups,
+        ptransfer_notice_ids=ptransfer_notice_ids,
         pendings=pendings,
         returns=returns,
         returns_page=returns_page,
@@ -8267,6 +8567,9 @@ def admin_clear_stock():
         # Los avisos cuelgan de movimientos: si quedaran, los ids de movimiento
         # se reusan y un aviso viejo aparecería pegado a un movimiento nuevo.
         TransferNotice.query.delete()
+        # Cuelgan de pendientes por id: si quedaran, al reusarse los ids una
+        # transferencia vieja aparecería pegada a un pendiente nuevo.
+        PendingTransfer.query.delete()
         PendingReturn.query.delete()
         PendingDelivery.query.delete()
         RemitoLine.query.delete()
@@ -8315,6 +8618,9 @@ def admin_clear_items():
         # Los avisos cuelgan de movimientos: si quedaran, los ids de movimiento
         # se reusan y un aviso viejo aparecería pegado a un movimiento nuevo.
         TransferNotice.query.delete()
+        # Cuelgan de pendientes por id: si quedaran, al reusarse los ids una
+        # transferencia vieja aparecería pegada a un pendiente nuevo.
+        PendingTransfer.query.delete()
         PendingReturn.query.delete()
         PendingDelivery.query.delete()
         RemitoLine.query.delete()
