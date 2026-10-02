@@ -1582,6 +1582,50 @@ class TransferNotice(db.Model):
     location = db.relationship("Location")
     seen_by = db.relationship("User")
 
+
+class PendingTransfer(db.Model):
+    """Transferencia de un pendiente de una persona a otra (2026-10-01).
+
+    Pedido tras la capacitación: que los técnicos se puedan pasar pendientes
+    "de la misma manera que se transfieren los ítems", con aviso. Decisiones de
+    Ignacio:
+    - SOLO se mueve el pendiente: cambia a nombre de quién está
+      (responsible_to_id). No mueve stock ni cambia la ubicación del pendiente.
+    - Se transfiere a una PERSONA, no a una ubicación.
+    - Lo pueden hacer todos: el técnico con los suyos, admin/supervisor con
+      cualquiera.
+
+    Esta fila es a la vez el HISTORIAL (de quién a quién, quién lo hizo, cuándo:
+    responsible_to_id se pisa y sin esto se perdería) y el AVISO para quien
+    recibe (seen_at / seen_by, igual que TransferNotice). A diferencia del aviso
+    de ítems, es de la persona y no de la camioneta: el pendiente es de alguien.
+
+    pending_kind + pending_id apuntan a pending_deliveries ('delivery') o a
+    pending_returns ('return'); por eso no hay FK. Tabla NUEVA: ninguna
+    existente cambia de estructura y la crea db.create_all() al arrancar.
+    """
+    __tablename__ = "pending_transfers"
+
+    id = db.Column(db.Integer, primary_key=True)
+    created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
+    pending_kind = db.Column(db.String(16), nullable=False)
+    pending_id = db.Column(db.Integer, nullable=False)
+    from_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    to_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    # NULL = quien recibe todavía no tocó "Entendido".
+    seen_at = db.Column(db.DateTime, nullable=True)
+    seen_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+
+    from_user = db.relationship("User", foreign_keys=[from_user_id])
+    to_user = db.relationship("User", foreign_keys=[to_user_id])
+    created_by = db.relationship("User", foreign_keys=[created_by_user_id])
+    seen_by = db.relationship("User", foreign_keys=[seen_by_user_id])
+
+    __table_args__ = (
+        db.Index("ix_pending_transfers_ref", "pending_kind", "pending_id"),
+    )
+
 # ------------------ REMITOS ------------------
 
 class Remito(db.Model):
@@ -1722,6 +1766,44 @@ class Repair(db.Model):
     source_location = db.relationship("Location", foreign_keys=[source_location_id])
 
 
+# Para qué está cada fila de repair_units.
+REPAIR_UNIT_ORIGINAL = "ORIGINAL"     # la unidad que entró a reparación
+REPAIR_UNIT_REEMPLAZO = "REEMPLAZO"   # la que devolvió el proveedor en su lugar
+
+
+class RepairUnit(db.Model):
+    """Qué unidad (serial) es cada reparación (2026-10-01).
+
+    `repairs` no guardaba la unidad: la mesa mostraba "CAM-001 x 1" y el serial
+    se elegía recién al resolver, entre TODAS las unidades de ese ítem que
+    estuvieran en la mesa. Con dos cámaras iguales, cualquier fila podía sacar
+    cualquiera de las dos, y al volver del proveedor había que tipear el serial
+    de memoria.
+
+    Tabla NUEVA: ninguna tabla existente cambia y la crea db.create_all() al
+    arrancar. Las reparaciones anteriores no tienen filas acá y siguen
+    funcionando como antes (se elige / se tipea el serial al resolver).
+
+    kind = ORIGINAL  -> la unidad que entró a la mesa (o salió al proveedor).
+    kind = REEMPLAZO -> el proveedor devolvió OTRA unidad en su lugar (garantía).
+                        La original queda ENTREGADO: nunca volvió.
+    """
+    __tablename__ = "repair_units"
+
+    id = db.Column(db.Integer, primary_key=True)
+    created_at = db.Column(db.DateTime, default=now_ar, nullable=False)
+    repair_id = db.Column(db.Integer, db.ForeignKey("repairs.id"), nullable=False, index=True)
+    item_unit_id = db.Column(db.Integer, db.ForeignKey("item_units.id"), nullable=False, index=True)
+    kind = db.Column(db.String(16), nullable=False, default=REPAIR_UNIT_ORIGINAL)
+
+    repair = db.relationship("Repair", backref=db.backref("unit_links", lazy="select"))
+    unit = db.relationship("ItemUnit")
+
+    __table_args__ = (
+        db.UniqueConstraint("repair_id", "item_unit_id", name="uq_repair_unit"),
+    )
+
+
 class PurchaseRequest(db.Model):
     """Cabecera de una solicitud de compra (estilo remito).
 
@@ -1814,7 +1896,8 @@ class RepairRequest(db.Model):
     number = db.Column(db.String(32), unique=True, nullable=False)  # SR-2026-0001
 
     # PENDIENTE (recién creada) / CERRADA (entregada completa) /
-    # CERRADA_PARCIAL (se entregó ALGO pero menos de lo pedido) /
+    # CERRADA_PARCIAL (se entregó ALGO pero alguna línea recibió menos de lo
+    # pedido; entregar MÁS de lo pedido en una línea no la hace parcial) /
     # CANCELADA (el técnico dio de baja su propia solicitud) /
     # RECHAZADA (admin/supervisor la rechaza, no se entrega nada).
     # CANCELADA y RECHAZADA son estados terminales SIN efecto sobre stock,
@@ -2171,7 +2254,7 @@ def count_units_in_stock(item_id: int, location_id: int) -> int:
 
 
 def resolve_serial_units_out(item_id: int, from_id: int, qty: int, form=None,
-                             field: str = "unit_id", ids=None):
+                             field: str = "unit_id", ids=None, exclude_ids=None):
     """Regla auto/elegir para sacar unidades serializadas de una ubicación interna.
 
     Devuelve (units, error_msg):
@@ -2186,9 +2269,16 @@ def resolve_serial_units_out(item_id: int, from_id: int, qty: int, form=None,
     pueden leer todos juntos del form. La validación es la misma para las dos:
     la unidad tiene que estar EN_STOCK, en ESA ubicación y ser de ESE ítem —
     `from_units` ya sale filtrado así, y lo elegido se cruza contra esa lista.
+
+    `exclude_ids`: unidades que están en el origen pero NO se pueden ofrecer
+    (la mesa de reparaciones deja afuera las que son de OTRA reparación). Sin
+    pasarlo, el comportamiento es exactamente el de siempre.
     """
     from_units = (units_in_stock_query(item_id, from_id)
                   .order_by(ItemUnit.created_at, ItemUnit.id).all())
+    if exclude_ids:
+        _fuera = set(exclude_ids)
+        from_units = [u for u in from_units if u.id not in _fuera]
     avail = len(from_units)
     if avail > qty:
         if ids is None:
@@ -2296,6 +2386,75 @@ def serial_obs(observation, serials):
         return observation
     sn = "S/N: " + ", ".join(serials)
     return (f"{observation} · {sn}" if observation else sn)[:255]
+
+
+# ------------------ REPARACIONES: qué unidad es cada una ------------------
+
+def repair_units_of(r, kind=REPAIR_UNIT_ORIGINAL):
+    """Unidades vinculadas a una reparación (por defecto, las que entraron)."""
+    return [l.unit for l in (r.unit_links or []) if l.kind == kind and l.unit is not None]
+
+
+def repair_units_reserved(item_id, except_repair_id=None):
+    """Ids de unidades de ese ítem que son de OTRA reparación todavía en la mesa.
+
+    Una reparación vieja (sin vínculo) elige su serial entre las unidades que
+    están en la mesa; si se le ofrecieran también las que ya son de otra
+    reparación, podría llevarse la de otro y dejar a ésa sin su unidad.
+    """
+    q = (db.session.query(RepairUnit.item_unit_id)
+         .join(Repair, Repair.id == RepairUnit.repair_id)
+         .filter(Repair.item_id == item_id,
+                 Repair.status == "EN_REPARACION",
+                 RepairUnit.kind == REPAIR_UNIT_ORIGINAL))
+    if except_repair_id is not None:
+        q = q.filter(Repair.id != except_repair_id)
+    return {row[0] for row in q.all()}
+
+
+def link_repair_units(r, units, kind=REPAIR_UNIT_ORIGINAL):
+    """Vincula unidades a una reparación (sin duplicar). No commitea."""
+    ya = {(l.item_unit_id, l.kind) for l in (r.unit_links or [])}
+    for u in units or []:
+        if u.id is not None and (u.id, kind) in ya:
+            continue
+        db.session.add(RepairUnit(repair=r, unit=u, kind=kind))
+
+
+def create_repairs(*, item, qty, units, status, source_location_id,
+                   created_by_user_id, pending_id=None):
+    """Alta de reparación(es) para lo que entra a la mesa o sale al proveedor.
+
+    Es el ÚNICO lugar donde nace un Repair (Movimientos hacia 'En reparación',
+    cierre de pendiente 'A reparación' y egreso con motivo Reparación), para
+    que la regla sea una sola:
+
+    - Serializado con las unidades conocidas: UNA reparación por unidad
+      (cantidad 1) y su vínculo en repair_units. Cada unidad se resuelve, se
+      manda al proveedor o vuelve por separado, igual que los pendientes.
+    - Lo que no tiene serial conocido (ítem común, o serializado sin seriales
+      cargados en el origen): una sola reparación por la cantidad, como siempre.
+
+    No commitea: va en la misma transacción que el movimiento que la origina.
+    """
+    reps = []
+    units = list(units or [])[:qty]
+    if item is not None and item.serialized and units:
+        for u in units:
+            r = Repair(item_id=item.id, quantity=1, status=status,
+                       source_location_id=source_location_id, pending_id=pending_id,
+                       created_by_user_id=created_by_user_id)
+            db.session.add(r)
+            db.session.add(RepairUnit(repair=r, unit=u, kind=REPAIR_UNIT_ORIGINAL))
+            reps.append(r)
+    resto = qty - len(units) if (item is not None and item.serialized) else qty
+    if resto > 0:
+        r = Repair(item_id=item.id, quantity=resto, status=status,
+                   source_location_id=source_location_id, pending_id=pending_id,
+                   created_by_user_id=created_by_user_id)
+        db.session.add(r)
+        reps.append(r)
+    return reps
 
 
 def build_units_map(location_ids=None):
@@ -2885,6 +3044,46 @@ def _log_destructive(op: str, username: str, result: str, detail: str = "") -> N
             f.write(f"{ts}\t{username}\t{op}\t{result}\t{safe_detail}\n")
     except Exception as exc:  # log best-effort, nunca debe romper el handler
         print(f"[WARN] No se pudo escribir destructive_ops.log: {exc}")
+
+
+def flash_error_inesperado(accion: str, exc: Exception) -> None:
+    """Avisa por pantalla que una operación falló y deja el detalle en el log.
+
+    Antes cada pantalla hacía flash(f"No se pudo ...: {e}"). Si el error era
+    técnico (base ocupada, un conflicto de integridad) el usuario leía el texto
+    crudo de Python sin entender qué pasó, y el error no quedaba registrado en
+    ningún lado: después no había forma de averiguarlo (2026-10-01).
+
+    - Error de negocio (ValueError / PendingCloseError con mensaje, por ejemplo
+      "Stock insuficiente en la ubicacion de origen"): se muestra tal cual,
+      como antes. Ese texto es para el usuario.
+    - Cualquier otro: mensaje claro con un código corto, y el detalle completo
+      (con el traceback) va a logs/errores.log bajo ese mismo código.
+
+    Se llama DESPUÉS del rollback y no toca la base. Nunca levanta excepción.
+    """
+    if isinstance(exc, (ValueError, PendingCloseError)) and str(exc).strip():
+        flash(f"No se pudo {accion}: {exc}", "error")
+        return
+    ref = datetime.now().strftime("%H%M") + "-" + secrets.token_hex(2).upper()
+    try:
+        import traceback
+        usuario = getattr(current_user, "username", None) or "-"
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        with open(LOG_DIR / "errores.log", "a", encoding="utf-8") as f:
+            f.write(f"{ts}\tref={ref}\tusuario={usuario}\t"
+                    f"{request.method} {request.path}\t{accion}\n")
+            f.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+            f.write("\n")
+    except Exception as log_exc:  # el log es best-effort: el aviso sale igual
+        print(f"[WARN] No se pudo escribir errores.log: {log_exc}")
+    flash(
+        f"No se pudo {accion} por un error del sistema. No se guardó nada de "
+        f"esta operación. Probá de nuevo; si vuelve a pasar, avisale al "
+        f"administrador con este código: {ref}.",
+        "error",
+    )
 
 # ------------------ BACKUP DIARIO AUTOMATICO ------------------
 # Hasta ahora el unico backup era el boton manual del panel de admin: si nadie
@@ -3550,7 +3749,11 @@ def conteo():
                     )
             except Exception as e:
                 db.session.rollback()
-                flash(f"No se pudo aplicar el conteo: {e}", "error")
+                flash_error_inesperado("aplicar el conteo", e)
+                # Vuelve a la MISMA ubicación: ahí está el formulario del conteo
+                # y form_draft.js repone lo contado (antes volvía a /conteo sin
+                # ubicación y había que contar todo de nuevo).
+                return redirect(url_for("conteo", location_id=location.id))
             return redirect(url_for("conteo"))
 
         flash("Acción inválida.", "error")
@@ -4321,7 +4524,7 @@ def item_edit(item_id: int):
             flash("Item actualizado", "ok")
         except Exception as e:
             db.session.rollback()
-            flash(f"No se pudo actualizar: {e}", "error")
+            flash_error_inesperado("actualizar el ítem", e)
 
         return redirect(url_for("items"))
 
@@ -4367,7 +4570,7 @@ def item_delete(item_id: int):
         flash(f"Ítem {code} eliminado correctamente.", "ok")
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo eliminar: {e}", "error")
+        flash_error_inesperado("eliminar el ítem", e)
 
     return redirect(url_for("items"))
 
@@ -4525,7 +4728,7 @@ def item_unit_new(item_id: int):
         flash(f"Serial «{serial}» registrado en {loc.name}.", "ok")
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo registrar el serial: {e}", "error")
+        flash_error_inesperado("registrar el serial", e)
     return _units_redirect(it.id)
 
 
@@ -4689,7 +4892,7 @@ def item_unit_bulk(item_id: int):
         flash(f"{len(serials)} serial(es) registrado(s) en {loc.name}.", "ok")
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo registrar la tanda (no se guardó ninguno): {e}", "error")
+        flash_error_inesperado("registrar la tanda de seriales", e)
     return _units_redirect(it.id)
 
 
@@ -4722,7 +4925,7 @@ def item_unit_edit(unit_id: int):
         flash("Serial actualizado.", "ok")
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo actualizar: {e}", "error")
+        flash_error_inesperado("actualizar el serial", e)
     return _units_redirect(u.item_id)
 
 
@@ -4746,7 +4949,7 @@ def item_unit_delete(unit_id: int):
         flash(f"Serial «{serial}» quitado.", "ok")
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo quitar el serial: {e}", "error")
+        flash_error_inesperado("quitar el serial", e)
     return _units_redirect(item_id)
 
 
@@ -5317,7 +5520,8 @@ def movements():
                 return redirect(url_for("movements"))
 
             pending_responsible_id, resp_err = resolve_pending_responsible(
-                to_id, request.form.get("pending_responsible_id")
+                to_id, request.form.get("pending_responsible_id"),
+                default_first=True,
             )
             if resp_err:
                 flash(resp_err, "error")
@@ -5375,16 +5579,23 @@ def movements():
             db.session.flush()
 
             # Serializado: aplicar los cambios de estado/ubicación a cada unidad.
+            # Unidades que efectivamente llegan al destino (las que se crean al
+            # entrar desde un externo, o las que se mueven): la mesa de
+            # reparaciones las necesita para saber qué serial es cada reparación.
+            moved_units = []
             if it.serialized:
                 if serial_new_serials:
                     for s in serial_new_serials:
-                        db.session.add(ItemUnit(
+                        _nu = ItemUnit(
                             item_id=item_id,
                             serial=s,
                             status=UNIT_EN_STOCK,
                             location_id=(None if to_ext else to_id),
-                        ))
+                        )
+                        db.session.add(_nu)
+                        moved_units.append(_nu)
                 apply_serial_units_out(serial_units_to_apply, to_id)
+                moved_units.extend(serial_units_to_apply)
 
             # Aviso de transferencia (2026-09-30): un TÉCNICO que mueve de una
             # camioneta a otra deja un aviso para los responsables de la que
@@ -5436,22 +5647,21 @@ def movements():
             # Los serializados estaban excluidos porque la mesa no sabía resolverlos;
             # ahora sí, y dejarlos afuera significaría que la misma situación física
             # aparece en la mesa o no según por qué pantalla se cargó.
+            # Serializados: una reparación por unidad, con su serial (ver
+            # create_repairs).
             if to_location and to_location.name == LOCATION_EN_REPARACION:
-                db.session.add(Repair(
-                    item_id=item_id,
-                    quantity=qty,
-                    status="EN_REPARACION",
-                    source_location_id=from_id,
-                    pending_id=None,
-                    created_by_user_id=current_user.id,
-                ))
+                create_repairs(
+                    item=it, qty=qty, units=moved_units,
+                    status="EN_REPARACION", source_location_id=from_id,
+                    created_by_user_id=current_user.id, pending_id=None,
+                )
 
             db.session.commit()
             flash(f"Movimiento {number} registrado", "ok")
 
         except Exception as e:
             db.session.rollback()
-            flash(f"No se pudo registrar: {e}", "error")
+            flash_error_inesperado("registrar el movimiento", e)
 
         return redirect(url_for("movements"))
 
@@ -5615,6 +5825,9 @@ def movement_revert(movement_id: int):
             .all()
         )
         for p in pendientes:
+            # Su historial de transferencias se va con él: si quedara, al
+            # reusarse el id aparecería pegado a otro pendiente.
+            PendingTransfer.query.filter_by(pending_kind="delivery", pending_id=p.id).delete()
             db.session.delete(p)
         if pendientes:
             detalle.append(f"{len(pendientes)} pendiente(s) anulado(s)")
@@ -5641,6 +5854,10 @@ def movement_revert(movement_id: int):
             .all()
         )
         for r in repairs:
+            # Su vínculo con la unidad no puede quedar suelto: se iría pegado a
+            # la próxima reparación que reuse el id. (Hoy no pasa: los
+            # serializados no se revierten; es por si eso cambia.)
+            RepairUnit.query.filter_by(repair_id=r.id).delete()
             db.session.delete(r)
         if repairs:
             detalle.append(f"{len(repairs)} reparación(es) anulada(s)")
@@ -5672,7 +5889,7 @@ def movement_revert(movement_id: int):
         flash(f"Movimiento {m.number or m.id} revertido con {number}.", "ok")
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo revertir: {e}", "error")
+        flash_error_inesperado("revertir el movimiento", e)
 
     return redirect(url_for("movements", **movements_view_args()))
 
@@ -5757,7 +5974,8 @@ def movements_bulk():
                 return redirect(url_for("movements_bulk"))
 
             pending_responsible_id, resp_err = resolve_pending_responsible(
-                to_id, request.form.get("pending_responsible_id")
+                to_id, request.form.get("pending_responsible_id"),
+                default_first=True,
             )
             if resp_err:
                 flash(resp_err, "error")
@@ -5954,7 +6172,7 @@ def movements_bulk():
 
         except Exception as e:
             db.session.rollback()
-            flash(f"No se pudo registrar la carga multiple: {e}", "error")
+            flash_error_inesperado("registrar la carga múltiple", e)
 
         return redirect(url_for("movements_bulk"))
 
@@ -6230,7 +6448,7 @@ def item_usage():
             return redirect(url_for("item_usage"))
         except Exception as e:
             db.session.rollback()
-            flash(f"Error: {e}", "error")
+            flash_error_inesperado("registrar los utilizados", e)
             return redirect(url_for("item_usage"))
 
     if is_tecnico:
@@ -6399,14 +6617,13 @@ def _parse_date_arg(raw: str):
 
 
 def location_responsibles(location_id: int):
-    """Usuarios a cargo de una ubicación (ordenados por nombre)."""
-    return (
-        User.query
-        .join(LocationResponsible, LocationResponsible.user_id == User.id)
-        .filter(LocationResponsible.location_id == location_id)
-        .order_by(User.full_name)
-        .all()
-    )
+    """Usuarios a cargo de una ubicación, en orden alfabético.
+
+    Delega en location_responsible_users para que el remito y los pendientes
+    usen EL MISMO orden: el primero de la lista es el que queda por defecto en
+    los dos lados.
+    """
+    return location_responsible_users(location_id)
 
 
 @app.route("/remitos", methods=["GET"])
@@ -6556,7 +6773,14 @@ def remito_new():
             return None, None  # (valor, error)
         raw = request.form.get(field_name, "").strip()
         if not raw.isdigit():
-            return None, f"Elegí el responsable de {label}."
+            # Sin elegir -> el primero por orden alfabético, mismo criterio que
+            # los pendientes (2026-10-01). Antes era un error que recargaba la
+            # pantalla y se perdían los movimientos tildados del remito.
+            people = location_responsibles(loc_id)
+            if not people:
+                return None, (f"La ubicación de {label} no tiene responsables "
+                              "cargados. Asignale uno antes de armar el remito.")
+            return people[0].id, None
         rid = int(raw)
         valid_ids = {u.id for u in location_responsibles(loc_id)}
         if rid not in valid_ids:
@@ -6598,7 +6822,7 @@ def remito_new():
         return redirect(url_for("remito_detail", remito_id=r.id))
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo crear el remito: {e}", "error")
+        flash_error_inesperado("crear el remito", e)
         return redirect(url_for("remitos"))
 
 
@@ -6852,17 +7076,32 @@ def weighted_avg_price_map(item_ids=None) -> dict:
     return out
 
 
+def _clave_alfabetica(u):
+    """Orden alfabético como lo lee una persona: por el nombre que se muestra
+    (nombre completo, o el usuario si no tiene), sin distinguir mayúsculas ni
+    acentos. El ORDER BY de SQLite compara bytes: "Ángel" quedaba después de
+    "Zoe", "ana" después de "Beto" y un usuario sin nombre completo ("")
+    primero de todos."""
+    nombre = (u.full_name or "").strip() or (u.username or "")
+    plano = unicodedata.normalize("NFKD", nombre)
+    plano = "".join(ch for ch in plano if not unicodedata.combining(ch)).casefold()
+    return (plano, (u.username or "").casefold(), u.id)
+
+
 def location_responsible_users(location_id):
-    """Usuarios responsables de una ubicación, en orden estable (por nombre).
+    """Usuarios responsables de una ubicación, en orden ALFABÉTICO estable.
 
     Antes se usaba `.first()` sin orden: con dos responsables en la misma
     camioneta, el pendiente podía quedar a nombre de cualquiera de los dos y el
-    criterio podía cambiar entre consultas. Ahora hay un orden fijo y, cuando
-    hay más de uno, la pantalla pide elegir.
+    criterio podía cambiar entre consultas. Ahora hay un orden fijo.
+
+    Desde 2026-10-01 el PRIMERO de esta lista es además el responsable por
+    defecto cuando hay varios y nadie eligió (ver resolve_pending_responsible
+    y el remito). Por eso el orden tiene que ser el que una persona espera.
     """
     if not location_id:
         return []
-    return (
+    users = (
         User.query.join(
             LocationResponsible, LocationResponsible.user_id == User.id
         )
@@ -6870,6 +7109,7 @@ def location_responsible_users(location_id):
         .order_by(User.full_name, User.username, User.id)
         .all()
     )
+    return sorted(users, key=_clave_alfabetica)
 
 
 def location_responsibles_map(locations):
@@ -6883,12 +7123,21 @@ def location_responsibles_map(locations):
     return out
 
 
-def resolve_pending_responsible(location_id, raw_value):
+def resolve_pending_responsible(location_id, raw_value, default_first=False):
     """Responsable al que queda un pendiente. Devuelve (user_id, error).
 
     - Sin responsables en la ubicación -> error (igual que antes).
     - Uno solo -> ese, se elija o no.
-    - Varios -> hay que elegir uno, y tiene que ser responsable de ESA ubicación.
+    - Se eligió uno -> ese, si es responsable de ESA ubicación (si no, error).
+    - Varios y no se eligió ninguno:
+        default_first=True  -> el PRIMERO por orden alfabético. Pedido de
+          Ignacio (2026-10-01): antes era un error, y como el error recarga la
+          pantalla, el que venía armando una carga múltiple perdía todo. Lo
+          usan las pantallas de ENTREGA (Movimientos, Carga múltiple, cierre de
+          solicitud de repuestos), donde el selector ya muestra a ese primero
+          elegido: el usuario lo ve, y lo puede cambiar, antes de confirmar.
+        default_first=False -> error, como antes. Es el caso del pendiente SIN
+          entrega: ahí el técnico ES el dato que se carga, no se adivina.
     """
     resp = location_responsible_users(location_id)
     if not resp:
@@ -6900,7 +7149,7 @@ def resolve_pending_responsible(location_id, raw_value):
         if chosen in {u.id for u in resp}:
             return chosen, None
         return None, "El responsable elegido no es responsable de la ubicación destino."
-    if len(resp) == 1:
+    if len(resp) == 1 or default_first:
         return resp[0].id, None
     return None, ("La ubicación destino tiene más de un responsable: elegí a "
                   "nombre de quién queda el pendiente.")
@@ -7086,6 +7335,21 @@ def inject_stock_count_badge():
     except Exception:
         count = 0
     return {"stock_count_badge_count": count}
+
+
+@app.context_processor
+def inject_pending_transfer_badge():
+    """Badge "+N" en 'Pendientes' para el TECNICO: pendientes que le
+    transfirieron y todavía no vio (ver PendingTransfer). Persistente: lo ve
+    aunque entre al otro día o desde otro dispositivo. Desaparece con
+    "Entendido" en el popup de Pendientes."""
+    count = 0
+    try:
+        if current_user.is_authenticated and current_user.role == "TECNICO":
+            count = len(open_pending_transfer_notices(current_user))
+    except Exception:
+        count = 0
+    return {"pending_transfer_badge_count": count}
 
 
 @app.context_processor
@@ -7348,14 +7612,12 @@ def _close_pending_stock(*, ref, item_id, qty, holder_location_id,
             source="PENDIENTE",
         ))
     elif return_action == "repair":
-        db.session.add(Repair(
-            item_id=item_id,
-            quantity=qty,
-            status="EN_REPARACION",
-            pending_id=repair_pending_id,
-            source_location_id=from_id,
-            created_by_user_id=current_user.id,
-        ))
+        # Con el serial que vuelve: la mesa ya sabe qué unidad es.
+        create_repairs(
+            item=_ret_item, qty=qty, units=serial_units,
+            status="EN_REPARACION", source_location_id=from_id,
+            created_by_user_id=current_user.id, pending_id=repair_pending_id,
+        )
     return m
 
 
@@ -7426,7 +7688,7 @@ def _pending_return_create():
         db.session.commit()
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo generar el pendiente: {e}", "error")
+        flash_error_inesperado("generar el pendiente", e)
         return back
 
     u = User.query.get(responsible_id)
@@ -7476,6 +7738,219 @@ def _pending_cancel(kind):
     db.session.commit()
     flash("Pendiente anulado. No se movió stock.", "ok")
     return back
+
+
+# ------------------ TRANSFERENCIA DE PENDIENTES (ver PendingTransfer) ------------------
+
+PENDING_KINDS = {"delivery": PendingDelivery, "return": PendingReturn}
+
+# Tope de una transferencia: protege de un POST armado con miles de ids.
+PENDING_TRANSFER_MAX = 200
+
+
+def pending_transfer_targets(exclude_user_id=None):
+    """A quién se le puede transferir un pendiente: a los TÉCNICOS.
+
+    Son los que cargan pendientes (el badge, la lista "a mi nombre" y el aviso
+    son del rol TECNICO). Se ofrecen todos, no solo los de una camioneta: la
+    transferencia es a una persona (decisión de Ignacio).
+    """
+    q = User.query.filter(User.role == "TECNICO")
+    if exclude_user_id is not None:
+        q = q.filter(User.id != exclude_user_id)
+    return sorted(q.all(), key=lambda u: (u.full_name or u.username or "").lower())
+
+
+def open_pending_transfer_notices(user):
+    """[(PendingTransfer, pendiente)] sin ver por `user`.
+
+    Única fuente de verdad: la usan el badge, el popup y el "Entendido". Deja
+    afuera los avisos de pendientes que ya no son de él (los volvió a pasar, o
+    se los reasignaron) y los que ya no están abiertos (devueltos, anulados o
+    borrados por la reversión de la entrega): no hay nada que avisar.
+    """
+    out = []
+    for kind, model in PENDING_KINDS.items():
+        rows = (
+            db.session.query(PendingTransfer, model)
+            .join(model, db.and_(PendingTransfer.pending_kind == kind,
+                                 PendingTransfer.pending_id == model.id))
+            .filter(
+                PendingTransfer.to_user_id == user.id,
+                PendingTransfer.seen_at.is_(None),
+                model.responsible_to_id == user.id,
+                pending_open_filter(model),
+            )
+            .all()
+        )
+        out.extend(rows)
+    out.sort(key=lambda t: (t[0].created_at, t[0].id))
+    return out
+
+
+def pending_return_item(kind, p):
+    """El ítem que tiene que volver (el swap de una entrega, o el de siempre)."""
+    if kind == "delivery" and p.return_item_id:
+        return p.return_item
+    return p.item
+
+
+def pending_transfer_groups(user):
+    """Avisos sin ver agrupados para el popup de Pendientes.
+
+    Devuelve ([{sender, previous, lines: [{item, qty}]}], [ids mostrados]).
+    sender = quién hizo la transferencia; previous = a nombre de quién estaba,
+    si no es el mismo (admin/supervisor que pasa el pendiente de un técnico a
+    otro). Se suma por ítem que hay que devolver, como el aviso de Stock.
+    """
+    notices = open_pending_transfer_notices(user)
+    groups: dict[tuple, dict] = {}
+    for t, p in notices:
+        g = groups.setdefault((t.created_by_user_id, t.from_user_id), {
+            "sender": t.created_by,
+            "previous": t.from_user if t.from_user_id != t.created_by_user_id else None,
+            "lines": {},
+        })
+        it = pending_return_item(t.pending_kind, p)
+        line = g["lines"].setdefault(it.id, {"item": it, "qty": 0})
+        line["qty"] += pending_return_units(p)
+    out = []
+    for g in groups.values():
+        out.append({
+            "sender": g["sender"],
+            "previous": g["previous"],
+            "lines": sorted(g["lines"].values(), key=lambda l: (l["item"].code or "").lower()),
+        })
+    return out, [t.id for t, _ in notices]
+
+
+def last_pending_transfers(refs):
+    """{(kind, id): PendingTransfer más reciente} para los pendientes dados."""
+    out = {}
+    for kind in PENDING_KINDS:
+        ids = [pid for k, pid in refs if k == kind]
+        if not ids:
+            continue
+        for t in (PendingTransfer.query
+                  .filter(PendingTransfer.pending_kind == kind,
+                          PendingTransfer.pending_id.in_(ids))
+                  .order_by(PendingTransfer.created_at, PendingTransfer.id).all()):
+            out[(kind, t.pending_id)] = t   # queda el último
+    return out
+
+
+@app.route("/pending-deliveries/transferir", methods=["POST"])
+@login_required
+@role_required("ADMIN", "SUPERVISOR", "TECNICO")
+def pending_transfer():
+    """Pasa uno o varios pendientes abiertos a nombre de otro técnico.
+
+    Solo cambia responsible_to_id y deja el registro (PendingTransfer), que es
+    también el aviso para quien recibe. No mueve stock ni cambia la ubicación.
+
+    Permisos (en el backend, no en la pantalla):
+    - TECNICO: solo pendientes que están a SU nombre. Uno ajeno en el POST
+      frena todo, aunque haya llegado armado a mano.
+    - ADMIN/SUPERVISOR: cualquier pendiente abierto.
+    Todo o nada: si un pendiente no se puede, no se transfiere ninguno.
+    """
+    back = redirect(url_for("pending_deliveries"))
+
+    to_raw = (request.form.get("to_user_id") or "").strip()
+    dest = User.query.get(int(to_raw)) if to_raw.isdigit() else None
+    if not dest or dest.role != "TECNICO":
+        flash("Elegí a qué técnico le pasás los pendientes.", "error")
+        return back
+
+    refs = []
+    for raw in request.form.getlist("pending_ref"):
+        kind, _, pid = (raw or "").strip().partition(":")
+        if kind in PENDING_KINDS and pid.isdigit() and (kind, int(pid)) not in refs:
+            refs.append((kind, int(pid)))
+    if not refs:
+        flash("Marcá al menos un pendiente para transferir.", "error")
+        return back
+    if len(refs) > PENDING_TRANSFER_MAX:
+        flash(f"Se pueden transferir hasta {PENDING_TRANSFER_MAX} pendientes por vez.", "error")
+        return back
+
+    es_tecnico = current_user.role == "TECNICO"
+    plan = []
+    for kind, pid in refs:
+        p = PENDING_KINDS[kind].query.get(pid)
+        if not p:
+            flash("Uno de los pendientes no existe. No se transfirió nada.", "error")
+            return back
+        if es_tecnico and p.responsible_to_id != current_user.id:
+            flash("Solo podés transferir pendientes que están a tu nombre. "
+                  "No se transfirió nada.", "error")
+            return back
+        if not pending_is_open(p):
+            flash(f"El pendiente #{p.id} ya no está abierto (devuelto o anulado). "
+                  "No se transfirió nada.", "error")
+            return back
+        if p.responsible_to_id == dest.id:
+            flash(f"El pendiente #{p.id} ya está a nombre de "
+                  f"{dest.full_name or dest.username}. No se transfirió nada.", "error")
+            return back
+        plan.append((kind, p, p.responsible_to_id))
+
+    try:
+        for kind, p, anterior in plan:
+            model = PENDING_KINDS[kind]
+            # UPDATE condicionado: si entre que se armó la pantalla y ahora
+            # alguien lo cerró, lo anuló o lo pasó a otro, no se pisa.
+            n = (model.query
+                 .filter(model.id == p.id, model.responsible_to_id == anterior,
+                         pending_open_filter(model))
+                 .update({model.responsible_to_id: dest.id}, synchronize_session=False))
+            if n != 1:
+                raise ValueError("cambio concurrente")
+            db.session.add(PendingTransfer(
+                pending_kind=kind, pending_id=p.id,
+                from_user_id=anterior, to_user_id=dest.id,
+                created_by_user_id=current_user.id,
+            ))
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        flash("Uno de los pendientes cambió mientras lo transferías. "
+              "No se transfirió nada: revisá la lista y probá de nuevo.", "error")
+        return back
+
+    n = len(plan)
+    flash(f"{'Transferiste' if es_tecnico else 'Se transfirieron'} {n} "
+          f"pendiente{'s' if n != 1 else ''} a {dest.full_name or dest.username}. "
+          "Le va a aparecer el aviso.", "ok")
+    return back
+
+
+@app.route("/pending-deliveries/avisos-transferencia/visto", methods=["POST"])
+@login_required
+@role_required("TECNICO")
+def pending_transfer_notices_ack():
+    """"Entendido" del popup de pendientes transferidos.
+
+    Marca solo los avisos que se mostraron y que siguen siendo de él: los ids
+    del form se cruzan contra open_pending_transfer_notices(), así que mandar a
+    mano el id de un aviso ajeno no hace nada.
+    """
+    ids = {int(x) for x in request.form.getlist("notice_id") if x.isdigit()}
+    if ids:
+        valid = [t.id for t, _ in open_pending_transfer_notices(current_user) if t.id in ids]
+        if valid:
+            try:
+                (PendingTransfer.query
+                 .filter(PendingTransfer.id.in_(valid), PendingTransfer.seen_at.is_(None))
+                 .update({
+                     PendingTransfer.seen_at: now_ar(),
+                     PendingTransfer.seen_by_user_id: current_user.id,
+                 }, synchronize_session=False))
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+                flash("No se pudo marcar el aviso como visto. Probá de nuevo.", "error")
+    return redirect(url_for("pending_deliveries"))
 
 
 def _pending_return_close():
@@ -7545,7 +8020,7 @@ def _pending_return_close():
         flash(str(e), "error")
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo cerrar el pendiente: {e}", "error")
+        flash_error_inesperado("cerrar el pendiente", e)
     return back
 
 
@@ -7672,7 +8147,7 @@ def pending_deliveries():
             flash(str(e), "error")
         except Exception as e:
             db.session.rollback()
-            flash(f"No se pudo cerrar el pendiente: {e}", "error")
+            flash_error_inesperado("cerrar el pendiente", e)
 
         return redirect(url_for("pending_deliveries"))
 
@@ -7891,8 +8366,33 @@ def pending_deliveries():
         holder_options.sort(key=lambda h: h["label"].lower())
         create_items = Item.query.filter_by(is_active=True).order_by(Item.code).all()
 
+    # Transferencia de pendientes (ver PendingTransfer). Qué filas de esta
+    # página se pueden marcar: las abiertas, y para el TÉCNICO solo las suyas
+    # (que son las únicas que ve). El backend lo vuelve a validar.
+    _es_tec = current_user.role == "TECNICO"
+    transferable = set()
+    for _kind, _rows in (("delivery", pendings), ("return", returns)):
+        for _p in _rows:
+            if pending_is_open(_p) and (not _es_tec or _p.responsible_to_id == current_user.id):
+                transferable.add(f"{_kind}:{_p.id}")
+    transfer_targets = pending_transfer_targets(
+        exclude_user_id=current_user.id if _es_tec else None
+    )
+    last_transfers = last_pending_transfers(
+        [("delivery", _p.id) for _p in pendings] + [("return", _r.id) for _r in returns]
+    )
+    # Popup "te transfirieron estos pendientes" (solo a quien recibe).
+    ptransfer_groups, ptransfer_notice_ids = (
+        pending_transfer_groups(current_user) if _es_tec else ([], [])
+    )
+
     return render_template(
         "pending_deliveries.html",
+        transferable=transferable,
+        transfer_targets=transfer_targets,
+        last_transfers=last_transfers,
+        ptransfer_groups=ptransfer_groups,
+        ptransfer_notice_ids=ptransfer_notice_ids,
         pendings=pendings,
         returns=returns,
         returns_page=returns_page,
@@ -8145,6 +8645,9 @@ def admin_clear_stock():
         # Los avisos cuelgan de movimientos: si quedaran, los ids de movimiento
         # se reusan y un aviso viejo aparecería pegado a un movimiento nuevo.
         TransferNotice.query.delete()
+        # Cuelgan de pendientes por id: si quedaran, al reusarse los ids una
+        # transferencia vieja aparecería pegada a un pendiente nuevo.
+        PendingTransfer.query.delete()
         PendingReturn.query.delete()
         PendingDelivery.query.delete()
         RemitoLine.query.delete()
@@ -8193,6 +8696,9 @@ def admin_clear_items():
         # Los avisos cuelgan de movimientos: si quedaran, los ids de movimiento
         # se reusan y un aviso viejo aparecería pegado a un movimiento nuevo.
         TransferNotice.query.delete()
+        # Cuelgan de pendientes por id: si quedaran, al reusarse los ids una
+        # transferencia vieja aparecería pegada a un pendiente nuevo.
+        PendingTransfer.query.delete()
         PendingReturn.query.delete()
         PendingDelivery.query.delete()
         RemitoLine.query.delete()
@@ -8365,7 +8871,7 @@ def scrap_report():
             return redirect(url_for("scrap_report"))
         except Exception as e:
             db.session.rollback()
-            flash(f"Error: {e}", "error")
+            flash_error_inesperado("registrar el descarte", e)
             return redirect(url_for("scrap_report"))
 
     # Filtros del historial (desde/hasta/item/responsable/mostrar + motivo)
@@ -8548,18 +9054,37 @@ def reparaciones():
         # regla auto/elegir del resto del sistema) y `resolve_serial_units_in`
         # carga la que vuelve del proveedor.
         #
-        # `repairs` no guarda a qué unidad corresponde cada reparación (no hay
-        # columna item_unit_id y NO se agregó una: sería un cambio de base). Por
-        # eso el serial se elige al RESOLVER, entre las unidades de ese ítem que
-        # están físicamente en la mesa. Con una sola unidad, sale sola.
+        # Desde 2026-10-01 cada reparación nueva sabe qué unidad es (tabla
+        # repair_units, ver RepairUnit): sale ESA, sin elegir. Las anteriores no
+        # tienen vínculo y siguen como antes: el serial se elige al RESOLVER,
+        # entre las unidades de ese ítem que están físicamente en la mesa. Con
+        # una sola unidad, sale sola.
         _rep_item = Item.query.get(item_id)
         _es_serializado = bool(_rep_item and _rep_item.serialized)
+        _vinculadas = repair_units_of(r) if _es_serializado else []
 
         def repair_units_out():
             """(units, error) de las unidades que salen de la mesa de reparación."""
             if not _es_serializado:
                 return [], None
-            return resolve_serial_units_out(item_id, repair_loc.id, qty, request.form)
+            # La vinculada sale sola si sigue en la mesa. Si alguien la sacó a
+            # mano (Movimientos), se cae a elegir entre las que están: un freno
+            # sin salida dejaría la reparación trabada para siempre.
+            if (_vinculadas and len(_vinculadas) == qty
+                    and all(u.status == UNIT_EN_STOCK and u.location_id == repair_loc.id
+                            for u in _vinculadas)):
+                return list(_vinculadas), None
+            return resolve_serial_units_out(
+                item_id, repair_loc.id, qty, request.form,
+                exclude_ids=repair_units_reserved(item_id, except_repair_id=r.id),
+            )
+
+        def vincular_si_no_tiene(units):
+            # Una reparación vieja (sin vínculo) queda atada a la unidad que se
+            # eligió al resolverla: así el historial dice qué serial fue y, si se
+            # manda al proveedor, a la vuelta se propone ESE serial.
+            if units and not _vinculadas:
+                link_repair_units(r, units)
 
         # --- Enviar a reparación de proveedor: egreso En reparación -> Proveedor + remito ---
         if action == "enviar_proveedor":
@@ -8595,6 +9120,7 @@ def reparaciones():
                 )
                 # Sale del sistema hacia una externa: las unidades quedan ENTREGADO.
                 apply_serial_units_out(_units, proveedor_loc.id)
+                vincular_si_no_tiene(_units)
                 r.status = "EN_PROVEEDOR"
                 db.session.commit()
                 flash(
@@ -8606,7 +9132,7 @@ def reparaciones():
                 flash(f"Error de stock: {e}", "error")
             except Exception as e:
                 db.session.rollback()
-                flash(f"Error: {e}", "error")
+                flash_error_inesperado("registrar la reparación", e)
             return redirect(url_for("reparaciones"))
 
         # --- Marcar reparada por proveedor: ingreso Proveedor -> Jaula + remito ---
@@ -8627,14 +9153,35 @@ def reparaciones():
             if not jaula or not proveedor_loc:
                 flash("Faltan ubicaciones 'Jaula TNG' y/o 'Proveedor'.", "error")
                 return redirect(url_for("reparaciones"))
-            # Vuelve del proveedor: la unidad había salido (ENTREGADO), así que
-            # se carga el serial y `resolve_serial_units_in` REACTIVA esa misma
-            # unidad en vez de tratarla como un serial duplicado.
+            # Vuelve del proveedor. Dos casos:
+            #  - "same" (default si la reparación sabe qué unidad mandó): vuelve
+            #    ESA unidad, que había salido (ENTREGADO) y se reactiva. No hay
+            #    que tipear nada.
+            #  - "other" (o reparación vieja sin vínculo): se carga el serial que
+            #    entra y `resolve_serial_units_in` lo crea o reactiva. Si es
+            #    distinto del que se mandó, es un REEMPLAZO (garantía): la
+            #    original queda ENTREGADO, porque nunca volvió.
             _units, _serr = ([], None)
+            _reemplazadas = []
             if _es_serializado:
-                _units, _serr = resolve_serial_units_in(
-                    item_id, request.form.getlist("unit_serial"), qty
-                )
+                _modo = (request.form.get("return_mode") or "").strip()
+                if _vinculadas and _modo != "other":
+                    _en_stock = [u for u in _vinculadas if u.status == UNIT_EN_STOCK]
+                    if _en_stock:
+                        _u = _en_stock[0]
+                        _loc = _u.location.name if _u.location else "otra ubicación"
+                        _serr = (f"El serial {_u.serial} ya figura en stock en {_loc}: "
+                                 "no puede volver del proveedor. Si el proveedor "
+                                 "devolvió otra unidad, elegí «Vuelve otro serial».")
+                    else:
+                        _units = list(_vinculadas)
+                else:
+                    _units, _serr = resolve_serial_units_in(
+                        item_id, request.form.getlist("unit_serial"), qty
+                    )
+                    if not _serr and _vinculadas:
+                        _ids_nuevas = {id(u) for u in _units}
+                        _reemplazadas = [u for u in _vinculadas if id(u) not in _ids_nuevas]
             if _serr:
                 flash(_serr, "error")
                 return redirect(url_for("reparaciones"))
@@ -8642,11 +9189,23 @@ def reparaciones():
                 # La nota de reparación va en el MOVIMIENTO, no en el remito.
                 note = f"{REPAIR_PROV_IN_NOTE} (rep #{r.id}) -> {LOCATION_JAULA_TNG}"
                 mov_obs = f"{note} · {observation}" if observation else note
+                if _reemplazadas:
+                    # Sin esto, el historial diría que volvió un serial que nunca
+                    # se mandó.
+                    mov_obs = (f"{mov_obs} · reemplaza a "
+                               f"{', '.join(u.serial for u in _reemplazadas)}")
                 mov_obs = serial_obs(mov_obs, [u.serial for u in _units])
                 m, rem = _repair_transfer_with_remito(
                     item_id, qty, proveedor_loc.id, jaula.id, supplier, mov_obs, current_user
                 )
+                for u in _units:
+                    u.status = UNIT_EN_STOCK  # reactivación (salió ENTREGADO)
                 apply_serial_units_out(_units, jaula.id)
+                if _reemplazadas:
+                    link_repair_units(
+                        r, [u for u in _units if u not in _vinculadas],
+                        kind=REPAIR_UNIT_REEMPLAZO,
+                    )
                 r.status = "REPARADO"
                 r.resolved_at = now_ar()
                 r.resolved_by_user_id = current_user.id
@@ -8660,7 +9219,7 @@ def reparaciones():
                 flash(f"Error de stock: {e}", "error")
             except Exception as e:
                 db.session.rollback()
-                flash(f"Error: {e}", "error")
+                flash_error_inesperado("registrar la reparación", e)
             return redirect(url_for("reparaciones"))
 
         # --- Resolución directa en la mesa (sin proveedor): reparado / descartado ---
@@ -8707,6 +9266,7 @@ def reparaciones():
             # Reparado -> la unidad se reubica en Jaula y sigue EN_STOCK.
             # Descartado -> queda DESCARTADO, igual que en cualquier descarte.
             obs = serial_obs(obs, apply_serial_units_out(_units, to_id)) if _units else obs
+            vincular_si_no_tiene(_units)
 
             y, seq, number = next_movement_number()
             m = Movement(
@@ -8745,7 +9305,7 @@ def reparaciones():
             flash(f"Error de stock: {e}", "error")
         except Exception as e:
             db.session.rollback()
-            flash(f"Error: {e}", "error")
+            flash_error_inesperado("cerrar la reparación", e)
         return redirect(url_for("reparaciones"))
 
     # GET: en reparacion (pendientes) + en proveedor + historial resuelto
@@ -8833,22 +9393,51 @@ def reparaciones():
     # Seriales que están físicamente en la mesa, por reparación. Como `repairs`
     # no guarda la unidad, el selector ofrece las de ESE ítem que están en la
     # ubicación 'En reparación': es exactamente lo que el backend va a aceptar.
+    #
+    # Desde 2026-10-01: si la reparación ya sabe qué unidad es y esa unidad
+    # sigue en la mesa, no se ofrece selector (sale esa). `repair_serials`
+    # tiene, para cada reparación de la pantalla, los seriales vinculados.
+    _todas = list(pendientes) + list(en_proveedor) + list(historial)
+    repair_serials = {}
+    if _todas:
+        _links = (RepairUnit.query
+                  .filter(RepairUnit.repair_id.in_([_r.id for _r in _todas]))
+                  .order_by(RepairUnit.id).all())
+        for _l in _links:
+            _d = repair_serials.setdefault(
+                _l.repair_id, {"orig": [], "reemp": [], "orig_units": []})
+            if _l.unit is None:
+                continue
+            if _l.kind == REPAIR_UNIT_REEMPLAZO:
+                _d["reemp"].append(_l.unit.serial)
+            else:
+                _d["orig"].append(_l.unit.serial)
+                _d["orig_units"].append(_l.unit)
     repair_units = {}
     if repair_loc:
         for _r in pendientes:
             if not _r.item or not _r.item.serialized:
                 continue
+            _d = repair_serials.get(_r.id)
+            if (_d and len(_d["orig_units"]) == _r.quantity
+                    and all(u.status == UNIT_EN_STOCK and u.location_id == repair_loc.id
+                            for u in _d["orig_units"])):
+                _d["en_mesa"] = True   # sale sola: no hay nada que elegir
+                continue
+            _reservadas = repair_units_reserved(_r.item_id, except_repair_id=_r.id)
             repair_units[_r.id] = [
                 {"id": _u.id, "serial": _u.serial}
                 for _u in units_in_stock_query(_r.item_id, repair_loc.id)
                 .order_by(ItemUnit.created_at, ItemUnit.id)
                 .all()
+                if _u.id not in _reservadas
             ]
 
     return render_template(
         "reparaciones.html",
         pendientes=pendientes,
         repair_units=repair_units,
+        repair_serials=repair_serials,
         page_obj=historial_page,
         en_proveedor=en_proveedor,
         suppliers=suppliers_list,
@@ -9252,7 +9841,7 @@ def purchase_request_new():
         return redirect(url_for("purchase_request_detail", pr_id=pr.id))
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo crear la solicitud: {e}", "error")
+        flash_error_inesperado("crear la solicitud", e)
         return redirect(url_for("purchase_requests"))
 
 
@@ -9504,7 +10093,7 @@ def repair_request_new():
         return redirect(url_for("repair_request_detail", rr_id=pr.id))
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo crear la solicitud: {e}", "error")
+        flash_error_inesperado("crear la solicitud", e)
         return redirect(url_for("repair_requests"))
 
 
@@ -9589,7 +10178,7 @@ def repair_request_cancel(rr_id: int):
         flash(f"Solicitud {rr.number} cancelada.", "ok")
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo cancelar la solicitud: {e}", "error")
+        flash_error_inesperado("cancelar la solicitud", e)
     return redirect(url_for("repair_request_detail", rr_id=rr.id))
 
 
@@ -9622,7 +10211,7 @@ def repair_request_reject(rr_id: int):
         flash(f"Solicitud {rr.number} rechazada.", "ok")
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo rechazar la solicitud: {e}", "error")
+        flash_error_inesperado("rechazar la solicitud", e)
     return redirect(url_for("repair_request_detail", rr_id=rr.id))
 
 
@@ -9650,9 +10239,8 @@ def repair_request_close(rr_id: int):
         if item.serialized:
             raw = request.form.getlist(f"unit_ids_{ln.id}")
             unit_ids = [int(x) for x in raw if x.isdigit()]
-            if len(unit_ids) > ln.qty:
-                flash(f"«{item.code} - {item.name}»: elegiste más seriales que lo pedido ({ln.qty}).", "error")
-                return redirect(url_for("repair_request_detail", rr_id=rr.id))
+            # Se pueden entregar MÁS seriales que los pedidos (2026-10-02): el
+            # tope real es que cada uno esté disponible en la Jaula (abajo).
             units = []
             for uid in unit_ids:
                 if uid in seen_units:
@@ -9670,8 +10258,10 @@ def repair_request_close(rr_id: int):
         else:
             raw = (request.form.get(f"qty_entregada_{ln.id}", "") or "").strip()
             delivered = int(raw) if raw.isdigit() else 0
-            if delivered < 0 or delivered > ln.qty:
-                flash(f"«{item.code} - {item.name}»: cantidad a entregar inválida (0 a {ln.qty}).", "error")
+            # Se puede entregar menos o MÁS de lo pedido (2026-10-02). El tope
+            # es el stock real de la Jaula, que se valida justo abajo.
+            if delivered < 0:
+                flash(f"«{item.code} - {item.name}»: cantidad a entregar inválida.", "error")
                 return redirect(url_for("repair_request_detail", rr_id=rr.id))
             st = Stock.query.filter_by(item_id=item.id, location_id=jaula.id).first()
             avail = st.quantity if st else 0
@@ -9726,7 +10316,8 @@ def repair_request_close(rr_id: int):
 
     if any_pending:
         pending_responsible_id, resp_err = resolve_pending_responsible(
-            dest_id, request.form.get("pending_responsible_id")
+            dest_id, request.form.get("pending_responsible_id"),
+            default_first=True,
         )
         if resp_err:
             flash(resp_err, "error")
@@ -9738,7 +10329,9 @@ def repair_request_close(rr_id: int):
         for p in plan:
             item = p["item"]
             d = p["delivered"]
-            if d != p["line"].qty:
+            # Completa = cada línea recibió lo pedido o más. Si alguna quedó
+            # corta es parcial, aunque otra haya recibido de más.
+            if d < p["line"].qty:
                 full = False
             if d > 0:
                 upsert_stock(item.id, jaula.id, -d)
@@ -9785,7 +10378,7 @@ def repair_request_close(rr_id: int):
         )
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo cerrar la solicitud: {e}", "error")
+        flash_error_inesperado("cerrar la solicitud", e)
     return redirect(url_for("repair_request_detail", rr_id=rr.id))
 
 
@@ -10310,7 +10903,7 @@ def stock_count_create():
         db.session.commit()
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo guardar el conteo: {e}", "error")
+        flash_error_inesperado("guardar el conteo", e)
         return redirect(volver)
 
     # `enviado=1` es lo que dispara el cartel de resultado en el detalle.
@@ -10681,7 +11274,7 @@ def stock_count_approve(sc_id: int):
             )
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo aprobar el conteo: {e}", "error")
+        flash_error_inesperado("aprobar el conteo", e)
     return redirect(url_for("stock_count_detail", sc_id=sc.id))
 
 
@@ -11779,11 +12372,11 @@ def in_out():
             db.session.add(r)
             db.session.flush()
 
-            # Egreso por reparación: los ítems no serializados quedan esperando
-            # devolución en /reparaciones ("En proveedor"). Los serializados no,
-            # porque esa pantalla todavía no resuelve reparaciones por serial.
+            # Egreso por reparación: queda esperando devolución en /reparaciones
+            # ("En proveedor"). Desde 2026-10-01 también los serializados: una
+            # reparación por unidad, con su serial (ver create_repairs). Antes
+            # salían del sistema sin quedar en ningún lado.
             repairs_creadas = 0
-            serializados_sin_repair = []
 
             for p in planned:
                 it, qty = p["it"], p["qty"]
@@ -11831,17 +12424,12 @@ def in_out():
                     ))
 
                 if motivo == "REPARACION":
-                    if it.serialized:
-                        serializados_sin_repair.append(it.code)
-                    else:
-                        db.session.add(Repair(
-                            item_id=it.id,
-                            quantity=qty,
-                            status="EN_PROVEEDOR",
-                            source_location_id=from_id,
-                            created_by_user_id=current_user.id,
-                        ))
-                        repairs_creadas += 1
+                    create_repairs(
+                        item=it, qty=qty, units=p["out_units"],
+                        status="EN_PROVEEDOR", source_location_id=from_id,
+                        created_by_user_id=current_user.id,
+                    )
+                    repairs_creadas += 1
 
             db.session.commit()
             msg = (
@@ -11854,15 +12442,9 @@ def in_out():
                     "en Reparaciones (En proveedor)."
                 )
             flash(msg, "ok")
-            if serializados_sin_repair:
-                flash(
-                    "Ítems serializados egresados sin quedar en Reparaciones "
-                    f"({', '.join(serializados_sin_repair)}): esa pantalla todavía "
-                    "no maneja seriales. Seguilos desde Movimientos.", "error",
-                )
         except Exception as e:
             db.session.rollback()
-            flash(f"No se pudo registrar: {e}", "error")
+            flash_error_inesperado("registrar el ingreso / egreso", e)
         return redirect(url_for("in_out"))
 
     # ---- GET ----
@@ -12115,7 +12697,7 @@ def costos_precio_editar(price_id: int):
         )
     except Exception as e:
         db.session.rollback()
-        flash(f"No se pudo corregir el precio: {e}", "error")
+        flash_error_inesperado("corregir el precio", e)
 
     return redirect(url_for("costos_ingresos", **request.args.to_dict()))
 
@@ -12264,7 +12846,7 @@ def costos_parametros():
             flash("Parámetros guardados.", "ok")
         except Exception as e:
             db.session.rollback()
-            flash(f"No se pudieron guardar los parámetros: {e}", "error")
+            flash_error_inesperado("guardar los parámetros", e)
         return redirect(url_for("costos_parametros"))
 
     return render_template(

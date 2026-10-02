@@ -360,9 +360,10 @@ def test_egreso_reparacion_multi_item_crea_una_reparacion_por_linea(A, client):
     assert all(r.status == "EN_PROVEEDOR" for r in reps.values())
 
 
-def test_egreso_reparacion_serializado_no_crea_reparacion(A, client):
-    # /reparaciones todavía no resuelve seriales: no se crea una fila que
-    # después no se pueda cerrar. El egreso sí se registra.
+def test_egreso_reparacion_serializado_queda_en_proveedor_con_su_serial(A, client):
+    # Desde 2026-10-01 la mesa resuelve por serial: el egreso serializado por
+    # reparación queda "En proveedor" como cualquier otro, una reparación por
+    # unidad y con su serial vinculado. Antes salía sin quedar en ningún lado.
     _admin(client)
     jaula, it = _egreso_loc(A, "MOT-009", qty=2, serialized=True)
     A.db.session.add(A.ItemUnit(item_id=it.id, serial="SNR-1",
@@ -375,7 +376,10 @@ def test_egreso_reparacion_serializado_no_crea_reparacion(A, client):
         "item_id[]": [str(it.id)], "qty[]": ["1"], "line_serials[]": ["SNR-1"],
     }, follow_redirects=True)
 
-    assert A.Repair.query.count() == 0
+    reps = A.Repair.query.all()
+    assert len(reps) == 1
+    assert reps[0].status == "EN_PROVEEDOR" and reps[0].quantity == 1
+    assert [u.serial for u in A.repair_units_of(reps[0])] == ["SNR-1"]
     m = A.Movement.query.filter(A.Movement.supplier_id == s.id).first()
     assert m is not None and "Reparación" in m.observation
     assert A.Stock.query.filter_by(item_id=it.id, location_id=jaula.id).first().quantity == 1

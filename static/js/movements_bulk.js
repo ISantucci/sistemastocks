@@ -84,19 +84,19 @@
       return;
     }
     sel.disabled = false;
-    if (list.length > 1) {
-      var ph = document.createElement("option");
-      ph.value = ""; ph.textContent = "Elegí el responsable...";
-      sel.appendChild(ph);
-    }
+    // Sin opción vacía: con varios responsables arranca en el PRIMERO por
+    // orden alfabético (la lista ya viene ordenada del servidor) y se puede
+    // cambiar. Antes arrancaba en "Elegí el responsable...", nada frenaba el
+    // envío, el backend lo rechazaba y se perdía la carga entera (2026-10-01).
     list.forEach(function (u) {
       var op = document.createElement("option");
       op.value = String(u.id); op.textContent = u.name;
       sel.appendChild(op);
     });
     if (prev && sel.querySelector('option[value="' + prev + '"]')) sel.value = prev;
+    else sel.value = String(list[0].id);
     hint.textContent = list.length > 1
-      ? "El destino tiene más de un responsable: elegí a nombre de quién quedan."
+      ? "El destino tiene " + list.length + " responsables: queda el primero por orden alfabético. Cambialo si corresponde."
       : "";
   }
 

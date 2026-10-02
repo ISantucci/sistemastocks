@@ -118,41 +118,14 @@
   <div class="card-header"><span class="card-title">Cerrar y entregar</span></div>
   <p class="muted">
     Elegí qué entregás de cada repuesto. Para los serializados marcá los seriales; para el resto poné la cantidad.
-    Podés entregar menos de lo pedido (cierre parcial). Se genera el movimiento Jaula → {{ rr.dest_location.name if rr.dest_location else "camioneta" }}.
+    Podés entregar menos de lo pedido (cierre parcial) o más, hasta lo que haya en la Jaula. Se genera el movimiento Jaula → {{ rr.dest_location.name if rr.dest_location else "camioneta" }}.
     Si no vas a entregar <b>nada</b>, no cierres con 0: usá «Rechazar solicitud» más abajo.
   </p>
   <form method="post" action="{{ url_for('repair_request_close', rr_id=rr.id) }}"
+        data-draft="cerrar-solicitud"
         data-confirm-move="Confirmar entrega de repuestos"
         data-confirm-context="Solicitud {{ rr.number }} · Jaula &rarr; {{ rr.dest_location.name if rr.dest_location else 'camioneta' }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-
-    {# A nombre de quién quedan los pendientes de esta entrega. Aparece solo si
-       alguna línea genera pendiente. Con un solo responsable se completa solo. #}
-    <div class="field" id="rr_pending_resp_box" style="display:none; max-width:520px;">
-      <label>Pendientes a nombre de</label>
-      {% if dest_responsibles|length == 1 %}
-        <input type="hidden" name="pending_responsible_id" value="{{ dest_responsibles[0].id }}">
-        <input type="text" value="{{ dest_responsibles[0].full_name or dest_responsibles[0].username }}" readonly disabled>
-      {% elif dest_responsibles %}
-        {# Sin `required`: el campo vive dentro de un bloque oculto y un required
-           invisible bloquea el envío sin explicar por qué. La validación real
-           está en repair_request_close(). #}
-        <select name="pending_responsible_id">
-          <option value="">Elegí el responsable...</option>
-          {% for u in dest_responsibles %}
-            <option value="{{ u.id }}">{{ u.full_name or u.username }}</option>
-          {% endfor %}
-        </select>
-        <span class="muted" style="font-weight:400;">
-          {{ rr.dest_location.name if rr.dest_location else "El destino" }} tiene más de un
-          responsable: elegí a nombre de quién queda el pendiente.
-        </span>
-      {% else %}
-        <span class="muted">
-          El destino no tiene responsable asignado: asignale uno antes de generar un pendiente.
-        </span>
-      {% endif %}
-    </div>
 
     {% for ln in rr.lines %}
     <div class="card" style="margin:10px 0;"
@@ -164,24 +137,31 @@
       {% if ln.item.serialized %}
         {% set units = jaula_units.get(ln.item.id, []) %}
         {% if units %}
-          <p class="muted" style="margin:8px 0 4px;">Seriales disponibles en Jaula (elegí hasta {{ ln.qty }}):</p>
-          <div class="serial-pick-list" style="display:flex; flex-wrap:wrap; gap:8px;">
-            {% for u in units %}
-              <label style="display:inline-flex; align-items:center; gap:6px; border:1px solid var(--border,#d0d5dd); border-radius:8px; padding:6px 10px; font-size:14px; cursor:pointer;">
-                <input type="checkbox" name="unit_ids_{{ ln.id }}" value="{{ u[0] }}" data-line="{{ ln.id }}" data-max="{{ ln.qty }}">
-                {{ u[1] }}
-              </label>
-            {% endfor %}
+          {#- Mismo selector que Egresos (popup «Elegir S/N»,
+              static/js/serial_picker.js). Acá es "hasta N", con N = seriales
+              disponibles en la Jaula: se puede entregar menos o más de lo
+              pedido (2026-10-02). Lo elegido viaja como unit_ids_<línea>, igual
+              que las casillas de antes. -#}
+          <div class="field js-sn-picker" style="margin-top:8px;"
+               data-units='{{ units|tojson }}' data-qty="{{ units|length }}" data-mode="max"
+               data-name="unit_ids_{{ ln.id }}" data-line="{{ ln.id }}" data-origin="Jaula">
+            <label>Seriales a entregar</label>
+            <div class="serial-pick-list"></div>
+    <span class="muted serial-pick-status" style="font-weight:400; font-size:13px;"></span>
+            <input type="text" class="serial-summary" name="serials_txt_{{ ln.id }}" readonly tabindex="-1"
+                   style="border:0; background:transparent; padding:0; height:auto; font-size:13px; color:var(--text-secondary,#666);">
           </div>
         {% else %}
           <p class="muted" style="margin:8px 0 0;">No hay seriales disponibles en la Jaula: de este ítem se entrega 0. Si no hay nada para entregar en toda la solicitud, rechazala en vez de cerrarla.</p>
         {% endif %}
       {% else %}
         {% set avail = jaula_stock.get(ln.item.id, 0) %}
+        {#- Precarga: lo pedido (o lo que haya, si es menos), como siempre.
+            Tope: todo lo que hay en la Jaula, para poder entregar de más. -#}
         {% set maxd = ln.qty if ln.qty < avail else avail %}
         <div class="field" style="max-width:220px; margin-top:8px;">
           <label>Cantidad a entregar {% if ln.item.unit == "metros" %}<span class="muted" style="font-weight:400;">(en metros)</span>{% endif %} <span class="muted">(en Jaula: {{ fmt_qty(avail, ln.item) }})</span></label>
-          <input type="number" name="qty_entregada_{{ ln.id }}" min="0" max="{{ maxd }}" value="{{ maxd }}"
+          <input type="number" name="qty_entregada_{{ ln.id }}" min="0" max="{{ avail }}" value="{{ maxd }}"
                  class="rr-qty" data-line="{{ ln.id }}">
         </div>
       {% endif %}
@@ -215,6 +195,35 @@
       </div>
     </div>
     {% endfor %}
+
+    {# A nombre de quién quedan los pendientes de esta entrega. Aparece solo si
+       alguna línea genera pendiente. Con un solo responsable se completa solo;
+       con varios arranca en el primero por orden alfabético (dest_responsibles
+       ya viene ordenado) y se puede cambiar. Antes arrancaba en "Elegí el
+       responsable...", el backend lo rechazaba y se perdía todo lo cargado en
+       las líneas. Va al pie, junto al botón, para que se vea (2026-10-01). #}
+    <div class="field" id="rr_pending_resp_box" style="display:none; max-width:520px; margin-bottom:16px;">
+      <label>Pendientes a nombre de</label>
+      {% if dest_responsibles|length == 1 %}
+        <input type="hidden" name="pending_responsible_id" value="{{ dest_responsibles[0].id }}">
+        <input type="text" value="{{ dest_responsibles[0].full_name or dest_responsibles[0].username }}" readonly disabled>
+      {% elif dest_responsibles %}
+        <select name="pending_responsible_id">
+          {% for u in dest_responsibles %}
+            <option value="{{ u.id }}"{% if loop.first %} selected{% endif %}>{{ u.full_name or u.username }}</option>
+          {% endfor %}
+        </select>
+        <span class="muted" style="font-weight:400;">
+          {{ rr.dest_location.name if rr.dest_location else "El destino" }} tiene
+          {{ dest_responsibles|length }} responsables: queda el primero por orden
+          alfabético. Cambialo si corresponde.
+        </span>
+      {% else %}
+        <span class="muted">
+          El destino no tiene responsable asignado: asignale uno antes de generar un pendiente.
+        </span>
+      {% endif %}
+    </div>
 
     <button type="submit" class="btn btn-primary">Cerrar y entregar</button>
   </form>

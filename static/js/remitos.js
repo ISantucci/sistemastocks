@@ -56,11 +56,19 @@
           respSel.innerHTML = '<option value="" disabled selected>Sin responsables cargados</option>';
           return;
         }
-        var html = '';
-        if (opts.length > 1) { html += '<option value="" disabled selected>Elegí responsable...</option>'; }
-        opts.forEach(function (o) { html += '<option value="' + o.id + '">' + o.name + '</option>'; });
-        respSel.innerHTML = html;
-        if (opts.length === 1) { respSel.value = String(opts[0].id); }
+        // Sin opción vacía: con varios responsables queda el PRIMERO por orden
+        // alfabético (el servidor ya los manda ordenados) y se puede cambiar.
+        // Antes arrancaba en "Elegí responsable...", el backend lo rechazaba y
+        // se perdían los movimientos tildados (2026-10-01). Los nombres van
+        // como texto, no como HTML.
+        respSel.innerHTML = '';
+        opts.forEach(function (o) {
+          var op = document.createElement('option');
+          op.value = String(o.id);
+          op.textContent = o.name;
+          respSel.appendChild(op);
+        });
+        respSel.value = String(opts[0].id);
       })
       .catch(function () { respSel.innerHTML = '<option value="" disabled selected>Error al cargar</option>'; });
   }

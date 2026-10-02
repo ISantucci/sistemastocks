@@ -13,7 +13,7 @@
 {% if me.role != "LECTOR" %}
 <div class="card">
   <div class="card-header"><span class="card-title">Registrar movimiento</span></div>
-  <form method="post" data-confirm-move="Confirmar movimiento">
+  <form method="post" data-confirm-move="Confirmar movimiento" data-draft="movimiento">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="form-grid">
       <div class="field">
@@ -21,7 +21,7 @@
         {% if is_tecnico %}
           {% if tech_locations|length == 1 %}
             <input type="text" value="{{ tech_locations[0].name }}" readonly disabled />
-            <input type="hidden" name="from_location_id" id="from_location_id" value="{{ tech_locations[0].id }}" />
+            <input type="hidden" name="from_location_id" id="from_location_id" value="{{ tech_locations[0].id }}" data-label="{{ tech_locations[0].name }}" />
           {% else %}
             <select name="from_location_id" id="from_location_id" required>
               <option value="" selected disabled>Seleccionar ubicación...</option>

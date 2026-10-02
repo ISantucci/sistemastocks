@@ -15,7 +15,10 @@
   <div><a href="{{ url_for('stock_counts') }}" class="btn btn-secondary">Cancelar</a></div>
 </div>
 
-<form method="post" action="{{ url_for('stock_count_create') }}">
+{#- data-draft: si el servidor rechaza el conteo, se repone lo contado
+    (static/js/form_draft.js). Antes se perdía el conteo entero. -#}
+<form method="post" action="{{ url_for('stock_count_create') }}"
+      data-draft="conteo-camioneta" data-draft-add="#sc-add-line-btn">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <input type="hidden" name="location_id" value="{{ location.id }}">
 
@@ -98,7 +101,7 @@
 </form>
 
 <template id="sc-extra-template">
-  <div class="sc-extra-line" style="display:flex; gap:12px; align-items:flex-end; margin-bottom:10px; flex-wrap:wrap;">
+  <div class="sc-extra-line" data-draft-row style="display:flex; gap:12px; align-items:flex-end; margin-bottom:10px; flex-wrap:wrap;">
     <div class="field" style="flex:1; min-width:260px;">
       <label>Ítem</label>
       <select name="extra_item_id[]" class="js-sc-item">

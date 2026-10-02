@@ -3,6 +3,18 @@
 {% block title %}Reparaciones · TNGStocks{% endblock %}
 {% block page_title %}Reparaciones{% endblock %}
 {% block content %}
+{#- Serial de una reparación, para las tres tablas. Las reparaciones anteriores
+    al 2026-10-01 no saben qué unidad son: "—" (el serial queda igual en la
+    observación del movimiento). Un reemplazo del proveedor se ve como
+    "enviado → devuelto". -#}
+{% macro serials_cell(r) -%}
+  {%- set _rs = repair_serials.get(r.id, {}) -%}
+  {%- if _rs.get("orig") -%}
+    {{ _rs.orig|join(', ') }}{% if _rs.get("reemp") %} &rarr; {{ _rs.reemp|join(', ') }} <span class="muted">(reemplazo)</span>{% endif %}
+  {%- else -%}
+    <span class="muted">—</span>
+  {%- endif -%}
+{%- endmacro %}
 <div class="page-header">
   <div>
     <h2>Reparaciones</h2>
@@ -20,7 +32,7 @@
     <table class="data-table">
       <thead>
         <tr>
-          <th>Ingreso</th><th>ID Item</th><th>Nombre item</th><th>Cant.</th><th>Origen</th><th>Acción</th>
+          <th>Ingreso</th><th>ID Item</th><th>Nombre item</th><th>Serial</th><th>Cant.</th><th>Origen</th><th>Acción</th>
         </tr>
       </thead>
       <tbody>
@@ -29,6 +41,7 @@
           <td>{{ r.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
           <td>{{ r.item.code }}</td>
           <td>{{ r.item.name }}</td>
+          <td>{{ serials_cell(r) }}</td>
           <td>{{ fmt_qty(r.quantity, r.item) }}</td>
           <td>{{ r.source_location.name if r.source_location else "—" }}</td>
           <td class="actions-cell">
@@ -37,15 +50,15 @@
             {% else %}
             <form method="post" class="pending-action"
                   data-confirm-move="Confirmar resolución de reparación"
-                  data-confirm-context="{{ r.item.code }} - {{ r.item.name }} · {{ fmt_qty(r.quantity, r.item) }}">
+                  data-confirm-context="{{ r.item.code }} - {{ r.item.name }} · {{ fmt_qty(r.quantity, r.item) }}{% if repair_serials.get(r.id, {}).get('orig') %} · S/N: {{ repair_serials[r.id].orig|join(', ') }}{% endif %}">
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <input type="hidden" name="repair_id" value="{{ r.id }}">
               <div class="check-inline" style="gap:14px; flex-wrap:wrap;">
                 <label class="check-inline"><input type="radio" name="repair_action" value="reparado" checked> Reparado</label>
-                <label class="check-inline"><input type="radio" name="repair_action" value="descartado" id="disc_radio_{{ r.id }}"> Descartado</label>
-                <label class="check-inline"><input type="radio" name="repair_action" value="enviar_proveedor" id="prov_radio_{{ r.id }}"> Enviar a proveedor</label>
+                <label class="check-inline"><input type="radio" name="repair_action" value="descartado"> Descartado</label>
+                <label class="check-inline"><input type="radio" name="repair_action" value="enviar_proveedor"> Enviar a proveedor</label>
               </div>
-              <div id="disc_opts_{{ r.id }}" style="display:none; margin-top:6px;">
+              <div class="js-disc-opts" style="display:none; margin-top:6px;">
                 <select name="scrap_reason">
                   <option value="">Motivo...</option>
                   <option value="Irreparable">Irreparable</option>
@@ -55,7 +68,7 @@
                   <option value="Otro">Otro</option>
                 </select>
               </div>
-              <div id="prov_opts_{{ r.id }}" style="display:none; margin-top:6px;">
+              <div class="js-prov-opts" style="display:none; margin-top:6px;">
                 <select name="supplier_id">
                   <option value="">Proveedor...</option>
                   {% for s in suppliers %}
@@ -65,48 +78,49 @@
               </div>
               {# Serial que sale de la mesa. Vale para las tres acciones
                  (reparado, descartado, enviar a proveedor): las tres sacan la
-                 unidad de 'En reparación'. `repairs` no guarda cuál unidad es,
-                 así que se elige acá entre las que están físicamente en la mesa. #}
+                 unidad de 'En reparación'. Si la reparación ya sabe qué unidad
+                 es (repair_units) y sigue en la mesa, sale esa y no hay nada
+                 que elegir. Si no (reparaciones anteriores, o la unidad se movió
+                 a mano), se elige entre las que están físicamente en la mesa. #}
               {% if r.item.serialized %}
+              {% set _rs = repair_serials.get(r.id, {}) %}
               {% set _uns = repair_units.get(r.id, []) %}
+              {% if _rs.get("en_mesa") %}
               <div class="field" style="margin-top:6px;">
                 <label>¿Qué serial?</label>
-                {% if _uns|length == 0 %}
-                  <span class="muted" style="font-weight:400;">No hay seriales de este ítem en la mesa: se mueve por cantidad.</span>
-                {% elif _uns|length <= r.quantity %}
-                  <span class="muted" style="font-weight:400;">Se usa automáticamente: {{ _uns|map(attribute='serial')|join(', ') }}</span>
-                {% else %}
-                  <div class="check-inline" style="gap:12px; flex-wrap:wrap;">
-                    {% for u in _uns %}
-                      <label class="check-inline"><input type="checkbox" name="unit_id" value="{{ u.id }}" data-confirm-skip> {{ u.serial }}</label>
-                    {% endfor %}
-                  </div>
-                  <span class="muted" style="font-weight:400;">Elegí exactamente {{ r.quantity }}.</span>
-                {% endif %}
+                <span class="muted" style="font-weight:400;">Sale el de esta reparación: {{ _rs.orig|join(', ') }}</span>
               </div>
+              {% elif _uns|length == 0 %}
+              <div class="field" style="margin-top:6px;">
+                <label>¿Qué serial?</label>
+                <span class="muted" style="font-weight:400;">No hay seriales de este ítem en la mesa: se mueve por cantidad.</span>
+              </div>
+              {% else %}
+              {#- Mismo selector que Egresos (popup «Elegir S/N»,
+                  static/js/serial_picker.js). Viaja como "unit_id". -#}
+              {% set _pairs = [] %}{% for u in _uns %}{% set _ = _pairs.append([u.id, u.serial]) %}{% endfor %}
+              <div class="field js-sn-picker" style="margin-top:6px;"
+                   data-units='{{ _pairs|tojson }}' data-qty="{{ r.quantity }}"
+                   data-mode="exact" data-name="unit_id" data-origin="la mesa de reparación">
+                <label>¿Qué serial?</label>
+                {% if _rs.get("orig") %}
+                  <span class="muted" style="font-weight:400; display:block;">El serial de esta reparación ({{ _rs.orig|join(', ') }}) ya no está en la mesa: elegí cuál sale.</span>
+                {% endif %}
+                <div class="serial-pick-list"></div>
+    <span class="muted serial-pick-status" style="font-weight:400; font-size:13px;"></span>
+                <input type="text" class="serial-summary" name="serials_txt" readonly tabindex="-1"
+                       style="border:0; background:transparent; padding:0; height:auto; font-size:13px; color:var(--text-secondary,#666);">
+              </div>
+              {% endif %}
               {% endif %}
               <input type="text" name="observation" placeholder="Observación (opcional)" style="margin-top:6px;">
               <div style="margin-top:6px;"><button class="btn btn-primary btn-sm">Confirmar</button></div>
-              <script>
-              (function(){
-                var form = document.currentScript.closest("form");
-                var disc = document.getElementById("disc_opts_{{ r.id }}");
-                var prov = document.getElementById("prov_opts_{{ r.id }}");
-                form.querySelectorAll("input[name=repair_action]").forEach(function(x){
-                  x.addEventListener("change", function(){
-                    var v = form.querySelector("input[name=repair_action]:checked").value;
-                    disc.style.display = (v === "descartado") ? "block" : "none";
-                    prov.style.display = (v === "enviar_proveedor") ? "block" : "none";
-                  });
-                });
-              })();
-              </script>
             </form>
             {% endif %}
           </td>
         </tr>
         {% else %}
-        <tr><td colspan="6" class="muted">Nada en reparación.</td></tr>
+        <tr><td colspan="7" class="muted">Nada en reparación.</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -119,7 +133,7 @@
     <table class="data-table">
       <thead>
         <tr>
-          <th>Enviado</th><th>ID Item</th><th>Nombre item</th><th>Cant.</th><th>Acción</th>
+          <th>Enviado</th><th>ID Item</th><th>Nombre item</th><th>Serial</th><th>Cant.</th><th>Acción</th>
         </tr>
       </thead>
       <tbody>
@@ -128,6 +142,7 @@
           <td>{{ r.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
           <td>{{ r.item.code }}</td>
           <td>{{ r.item.name }}</td>
+          <td>{{ serials_cell(r) }}</td>
           <td>{{ fmt_qty(r.quantity, r.item) }}</td>
           <td class="actions-cell">
             {% if me.role == "LECTOR" %}
@@ -135,7 +150,7 @@
             {% else %}
             <form method="post" class="pending-action"
                   data-confirm-move="Confirmar reparación en proveedor"
-                  data-confirm-context="{{ r.item.code }} - {{ r.item.name }} · {{ fmt_qty(r.quantity, r.item) }} · genera ingreso + remito">
+                  data-confirm-context="{{ r.item.code }} - {{ r.item.name }} · {{ fmt_qty(r.quantity, r.item) }}{% if repair_serials.get(r.id, {}).get('orig') %} · S/N enviado: {{ repair_serials[r.id].orig|join(', ') }}{% endif %} · genera ingreso + remito">
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <input type="hidden" name="repair_id" value="{{ r.id }}">
               <input type="hidden" name="repair_action" value="reparado_proveedor">
@@ -148,6 +163,26 @@
               {# La unidad salió del sistema al mandarla al proveedor: al volver
                  se carga su serial y se reactiva la MISMA unidad, no una nueva. #}
               {% if r.item.serialized %}
+              {% set _rs = repair_serials.get(r.id, {}) %}
+              {% if _rs.get("orig") %}
+              {# La reparación sabe qué unidad se mandó: vuelve esa, sin tipear.
+                 Si el proveedor devolvió otra (garantía), se carga el serial
+                 nuevo y la original queda afuera del sistema. #}
+              <div class="field" style="margin-top:6px;">
+                <label>¿Qué serial vuelve?</label>
+                <div class="check-inline" style="gap:14px; flex-wrap:wrap;">
+                  <label class="check-inline"><input type="radio" name="return_mode" value="same" checked> El mismo: {{ _rs.orig|join(', ') }}</label>
+                  <label class="check-inline"><input type="radio" name="return_mode" value="other"> Vuelve otro serial (reemplazo)</label>
+                </div>
+              </div>
+              <div class="field js-ret-other" style="margin-top:6px; display:none;">
+                <label>N° de serie que vuelve</label>
+                {% for _i in range(r.quantity) %}
+                  <input type="text" name="unit_serial" placeholder="N° de serie" style="margin-top:4px;" disabled>
+                {% endfor %}
+                <span class="muted" style="font-weight:400;">El que se mandó ({{ _rs.orig|join(', ') }}) queda como entregado al proveedor.</span>
+              </div>
+              {% else %}
               <div class="field" style="margin-top:6px;">
                 <label>N° de serie que vuelve</label>
                 {% for _i in range(r.quantity) %}
@@ -156,6 +191,7 @@
                 <span class="muted" style="font-weight:400;">El mismo que se envió: se reactiva esa unidad.</span>
               </div>
               {% endif %}
+              {% endif %}
               <input type="text" name="observation" placeholder="Observación (opcional)" style="margin-top:6px;">
               <div style="margin-top:6px;"><button class="btn btn-primary btn-sm">Marcar reparada (ingreso + remito)</button></div>
             </form>
@@ -163,7 +199,7 @@
           </td>
         </tr>
         {% else %}
-        <tr><td colspan="5" class="muted">Nada en proveedor.</td></tr>
+        <tr><td colspan="6" class="muted">Nada en proveedor.</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -224,7 +260,7 @@
         <tr>
           <th><a href="{{ url_for('reparaciones', from_date=from_date, to_date=to_date, status=status_filter, item_id=item_filter, limit=limit, sort_by='date', sort_dir='asc' if selected_sort_by == 'date' and selected_sort_dir == 'desc' else 'desc') }}">Resuelto{% if selected_sort_by == 'date' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
           <th><a href="{{ url_for('reparaciones', from_date=from_date, to_date=to_date, status=status_filter, item_id=item_filter, limit=limit, sort_by='item', sort_dir='desc' if selected_sort_by == 'item' and selected_sort_dir == 'asc' else 'asc') }}">ID Item{% if selected_sort_by == 'item' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
-          <th>Nombre item</th><th>Cant.</th>
+          <th>Nombre item</th><th>Serial</th><th>Cant.</th>
           <th><a href="{{ url_for('reparaciones', from_date=from_date, to_date=to_date, status=status_filter, item_id=item_filter, limit=limit, sort_by='status', sort_dir='desc' if selected_sort_by == 'status' and selected_sort_dir == 'asc' else 'asc') }}">Resultado{% if selected_sort_by == 'status' %} <span class="sort-ind">{{ '▲' if selected_sort_dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
           <th>Motivo</th><th>Usuario</th>
         </tr>
@@ -235,6 +271,7 @@
           <td>{{ r.resolved_at.strftime("%Y-%m-%d %H:%M") if r.resolved_at else "—" }}</td>
           <td>{{ r.item.code }}</td>
           <td>{{ r.item.name }}</td>
+          <td>{{ serials_cell(r) }}</td>
           <td>{{ fmt_qty(r.quantity, r.item) }}</td>
           <td>
             {% if r.status == "REPARADO" %}<span class="badge badge-ok">Reparado</span>
@@ -244,11 +281,12 @@
           <td>{{ r.resolved_by.username if r.resolved_by else "" }}</td>
         </tr>
         {% else %}
-        <tr><td colspan="7" class="muted">Sin historial.</td></tr>
+        <tr><td colspan="8" class="muted">Sin historial.</td></tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
   {{ pagination(page_obj, "registro", "registros") }}
 </div>
+<script src="{{ url_for('static', filename='js/reparaciones.js') }}"></script>
 {% endblock %}

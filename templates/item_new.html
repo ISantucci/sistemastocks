@@ -2,7 +2,7 @@
 {% block content %}
   <h2>Nuevo item</h2>
 
-  <form method="post">
+  <form method="post" data-draft="item-nuevo">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div>
       <label>Categoría</label><br />

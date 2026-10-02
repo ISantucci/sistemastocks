@@ -170,7 +170,11 @@
     });
     var stack = document.querySelector(".flash-stack");
     if (stack && !stack.children.length) stack.remove();
-    if (textos.length) showFormError(textos.join(" \u00b7 "));
+    if (textos.length) {
+      // form_draft.js lo mira para saber si tiene que reponer lo cargado.
+      window.TNG_SERVER_ERRORS = textos;
+      showFormError(textos.join(" \u00b7 "));
+    }
   }
 
   document.addEventListener("submit", onSubmit);
