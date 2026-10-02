@@ -1896,7 +1896,8 @@ class RepairRequest(db.Model):
     number = db.Column(db.String(32), unique=True, nullable=False)  # SR-2026-0001
 
     # PENDIENTE (recién creada) / CERRADA (entregada completa) /
-    # CERRADA_PARCIAL (se entregó ALGO pero menos de lo pedido) /
+    # CERRADA_PARCIAL (se entregó ALGO pero alguna línea recibió menos de lo
+    # pedido; entregar MÁS de lo pedido en una línea no la hace parcial) /
     # CANCELADA (el técnico dio de baja su propia solicitud) /
     # RECHAZADA (admin/supervisor la rechaza, no se entrega nada).
     # CANCELADA y RECHAZADA son estados terminales SIN efecto sobre stock,
@@ -10238,9 +10239,8 @@ def repair_request_close(rr_id: int):
         if item.serialized:
             raw = request.form.getlist(f"unit_ids_{ln.id}")
             unit_ids = [int(x) for x in raw if x.isdigit()]
-            if len(unit_ids) > ln.qty:
-                flash(f"«{item.code} - {item.name}»: elegiste más seriales que lo pedido ({ln.qty}).", "error")
-                return redirect(url_for("repair_request_detail", rr_id=rr.id))
+            # Se pueden entregar MÁS seriales que los pedidos (2026-10-02): el
+            # tope real es que cada uno esté disponible en la Jaula (abajo).
             units = []
             for uid in unit_ids:
                 if uid in seen_units:
@@ -10258,8 +10258,10 @@ def repair_request_close(rr_id: int):
         else:
             raw = (request.form.get(f"qty_entregada_{ln.id}", "") or "").strip()
             delivered = int(raw) if raw.isdigit() else 0
-            if delivered < 0 or delivered > ln.qty:
-                flash(f"«{item.code} - {item.name}»: cantidad a entregar inválida (0 a {ln.qty}).", "error")
+            # Se puede entregar menos o MÁS de lo pedido (2026-10-02). El tope
+            # es el stock real de la Jaula, que se valida justo abajo.
+            if delivered < 0:
+                flash(f"«{item.code} - {item.name}»: cantidad a entregar inválida.", "error")
                 return redirect(url_for("repair_request_detail", rr_id=rr.id))
             st = Stock.query.filter_by(item_id=item.id, location_id=jaula.id).first()
             avail = st.quantity if st else 0
@@ -10327,7 +10329,9 @@ def repair_request_close(rr_id: int):
         for p in plan:
             item = p["item"]
             d = p["delivered"]
-            if d != p["line"].qty:
+            # Completa = cada línea recibió lo pedido o más. Si alguna quedó
+            # corta es parcial, aunque otra haya recibido de más.
+            if d < p["line"].qty:
                 full = False
             if d > 0:
                 upsert_stock(item.id, jaula.id, -d)

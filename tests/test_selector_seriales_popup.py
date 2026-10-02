@@ -166,7 +166,9 @@ def test_entrega_de_repuestos_usa_el_popup_hasta_n(A, esc):
     html = _admin(A).get(f"/solicitudes-repuestos/{rr.id}").get_data(as_text=True)
     (p,) = _pickers(html)
     ln = rr.lines[0]
-    assert p["data-mode"] == "max" and p["data-qty"] == "1"
+    # "hasta N" con N = seriales disponibles en la Jaula (2), no lo pedido (1):
+    # desde 2026-10-02 se puede entregar de más (test_repuestos_entregar_de_mas).
+    assert p["data-mode"] == "max" and p["data-qty"] == "2"
     assert p["data-name"] == f"unit_ids_{ln.id}" and p["data-line"] == str(ln.id)
     assert sorted(s for _, s in json.loads(p["data-units"])) == ["SN-J1", "SN-J2"]
     assert f'type="checkbox" name="unit_ids_{ln.id}"' not in html

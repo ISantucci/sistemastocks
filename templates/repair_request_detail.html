@@ -118,7 +118,7 @@
   <div class="card-header"><span class="card-title">Cerrar y entregar</span></div>
   <p class="muted">
     Elegí qué entregás de cada repuesto. Para los serializados marcá los seriales; para el resto poné la cantidad.
-    Podés entregar menos de lo pedido (cierre parcial). Se genera el movimiento Jaula → {{ rr.dest_location.name if rr.dest_location else "camioneta" }}.
+    Podés entregar menos de lo pedido (cierre parcial) o más, hasta lo que haya en la Jaula. Se genera el movimiento Jaula → {{ rr.dest_location.name if rr.dest_location else "camioneta" }}.
     Si no vas a entregar <b>nada</b>, no cierres con 0: usá «Rechazar solicitud» más abajo.
   </p>
   <form method="post" action="{{ url_for('repair_request_close', rr_id=rr.id) }}"
@@ -138,11 +138,12 @@
         {% set units = jaula_units.get(ln.item.id, []) %}
         {% if units %}
           {#- Mismo selector que Egresos (popup «Elegir S/N»,
-              static/js/serial_picker.js). Acá es "hasta N": se puede entregar
-              menos de lo pedido. Lo elegido viaja como unit_ids_<línea>, igual
+              static/js/serial_picker.js). Acá es "hasta N", con N = seriales
+              disponibles en la Jaula: se puede entregar menos o más de lo
+              pedido (2026-10-02). Lo elegido viaja como unit_ids_<línea>, igual
               que las casillas de antes. -#}
           <div class="field js-sn-picker" style="margin-top:8px;"
-               data-units='{{ units|tojson }}' data-qty="{{ ln.qty }}" data-mode="max"
+               data-units='{{ units|tojson }}' data-qty="{{ units|length }}" data-mode="max"
                data-name="unit_ids_{{ ln.id }}" data-line="{{ ln.id }}" data-origin="Jaula">
             <label>Seriales a entregar</label>
             <div class="serial-pick-list"></div>
@@ -155,10 +156,12 @@
         {% endif %}
       {% else %}
         {% set avail = jaula_stock.get(ln.item.id, 0) %}
+        {#- Precarga: lo pedido (o lo que haya, si es menos), como siempre.
+            Tope: todo lo que hay en la Jaula, para poder entregar de más. -#}
         {% set maxd = ln.qty if ln.qty < avail else avail %}
         <div class="field" style="max-width:220px; margin-top:8px;">
           <label>Cantidad a entregar {% if ln.item.unit == "metros" %}<span class="muted" style="font-weight:400;">(en metros)</span>{% endif %} <span class="muted">(en Jaula: {{ fmt_qty(avail, ln.item) }})</span></label>
-          <input type="number" name="qty_entregada_{{ ln.id }}" min="0" max="{{ maxd }}" value="{{ maxd }}"
+          <input type="number" name="qty_entregada_{{ ln.id }}" min="0" max="{{ avail }}" value="{{ maxd }}"
                  class="rr-qty" data-line="{{ ln.id }}">
         </div>
       {% endif %}
